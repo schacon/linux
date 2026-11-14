@@ -1,38 +1,94 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ALSA SoC driver for
  *    Asahi Kasei AK5386 Single-ended 24-Bit 192kHz delta-sigma ADC
  *
  * (c) 2013 Daniel Mack <zonque@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
+#include <linux/device.h>
+#include <linux/dev_printk.h>
+#include <linux/err.h>
+#include <linux/gpio/consumer.h>
 #include <linux/module.h>
+#include <linux/regulator/consumer.h>
 #include <linux/slab.h>
-#include <linux/of.h>
-#include <linux/of_gpio.h>
-#include <linux/of_device.h>
 #include <sound/soc.h>
 #include <sound/pcm.h>
 #include <sound/initval.h>
 
-struct ak5386_priv {
-	int reset_gpio;
+static const char * const supply_names[] = {
+	"va", "vd"
 };
 
-static struct snd_soc_codec_driver soc_codec_ak5386;
+struct ak5386_priv {
+	struct gpio_desc *reset_gpio;
+	struct regulator_bulk_data supplies[ARRAY_SIZE(supply_names)];
+};
+
+static const struct snd_soc_dapm_widget ak5386_dapm_widgets[] = {
+SND_SOC_DAPM_INPUT("AINL"),
+SND_SOC_DAPM_INPUT("AINR"),
+};
+
+static const struct snd_soc_dapm_route ak5386_dapm_routes[] = {
+	{ "Capture", NULL, "AINL" },
+	{ "Capture", NULL, "AINR" },
+};
+
+static int ak5386_soc_probe(struct snd_soc_component *component)
+{
+	struct ak5386_priv *priv = snd_soc_component_get_drvdata(component);
+	return regulator_bulk_enable(ARRAY_SIZE(priv->supplies), priv->supplies);
+}
+
+static void ak5386_soc_remove(struct snd_soc_component *component)
+{
+	struct ak5386_priv *priv = snd_soc_component_get_drvdata(component);
+	regulator_bulk_disable(ARRAY_SIZE(priv->supplies), priv->supplies);
+}
+
+#ifdef CONFIG_PM
+static int ak5386_soc_suspend(struct snd_soc_component *component)
+{
+	struct ak5386_priv *priv = snd_soc_component_get_drvdata(component);
+	regulator_bulk_disable(ARRAY_SIZE(priv->supplies), priv->supplies);
+	return 0;
+}
+
+static int ak5386_soc_resume(struct snd_soc_component *component)
+{
+	struct ak5386_priv *priv = snd_soc_component_get_drvdata(component);
+	return regulator_bulk_enable(ARRAY_SIZE(priv->supplies), priv->supplies);
+}
+#else
+#define ak5386_soc_suspend	NULL
+#define ak5386_soc_resume	NULL
+#endif /* CONFIG_PM */
+
+static const struct snd_soc_component_driver soc_component_ak5386 = {
+	.probe			= ak5386_soc_probe,
+	.remove			= ak5386_soc_remove,
+	.suspend		= ak5386_soc_suspend,
+	.resume			= ak5386_soc_resume,
+	.dapm_widgets		= ak5386_dapm_widgets,
+	.num_dapm_widgets	= ARRAY_SIZE(ak5386_dapm_widgets),
+	.dapm_routes		= ak5386_dapm_routes,
+	.num_dapm_routes	= ARRAY_SIZE(ak5386_dapm_routes),
+	.idle_bias_on		= 1,
+	.use_pmdown_time	= 1,
+	.endianness		= 1,
+};
 
 static int ak5386_set_dai_fmt(struct snd_soc_dai *codec_dai,
 			      unsigned int format)
 {
-	struct snd_soc_codec *codec = codec_dai->codec;
+	struct snd_soc_component *component = codec_dai->component;
 
 	format &= SND_SOC_DAIFMT_FORMAT_MASK;
 	if (format != SND_SOC_DAIFMT_LEFT_J &&
 	    format != SND_SOC_DAIFMT_I2S) {
-		dev_err(codec->dev, "Invalid DAI format\n");
+		dev_err(component->dev, "Invalid DAI format\n");
 		return -EINVAL;
 	}
 
@@ -43,8 +99,8 @@ static int ak5386_hw_params(struct snd_pcm_substream *substream,
 			    struct snd_pcm_hw_params *params,
 			    struct snd_soc_dai *dai)
 {
-	struct snd_soc_codec *codec = dai->codec;
-	struct ak5386_priv *priv = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = dai->component;
+	struct ak5386_priv *priv = snd_soc_component_get_drvdata(component);
 
 	/*
 	 * From the datasheet:
@@ -56,8 +112,7 @@ static int ak5386_hw_params(struct snd_pcm_substream *substream,
 	 * the AK5386 in power-down mode (PDN pin = “L”).
 	 */
 
-	if (gpio_is_valid(priv->reset_gpio))
-		gpio_set_value(priv->reset_gpio, 1);
+	gpiod_set_value(priv->reset_gpio, 1);
 
 	return 0;
 }
@@ -65,19 +120,24 @@ static int ak5386_hw_params(struct snd_pcm_substream *substream,
 static int ak5386_hw_free(struct snd_pcm_substream *substream,
 			  struct snd_soc_dai *dai)
 {
-	struct snd_soc_codec *codec = dai->codec;
-	struct ak5386_priv *priv = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = dai->component;
+	struct ak5386_priv *priv = snd_soc_component_get_drvdata(component);
 
-	if (gpio_is_valid(priv->reset_gpio))
-		gpio_set_value(priv->reset_gpio, 0);
+	gpiod_set_value(priv->reset_gpio, 0);
 
 	return 0;
 }
+
+static const u64 ak5386_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
 
 static const struct snd_soc_dai_ops ak5386_dai_ops = {
 	.set_fmt	= ak5386_set_dai_fmt,
 	.hw_params	= ak5386_hw_params,
 	.hw_free	= ak5386_hw_free,
+	.auto_selectable_formats	= &ak5386_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver ak5386_dai = {
@@ -107,40 +167,37 @@ static int ak5386_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct ak5386_priv *priv;
+	int ret, i;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
-	priv->reset_gpio = -EINVAL;
 	dev_set_drvdata(dev, priv);
 
-	if (of_match_device(of_match_ptr(ak5386_dt_ids), dev))
-		priv->reset_gpio = of_get_named_gpio(dev->of_node,
-						      "reset-gpio", 0);
+	for (i = 0; i < ARRAY_SIZE(supply_names); i++)
+		priv->supplies[i].supply = supply_names[i];
 
-	if (gpio_is_valid(priv->reset_gpio))
-		if (devm_gpio_request_one(dev, priv->reset_gpio,
-					  GPIOF_OUT_INIT_LOW,
-					  "AK5386 Reset"))
-			priv->reset_gpio = -EINVAL;
+	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(priv->supplies),
+				      priv->supplies);
+	if (ret < 0)
+		return ret;
 
-	return snd_soc_register_codec(dev, &soc_codec_ak5386,
+	priv->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
+	if (IS_ERR(priv->reset_gpio))
+		return dev_err_probe(dev, PTR_ERR(priv->reset_gpio),
+				     "Failed to get AK5386 reset GPIO\n");
+
+	gpiod_set_consumer_name(priv->reset_gpio, "AK5386 Reset");
+
+	return devm_snd_soc_register_component(dev, &soc_component_ak5386,
 				      &ak5386_dai, 1);
-}
-
-static int ak5386_remove(struct platform_device *pdev)
-{
-	snd_soc_unregister_codec(&pdev->dev);
-	return 0;
 }
 
 static struct platform_driver ak5386_driver = {
 	.probe		= ak5386_probe,
-	.remove		= ak5386_remove,
 	.driver		= {
 		.name	= "ak5386",
-		.owner	= THIS_MODULE,
 		.of_match_table = of_match_ptr(ak5386_dt_ids),
 	},
 };

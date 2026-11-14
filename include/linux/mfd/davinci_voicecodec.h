@@ -1,33 +1,23 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * DaVinci Voice Codec Core Interface for TI platforms
  *
  * Copyright (C) 2010 Texas Instruments, Inc
  *
  * Author: Miguel Aguilar <miguel.aguilar@ridgerun.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #ifndef __LINUX_MFD_DAVINCI_VOICECODEC_H_
-#define __LINUX_MFD_DAVINIC_VOICECODEC_H_
+#define __LINUX_MFD_DAVINCI_VOICECODEC_H_
 
-#include <linux/kernel.h>
-#include <linux/platform_device.h>
+#include <linux/bits.h>
 #include <linux/mfd/core.h>
+#include <linux/types.h>
 
-#include <mach/edma.h>
+struct clk;
+struct device;
+struct platform_device;
+struct regmap;
 
 /*
  * Register values.
@@ -96,14 +86,6 @@ struct davinci_vcif {
 	dma_addr_t dma_rx_addr;
 };
 
-struct cq93vc {
-	struct platform_device *pdev;
-	struct snd_soc_codec *codec;
-	u32 sysclk;
-};
-
-struct davinci_vc;
-
 struct davinci_vc {
 	/* Device data */
 	struct device *dev;
@@ -112,15 +94,13 @@ struct davinci_vc {
 
 	/* Memory resources */
 	void __iomem *base;
-	resource_size_t pbase;
-	size_t base_size;
+	struct regmap *regmap;
 
 	/* MFD cells */
 	struct mfd_cell cells[DAVINCI_VC_CELLS];
 
 	/* Client devices */
 	struct davinci_vcif davinci_vcif;
-	struct cq93vc cq93vc;
 };
 
 #endif

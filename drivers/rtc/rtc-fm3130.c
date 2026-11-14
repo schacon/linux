@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * rtc-fm3130.c - RTC driver for Ramtron FM3130 I2C chip.
  *
  *  Copyright (C) 2008 Sergey Lapin
  *  Based on ds1307 driver by James Chapman and David Brownell
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -47,7 +44,7 @@
 
 struct fm3130 {
 	u8			reg_addr_time;
-	u8 			reg_addr_alarm;
+	u8			reg_addr_alarm;
 	u8			regs[15];
 	struct i2c_msg		msg[4];
 	struct i2c_client	*client;
@@ -56,7 +53,7 @@ struct fm3130 {
 	int			data_valid;
 };
 static const struct i2c_device_id fm3130_id[] = {
-	{ "fm3130", 0 },
+	{ .name = "fm3130" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, fm3130_id);
@@ -107,8 +104,7 @@ static int fm3130_get_time(struct device *dev, struct rtc_time *t)
 	fm3130_rtc_mode(dev, FM3130_MODE_READ);
 
 	/* read the RTC date and time registers all at once */
-	tmp = i2c_transfer(to_i2c_adapter(fm3130->client->dev.parent),
-			fm3130->msg, 2);
+	tmp = i2c_transfer(fm3130->client->adapter, fm3130->msg, 2);
 	if (tmp != 2) {
 		dev_err(dev, "%s error %d\n", "read", tmp);
 		return -EIO;
@@ -136,8 +132,7 @@ static int fm3130_get_time(struct device *dev, struct rtc_time *t)
 		t->tm_hour, t->tm_mday,
 		t->tm_mon, t->tm_year, t->tm_wday);
 
-	/* initial clock setting can be undefined */
-	return rtc_valid_tm(t);
+	return 0;
 }
 
 
@@ -201,8 +196,7 @@ static int fm3130_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 	}
 
 	/* read the RTC alarm registers all at once */
-	tmp = i2c_transfer(to_i2c_adapter(fm3130->client->dev.parent),
-			&fm3130->msg[2], 2);
+	tmp = i2c_transfer(fm3130->client->adapter, &fm3130->msg[2], 2);
 	if (tmp != 2) {
 		dev_err(dev, "%s error %d\n", "read", tmp);
 		return -EIO;
@@ -346,19 +340,18 @@ static const struct rtc_class_ops fm3130_rtc_ops = {
 
 static struct i2c_driver fm3130_driver;
 
-static int fm3130_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int fm3130_probe(struct i2c_client *client)
 {
 	struct fm3130		*fm3130;
 	int			err = -ENODEV;
 	int			tmp;
-	struct i2c_adapter	*adapter = to_i2c_adapter(client->dev.parent);
+	struct i2c_adapter	*adapter = client->adapter;
 
 	if (!i2c_check_functionality(adapter,
 			I2C_FUNC_I2C | I2C_FUNC_SMBUS_WRITE_BYTE_DATA))
 		return -EIO;
 
-	fm3130 = devm_kzalloc(&client->dev, sizeof(struct fm3130), GFP_KERNEL);
+	fm3130 = devm_kzalloc_obj(&client->dev, struct fm3130);
 
 	if (!fm3130)
 		return -ENOMEM;
@@ -520,18 +513,11 @@ exit_free:
 	return err;
 }
 
-static int fm3130_remove(struct i2c_client *client)
-{
-	return 0;
-}
-
 static struct i2c_driver fm3130_driver = {
 	.driver = {
 		.name	= "rtc-fm3130",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= fm3130_probe,
-	.remove		= fm3130_remove,
 	.id_table	= fm3130_id,
 };
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Compaq Hot Plug Controller Driver
  *
@@ -7,27 +8,15 @@
  *
  * All rights reserved.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or (at
- * your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- * NON INFRINGEMENT.  See the GNU General Public License for more
- * details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  * Send feedback to <greg@kroah.com>
  *
  */
 
+#define pr_fmt(fmt) "cpqphp: " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/printk.h>
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
@@ -81,13 +70,17 @@ static void __iomem *detect_HRT_floating_pointer(void __iomem *begin, void __iom
 }
 
 
-int cpqhp_configure_device (struct controller* ctrl, struct pci_func* func)
+int cpqhp_configure_device(struct controller *ctrl, struct pci_func *func)
 {
 	struct pci_bus *child;
 	int num;
 
+	pci_lock_rescan_remove();
+
 	if (func->pci_dev == NULL)
-		func->pci_dev = pci_get_bus_and_slot(func->bus,PCI_DEVFN(func->device, func->function));
+		func->pci_dev = pci_get_domain_bus_and_slot(0, func->bus,
+							PCI_DEVFN(func->device,
+							func->function));
 
 	/* No pci device, we need to create it then */
 	if (func->pci_dev == NULL) {
@@ -97,10 +90,12 @@ int cpqhp_configure_device (struct controller* ctrl, struct pci_func* func)
 		if (num)
 			pci_bus_add_devices(ctrl->pci_dev->bus);
 
-		func->pci_dev = pci_get_bus_and_slot(func->bus, PCI_DEVFN(func->device, func->function));
+		func->pci_dev = pci_get_domain_bus_and_slot(0, func->bus,
+							PCI_DEVFN(func->device,
+							func->function));
 		if (func->pci_dev == NULL) {
 			dbg("ERROR: pci_dev still null\n");
-			return 0;
+			goto out;
 		}
 	}
 
@@ -113,37 +108,32 @@ int cpqhp_configure_device (struct controller* ctrl, struct pci_func* func)
 
 	pci_dev_put(func->pci_dev);
 
+ out:
+	pci_unlock_rescan_remove();
 	return 0;
 }
 
 
-int cpqhp_unconfigure_device(struct pci_func* func)
+int cpqhp_unconfigure_device(struct pci_func *func)
 {
 	int j;
 
 	dbg("%s: bus/dev/func = %x/%x/%x\n", __func__, func->bus, func->device, func->function);
 
-	for (j=0; j<8 ; j++) {
-		struct pci_dev* temp = pci_get_bus_and_slot(func->bus, PCI_DEVFN(func->device, j));
+	pci_lock_rescan_remove();
+	for (j = 0; j < 8 ; j++) {
+		struct pci_dev *temp = pci_get_domain_bus_and_slot(0,
+							func->bus,
+							PCI_DEVFN(func->device,
+							j));
 		if (temp) {
 			pci_dev_put(temp);
 			pci_stop_and_remove_bus_device(temp);
 		}
 	}
+	pci_unlock_rescan_remove();
 	return 0;
 }
-
-static int PCI_RefinedAccessConfig(struct pci_bus *bus, unsigned int devfn, u8 offset, u32 *value)
-{
-	u32 vendID = 0;
-
-	if (pci_bus_read_config_dword (bus, devfn, PCI_VENDOR_ID, &vendID) == -1)
-		return -1;
-	if (vendID == 0xffffffff)
-		return -1;
-	return pci_bus_read_config_dword (bus, devfn, offset, value);
-}
-
 
 /*
  * cpqhp_set_irq
@@ -152,7 +142,7 @@ static int PCI_RefinedAccessConfig(struct pci_bus *bus, unsigned int devfn, u8 o
  * @dev_num: device number of PCI device
  * @slot: pointer to u8 where slot number will be returned
  */
-int cpqhp_set_irq (u8 bus_num, u8 dev_num, u8 int_pin, u8 irq_num)
+int cpqhp_set_irq(u8 bus_num, u8 dev_num, u8 int_pin, u8 irq_num)
 {
 	int rc = 0;
 
@@ -161,8 +151,8 @@ int cpqhp_set_irq (u8 bus_num, u8 dev_num, u8 int_pin, u8 irq_num)
 		struct pci_bus *fakebus;
 		u16 temp_word;
 
-		fakedev = kmalloc(sizeof(*fakedev), GFP_KERNEL);
-		fakebus = kmalloc(sizeof(*fakebus), GFP_KERNEL);
+		fakedev = kmalloc_obj(*fakedev);
+		fakebus = kmalloc_obj(*fakebus);
 		if (!fakedev || !fakebus) {
 			kfree(fakedev);
 			kfree(fakebus);
@@ -190,24 +180,29 @@ int cpqhp_set_irq (u8 bus_num, u8 dev_num, u8 int_pin, u8 irq_num)
 		/* This should only be for x86 as it sets the Edge Level
 		 * Control Register
 		 */
-		outb((u8) (temp_word & 0xFF), 0x4d0); outb((u8) ((temp_word &
-		0xFF00) >> 8), 0x4d1); rc = 0; }
+		outb((u8)(temp_word & 0xFF), 0x4d0);
+		outb((u8)((temp_word & 0xFF00) >> 8), 0x4d1);
+		rc = 0;
+	}
 
 	return rc;
 }
 
 
-static int PCI_ScanBusForNonBridge(struct controller *ctrl, u8 bus_num, u8 * dev_num)
+static int PCI_ScanBusForNonBridge(struct controller *ctrl, u8 bus_num, u8 *dev_num)
 {
 	u16 tdevice;
 	u32 work;
-	u8 tbus;
+	int ret = -1;
 
 	ctrl->pci_bus->number = bus_num;
 
 	for (tdevice = 0; tdevice < 0xFF; tdevice++) {
 		/* Scan for access first */
-		if (PCI_RefinedAccessConfig(ctrl->pci_bus, tdevice, 0x08, &work) == -1)
+		if (!pci_bus_read_dev_vendor_id(ctrl->pci_bus, tdevice, &work, 0))
+			continue;
+		ret = pci_bus_read_config_dword(ctrl->pci_bus, tdevice, PCI_CLASS_REVISION, &work);
+		if (ret)
 			continue;
 		dbg("Looking for nonbridge bus_num %d dev_num %d\n", bus_num, tdevice);
 		/* Yep we got one. Not a bridge ? */
@@ -215,23 +210,20 @@ static int PCI_ScanBusForNonBridge(struct controller *ctrl, u8 bus_num, u8 * dev
 			*dev_num = tdevice;
 			dbg("found it !\n");
 			return 0;
-		}
-	}
-	for (tdevice = 0; tdevice < 0xFF; tdevice++) {
-		/* Scan for access first */
-		if (PCI_RefinedAccessConfig(ctrl->pci_bus, tdevice, 0x08, &work) == -1)
-			continue;
-		dbg("Looking for bridge bus_num %d dev_num %d\n", bus_num, tdevice);
-		/* Yep we got one. bridge ? */
-		if ((work >> 8) == PCI_TO_PCI_BRIDGE_CLASS) {
-			pci_bus_read_config_byte (ctrl->pci_bus, PCI_DEVFN(tdevice, 0), PCI_SECONDARY_BUS, &tbus);
-			/* XXX: no recursion, wtf? */
-			dbg("Recurse on bus_num %d tdevice %d\n", tbus, tdevice);
-			return 0;
+		} else {
+			/*
+			 * XXX: Code whose debug printout indicated
+			 * recursion to buses underneath bridges might be
+			 * necessary was removed because it never did
+			 * any recursion.
+			 */
+			ret = 0;
+			pr_warn("missing feature: bridge scan recursion not implemented\n");
 		}
 	}
 
-	return -1;
+
+	return ret;
 }
 
 
@@ -251,16 +243,16 @@ static int PCI_GetBusDevHelper(struct controller *ctrl, u8 *bus_num, u8 *dev_num
 			*bus_num = tbus;
 			*dev_num = tdevice;
 			ctrl->pci_bus->number = tbus;
-			pci_bus_read_config_dword (ctrl->pci_bus, *dev_num, PCI_VENDOR_ID, &work);
-			if (!nobridge || (work == 0xffffffff))
+			pci_bus_read_config_dword(ctrl->pci_bus, *dev_num, PCI_VENDOR_ID, &work);
+			if (!nobridge || PCI_POSSIBLE_ERROR(work))
 				return 0;
 
 			dbg("bus_num %d devfn %d\n", *bus_num, *dev_num);
-			pci_bus_read_config_dword (ctrl->pci_bus, *dev_num, PCI_CLASS_REVISION, &work);
+			pci_bus_read_config_dword(ctrl->pci_bus, *dev_num, PCI_CLASS_REVISION, &work);
 			dbg("work >> 8 (%x) = BRIDGE (%x)\n", work >> 8, PCI_TO_PCI_BRIDGE_CLASS);
 
 			if ((work >> 8) == PCI_TO_PCI_BRIDGE_CLASS) {
-				pci_bus_read_config_byte (ctrl->pci_bus, *dev_num, PCI_SECONDARY_BUS, &tbus);
+				pci_bus_read_config_byte(ctrl->pci_bus, *dev_num, PCI_SECONDARY_BUS, &tbus);
 				dbg("Scan bus for Non Bridge: bus %d\n", tbus);
 				if (PCI_ScanBusForNonBridge(ctrl, tbus, dev_num) == 0) {
 					*bus_num = tbus;
@@ -274,7 +266,7 @@ static int PCI_GetBusDevHelper(struct controller *ctrl, u8 *bus_num, u8 *dev_num
 }
 
 
-int cpqhp_get_bus_dev (struct controller *ctrl, u8 * bus_num, u8 * dev_num, u8 slot)
+int cpqhp_get_bus_dev(struct controller *ctrl, u8 *bus_num, u8 *dev_num, u8 slot)
 {
 	/* plain (bridges allowed) */
 	return PCI_GetBusDevHelper(ctrl, bus_num, dev_num, slot, 0);
@@ -291,7 +283,7 @@ int cpqhp_get_bus_dev (struct controller *ctrl, u8 * bus_num, u8 * dev_num, u8 s
  *
  * Reads configuration for all slots in a PCI bus and saves info.
  *
- * Note:  For non-hot plug busses, the slot # saved is the device #
+ * Note:  For non-hot plug buses, the slot # saved is the device #
  *
  * returns 0 if success
  */
@@ -313,6 +305,7 @@ int cpqhp_save_config(struct controller *ctrl, int busnumber, int is_hot_plug)
 	int cloop = 0;
 	int stop_it;
 	int index;
+	u16 devfn;
 
 	/* Decide which slots are supported */
 
@@ -361,7 +354,7 @@ int cpqhp_save_config(struct controller *ctrl, int busnumber, int is_hot_plug)
 			return rc;
 
 		/* If multi-function device, set max_functions to 8 */
-		if (header_type & 0x80)
+		if (header_type & PCI_HEADER_TYPE_MFD)
 			max_functions = 8;
 		else
 			max_functions = 1;
@@ -370,7 +363,7 @@ int cpqhp_save_config(struct controller *ctrl, int busnumber, int is_hot_plug)
 
 		do {
 			DevError = 0;
-			if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE) {
+			if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
 				/* Recurse the subordinate bus
 				 * get the subordinate bus number
 				 */
@@ -410,10 +403,12 @@ int cpqhp_save_config(struct controller *ctrl, int busnumber, int is_hot_plug)
 			new_slot->switch_save = 0x10;
 			/* In case of unsupported board */
 			new_slot->status = DevError;
-			new_slot->pci_dev = pci_get_bus_and_slot(new_slot->bus, (new_slot->device << 3) | new_slot->function);
+			devfn = (new_slot->device << 3) | new_slot->function;
+			new_slot->pci_dev = pci_get_domain_bus_and_slot(0,
+							new_slot->bus, devfn);
 
 			for (cloop = 0; cloop < 0x20; cloop++) {
-				rc = pci_bus_read_config_dword(ctrl->pci_bus, PCI_DEVFN(device, function), cloop << 2, (u32 *) & (new_slot-> config_space [cloop]));
+				rc = pci_bus_read_config_dword(ctrl->pci_bus, PCI_DEVFN(device, function), cloop << 2, (u32 *) &(new_slot->config_space[cloop]));
 				if (rc)
 					return rc;
 			}
@@ -455,11 +450,11 @@ int cpqhp_save_config(struct controller *ctrl, int busnumber, int is_hot_plug)
  * cpqhp_save_slot_config
  *
  * Saves configuration info for all PCI devices in a given slot
- * including subordinate busses.
+ * including subordinate buses.
  *
  * returns 0 if success
  */
-int cpqhp_save_slot_config (struct controller *ctrl, struct pci_func * new_slot)
+int cpqhp_save_slot_config(struct controller *ctrl, struct pci_func *new_slot)
 {
 	long rc;
 	u8 class_code;
@@ -469,13 +464,13 @@ int cpqhp_save_slot_config (struct controller *ctrl, struct pci_func * new_slot)
 	int sub_bus;
 	int max_functions;
 	int function = 0;
-	int cloop = 0;
+	int cloop;
 	int stop_it;
 
 	ID = 0xFFFFFFFF;
 
 	ctrl->pci_bus->number = new_slot->bus;
-	pci_bus_read_config_dword (ctrl->pci_bus, PCI_DEVFN(new_slot->device, 0), PCI_VENDOR_ID, &ID);
+	pci_bus_read_config_dword(ctrl->pci_bus, PCI_DEVFN(new_slot->device, 0), PCI_VENDOR_ID, &ID);
 
 	if (ID == 0xFFFFFFFF)
 		return 2;
@@ -483,15 +478,15 @@ int cpqhp_save_slot_config (struct controller *ctrl, struct pci_func * new_slot)
 	pci_bus_read_config_byte(ctrl->pci_bus, PCI_DEVFN(new_slot->device, 0), 0x0B, &class_code);
 	pci_bus_read_config_byte(ctrl->pci_bus, PCI_DEVFN(new_slot->device, 0), PCI_HEADER_TYPE, &header_type);
 
-	if (header_type & 0x80)	/* Multi-function device */
+	if (header_type & PCI_HEADER_TYPE_MFD)
 		max_functions = 8;
 	else
 		max_functions = 1;
 
 	while (function < max_functions) {
-		if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE) {
+		if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
 			/*  Recurse the subordinate bus */
-			pci_bus_read_config_byte (ctrl->pci_bus, PCI_DEVFN(new_slot->device, function), PCI_SECONDARY_BUS, &secondary_bus);
+			pci_bus_read_config_byte(ctrl->pci_bus, PCI_DEVFN(new_slot->device, function), PCI_SECONDARY_BUS, &secondary_bus);
 
 			sub_bus = (int) secondary_bus;
 
@@ -508,7 +503,7 @@ int cpqhp_save_slot_config (struct controller *ctrl, struct pci_func * new_slot)
 		new_slot->status = 0;
 
 		for (cloop = 0; cloop < 0x20; cloop++)
-			pci_bus_read_config_dword(ctrl->pci_bus, PCI_DEVFN(new_slot->device, function), cloop << 2, (u32 *) & (new_slot-> config_space [cloop]));
+			pci_bus_read_config_dword(ctrl->pci_bus, PCI_DEVFN(new_slot->device, function), cloop << 2, (u32 *) &(new_slot->config_space[cloop]));
 
 		function++;
 
@@ -543,7 +538,7 @@ int cpqhp_save_slot_config (struct controller *ctrl, struct pci_func * new_slot)
  *
  * returns 0 if success
  */
-int cpqhp_save_base_addr_length(struct controller *ctrl, struct pci_func * func)
+int cpqhp_save_base_addr_length(struct controller *ctrl, struct pci_func *func)
 {
 	u8 cloop;
 	u8 header_type;
@@ -565,10 +560,10 @@ int cpqhp_save_base_addr_length(struct controller *ctrl, struct pci_func * func)
 		devfn = PCI_DEVFN(func->device, func->function);
 
 		/* Check for Bridge */
-		pci_bus_read_config_byte (pci_bus, devfn, PCI_HEADER_TYPE, &header_type);
+		pci_bus_read_config_byte(pci_bus, devfn, PCI_HEADER_TYPE, &header_type);
 
-		if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE) {
-			pci_bus_read_config_byte (pci_bus, devfn, PCI_SECONDARY_BUS, &secondary_bus);
+		if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
+			pci_bus_read_config_byte(pci_bus, devfn, PCI_SECONDARY_BUS, &secondary_bus);
 
 			sub_bus = (int) secondary_bus;
 
@@ -589,8 +584,8 @@ int cpqhp_save_base_addr_length(struct controller *ctrl, struct pci_func * func)
 			 */
 			for (cloop = 0x10; cloop <= 0x14; cloop += 4) {
 				temp_register = 0xFFFFFFFF;
-				pci_bus_write_config_dword (pci_bus, devfn, cloop, temp_register);
-				pci_bus_read_config_dword (pci_bus, devfn, cloop, &base);
+				pci_bus_write_config_dword(pci_bus, devfn, cloop, temp_register);
+				pci_bus_read_config_dword(pci_bus, devfn, cloop, &base);
 				/* If this register is implemented */
 				if (base) {
 					if (base & 0x01L) {
@@ -621,12 +616,12 @@ int cpqhp_save_base_addr_length(struct controller *ctrl, struct pci_func * func)
 
 			}	/* End of base register loop */
 
-		} else if ((header_type & 0x7F) == 0x00) {
+		} else if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_NORMAL) {
 			/* Figure out IO and memory base lengths */
 			for (cloop = 0x10; cloop <= 0x24; cloop += 4) {
 				temp_register = 0xFFFFFFFF;
-				pci_bus_write_config_dword (pci_bus, devfn, cloop, temp_register);
-				pci_bus_read_config_dword (pci_bus, devfn, cloop, &base);
+				pci_bus_write_config_dword(pci_bus, devfn, cloop, temp_register);
+				pci_bus_read_config_dword(pci_bus, devfn, cloop, &base);
 
 				/* If this register is implemented */
 				if (base) {
@@ -680,7 +675,7 @@ int cpqhp_save_base_addr_length(struct controller *ctrl, struct pci_func * func)
  *
  * returns 0 if success
  */
-int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
+int cpqhp_save_used_resources(struct controller *ctrl, struct pci_func *func)
 {
 	u8 cloop;
 	u8 header_type;
@@ -719,14 +714,14 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 		/* Check for Bridge */
 		pci_bus_read_config_byte(pci_bus, devfn, PCI_HEADER_TYPE, &header_type);
 
-		if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE) {
+		if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
 			/* Clear Bridge Control Register */
 			command = 0x00;
 			pci_bus_write_config_word(pci_bus, devfn, PCI_BRIDGE_CONTROL, command);
 			pci_bus_read_config_byte(pci_bus, devfn, PCI_SECONDARY_BUS, &secondary_bus);
 			pci_bus_read_config_byte(pci_bus, devfn, PCI_SUBORDINATE_BUS, &temp_byte);
 
-			bus_node = kmalloc(sizeof(*bus_node), GFP_KERNEL);
+			bus_node = kmalloc_obj(*bus_node);
 			if (!bus_node)
 				return -ENOMEM;
 
@@ -741,7 +736,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 			pci_bus_read_config_byte(pci_bus, devfn, PCI_IO_LIMIT, &b_length);
 
 			if ((b_base <= b_length) && (save_command & 0x01)) {
-				io_node = kmalloc(sizeof(*io_node), GFP_KERNEL);
+				io_node = kmalloc_obj(*io_node);
 				if (!io_node)
 					return -ENOMEM;
 
@@ -757,7 +752,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 			pci_bus_read_config_word(pci_bus, devfn, PCI_MEMORY_LIMIT, &w_length);
 
 			if ((w_base <= w_length) && (save_command & 0x02)) {
-				mem_node = kmalloc(sizeof(*mem_node), GFP_KERNEL);
+				mem_node = kmalloc_obj(*mem_node);
 				if (!mem_node)
 					return -ENOMEM;
 
@@ -773,7 +768,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 			pci_bus_read_config_word(pci_bus, devfn, PCI_PREF_MEMORY_LIMIT, &w_length);
 
 			if ((w_base <= w_length) && (save_command & 0x02)) {
-				p_mem_node = kmalloc(sizeof(*p_mem_node), GFP_KERNEL);
+				p_mem_node = kmalloc_obj(*p_mem_node);
 				if (!p_mem_node)
 					return -ENOMEM;
 
@@ -785,7 +780,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 			}
 			/* Figure out IO and memory base lengths */
 			for (cloop = 0x10; cloop <= 0x14; cloop += 4) {
-				pci_bus_read_config_dword (pci_bus, devfn, cloop, &save_base);
+				pci_bus_read_config_dword(pci_bus, devfn, cloop, &save_base);
 
 				temp_register = 0xFFFFFFFF;
 				pci_bus_write_config_dword(pci_bus, devfn, cloop, temp_register);
@@ -804,8 +799,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 						temp_register = base & 0xFFFFFFFE;
 						temp_register = (~temp_register) + 1;
 
-						io_node = kmalloc(sizeof(*io_node),
-								GFP_KERNEL);
+						io_node = kmalloc_obj(*io_node);
 						if (!io_node)
 							return -ENOMEM;
 
@@ -822,8 +816,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 						temp_register = base & 0xFFFFFFF0;
 						temp_register = (~temp_register) + 1;
 
-						p_mem_node = kmalloc(sizeof(*p_mem_node),
-								GFP_KERNEL);
+						p_mem_node = kmalloc_obj(*p_mem_node);
 						if (!p_mem_node)
 							return -ENOMEM;
 
@@ -839,8 +832,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 						temp_register = base & 0xFFFFFFF0;
 						temp_register = (~temp_register) + 1;
 
-						mem_node = kmalloc(sizeof(*mem_node),
-								GFP_KERNEL);
+						mem_node = kmalloc_obj(*mem_node);
 						if (!mem_node)
 							return -ENOMEM;
 
@@ -854,7 +846,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 				}
 			}	/* End of base register loop */
 		/* Standard header */
-		} else if ((header_type & 0x7F) == 0x00) {
+		} else if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_NORMAL) {
 			/* Figure out IO and memory base lengths */
 			for (cloop = 0x10; cloop <= 0x24; cloop += 4) {
 				pci_bus_read_config_dword(pci_bus, devfn, cloop, &save_base);
@@ -876,8 +868,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 						temp_register = base & 0xFFFFFFFE;
 						temp_register = (~temp_register) + 1;
 
-						io_node = kmalloc(sizeof(*io_node),
-								GFP_KERNEL);
+						io_node = kmalloc_obj(*io_node);
 						if (!io_node)
 							return -ENOMEM;
 
@@ -893,8 +884,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 						temp_register = base & 0xFFFFFFF0;
 						temp_register = (~temp_register) + 1;
 
-						p_mem_node = kmalloc(sizeof(*p_mem_node),
-								GFP_KERNEL);
+						p_mem_node = kmalloc_obj(*p_mem_node);
 						if (!p_mem_node)
 							return -ENOMEM;
 
@@ -910,8 +900,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
 						temp_register = base & 0xFFFFFFF0;
 						temp_register = (~temp_register) + 1;
 
-						mem_node = kmalloc(sizeof(*mem_node),
-								GFP_KERNEL);
+						mem_node = kmalloc_obj(*mem_node);
 						if (!mem_node)
 							return -ENOMEM;
 
@@ -943,7 +932,7 @@ int cpqhp_save_used_resources (struct controller *ctrl, struct pci_func * func)
  *
  * returns 0 if success
  */
-int cpqhp_configure_board(struct controller *ctrl, struct pci_func * func)
+int cpqhp_configure_board(struct controller *ctrl, struct pci_func *func)
 {
 	int cloop;
 	u8 header_type;
@@ -966,13 +955,13 @@ int cpqhp_configure_board(struct controller *ctrl, struct pci_func * func)
 		 * registers are programmed last
 		 */
 		for (cloop = 0x3C; cloop > 0; cloop -= 4)
-			pci_bus_write_config_dword (pci_bus, devfn, cloop, func->config_space[cloop >> 2]);
+			pci_bus_write_config_dword(pci_bus, devfn, cloop, func->config_space[cloop >> 2]);
 
-		pci_bus_read_config_byte (pci_bus, devfn, PCI_HEADER_TYPE, &header_type);
+		pci_bus_read_config_byte(pci_bus, devfn, PCI_HEADER_TYPE, &header_type);
 
 		/* If this is a bridge device, restore subordinate devices */
-		if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE) {
-			pci_bus_read_config_byte (pci_bus, devfn, PCI_SECONDARY_BUS, &secondary_bus);
+		if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
+			pci_bus_read_config_byte(pci_bus, devfn, PCI_SECONDARY_BUS, &secondary_bus);
 
 			sub_bus = (int) secondary_bus;
 
@@ -992,7 +981,7 @@ int cpqhp_configure_board(struct controller *ctrl, struct pci_func * func)
 			 */
 
 			for (cloop = 16; cloop < 40; cloop += 4) {
-				pci_bus_read_config_dword (pci_bus, devfn, cloop, &temp);
+				pci_bus_read_config_dword(pci_bus, devfn, cloop, &temp);
 
 				if (temp != func->config_space[cloop >> 2]) {
 					dbg("Config space compare failure!!! offset = %x\n", cloop);
@@ -1021,7 +1010,7 @@ int cpqhp_configure_board(struct controller *ctrl, struct pci_func * func)
  *
  * returns 0 if the board is the same nonzero otherwise
  */
-int cpqhp_valid_replace(struct controller *ctrl, struct pci_func * func)
+int cpqhp_valid_replace(struct controller *ctrl, struct pci_func *func)
 {
 	u8 cloop;
 	u8 header_type;
@@ -1044,7 +1033,7 @@ int cpqhp_valid_replace(struct controller *ctrl, struct pci_func * func)
 		pci_bus->number = func->bus;
 		devfn = PCI_DEVFN(func->device, func->function);
 
-		pci_bus_read_config_dword (pci_bus, devfn, PCI_VENDOR_ID, &temp_register);
+		pci_bus_read_config_dword(pci_bus, devfn, PCI_VENDOR_ID, &temp_register);
 
 		/* No adapter present */
 		if (temp_register == 0xFFFFFFFF)
@@ -1054,23 +1043,23 @@ int cpqhp_valid_replace(struct controller *ctrl, struct pci_func * func)
 			return(ADAPTER_NOT_SAME);
 
 		/* Check for same revision number and class code */
-		pci_bus_read_config_dword (pci_bus, devfn, PCI_CLASS_REVISION, &temp_register);
+		pci_bus_read_config_dword(pci_bus, devfn, PCI_CLASS_REVISION, &temp_register);
 
 		/* Adapter not the same */
 		if (temp_register != func->config_space[0x08 >> 2])
 			return(ADAPTER_NOT_SAME);
 
 		/* Check for Bridge */
-		pci_bus_read_config_byte (pci_bus, devfn, PCI_HEADER_TYPE, &header_type);
+		pci_bus_read_config_byte(pci_bus, devfn, PCI_HEADER_TYPE, &header_type);
 
-		if ((header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE) {
+		if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_BRIDGE) {
 			/* In order to continue checking, we must program the
 			 * bus registers in the bridge to respond to accesses
 			 * for its subordinate bus(es)
 			 */
 
 			temp_register = func->config_space[0x18 >> 2];
-			pci_bus_write_config_dword (pci_bus, devfn, PCI_PRIMARY_BUS, temp_register);
+			pci_bus_write_config_dword(pci_bus, devfn, PCI_PRIMARY_BUS, temp_register);
 
 			secondary_bus = (temp_register >> 8) & 0xFF;
 
@@ -1086,9 +1075,9 @@ int cpqhp_valid_replace(struct controller *ctrl, struct pci_func * func)
 
 		}
 		/* Check to see if it is a standard config header */
-		else if ((header_type & 0x7F) == PCI_HEADER_TYPE_NORMAL) {
+		else if ((header_type & PCI_HEADER_TYPE_MASK) == PCI_HEADER_TYPE_NORMAL) {
 			/* Check subsystem vendor and ID */
-			pci_bus_read_config_dword (pci_bus, devfn, PCI_SUBSYSTEM_VENDOR_ID, &temp_register);
+			pci_bus_read_config_dword(pci_bus, devfn, PCI_SUBSYSTEM_VENDOR_ID, &temp_register);
 
 			if (temp_register != func->config_space[0x2C >> 2]) {
 				/* If it's a SMART-2 and the register isn't
@@ -1102,8 +1091,8 @@ int cpqhp_valid_replace(struct controller *ctrl, struct pci_func * func)
 			/* Figure out IO and memory base lengths */
 			for (cloop = 0x10; cloop <= 0x24; cloop += 4) {
 				temp_register = 0xFFFFFFFF;
-				pci_bus_write_config_dword (pci_bus, devfn, cloop, temp_register);
-				pci_bus_read_config_dword (pci_bus, devfn, cloop, &base);
+				pci_bus_write_config_dword(pci_bus, devfn, cloop, temp_register);
+				pci_bus_read_config_dword(pci_bus, devfn, cloop, &base);
 
 				/* If this register is implemented */
 				if (base) {
@@ -1228,7 +1217,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 	if (rc)
 		return rc;
 
-	one_slot = rom_resource_table + sizeof (struct hrt);
+	one_slot = rom_resource_table + sizeof(struct hrt);
 
 	i = readb(rom_resource_table + NUMBER_OF_ENTRIES);
 	dbg("number_of_entries = %d\n", i);
@@ -1257,12 +1246,12 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 		/* If this entry isn't for our controller's bus, ignore it */
 		if (primary_bus != ctrl->bus) {
 			i--;
-			one_slot += sizeof (struct slot_rt);
+			one_slot += sizeof(struct slot_rt);
 			continue;
 		}
 		/* find out if this entry is for an occupied slot */
 		ctrl->pci_bus->number = primary_bus;
-		pci_bus_read_config_dword (ctrl->pci_bus, dev_func, PCI_VENDOR_ID, &temp_dword);
+		pci_bus_read_config_dword(ctrl->pci_bus, dev_func, PCI_VENDOR_ID, &temp_dword);
 		dbg("temp_D_word = %x\n", temp_dword);
 
 		if (temp_dword != 0xFFFFFFFF) {
@@ -1277,7 +1266,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 			/* If we can't find a match, skip this table entry */
 			if (!func) {
 				i--;
-				one_slot += sizeof (struct slot_rt);
+				one_slot += sizeof(struct slot_rt);
 				continue;
 			}
 			/* this may not work and shouldn't be used */
@@ -1298,7 +1287,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 		temp_dword = io_base + io_length;
 
 		if ((io_base) && (temp_dword < 0x10000)) {
-			io_node = kmalloc(sizeof(*io_node), GFP_KERNEL);
+			io_node = kmalloc_obj(*io_node);
 			if (!io_node)
 				return -ENOMEM;
 
@@ -1307,7 +1296,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 
 			dbg("found io_node(base, length) = %x, %x\n",
 					io_node->base, io_node->length);
-			dbg("populated slot =%d \n", populated_slot);
+			dbg("populated slot = %d\n", populated_slot);
 			if (!populated_slot) {
 				io_node->next = ctrl->io_head;
 				ctrl->io_head = io_node;
@@ -1320,7 +1309,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 		/* If we've got a valid memory base, use it */
 		temp_dword = mem_base + mem_length;
 		if ((mem_base) && (temp_dword < 0x10000)) {
-			mem_node = kmalloc(sizeof(*mem_node), GFP_KERNEL);
+			mem_node = kmalloc_obj(*mem_node);
 			if (!mem_node)
 				return -ENOMEM;
 
@@ -1330,7 +1319,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 
 			dbg("found mem_node(base, length) = %x, %x\n",
 					mem_node->base, mem_node->length);
-			dbg("populated slot =%d \n", populated_slot);
+			dbg("populated slot = %d\n", populated_slot);
 			if (!populated_slot) {
 				mem_node->next = ctrl->mem_head;
 				ctrl->mem_head = mem_node;
@@ -1345,7 +1334,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 		 */
 		temp_dword = pre_mem_base + pre_mem_length;
 		if ((pre_mem_base) && (temp_dword < 0x10000)) {
-			p_mem_node = kmalloc(sizeof(*p_mem_node), GFP_KERNEL);
+			p_mem_node = kmalloc_obj(*p_mem_node);
 			if (!p_mem_node)
 				return -ENOMEM;
 
@@ -1354,7 +1343,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 			p_mem_node->length = pre_mem_length << 16;
 			dbg("found p_mem_node(base, length) = %x, %x\n",
 					p_mem_node->base, p_mem_node->length);
-			dbg("populated slot =%d \n", populated_slot);
+			dbg("populated slot = %d\n", populated_slot);
 
 			if (!populated_slot) {
 				p_mem_node->next = ctrl->p_mem_head;
@@ -1370,7 +1359,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 		 * populated slots that don't have PCI-PCI bridges
 		 */
 		if (secondary_bus && (secondary_bus != primary_bus)) {
-			bus_node = kmalloc(sizeof(*bus_node), GFP_KERNEL);
+			bus_node = kmalloc_obj(*bus_node);
 			if (!bus_node)
 				return -ENOMEM;
 
@@ -1378,7 +1367,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 			bus_node->length = max_bus - secondary_bus + 1;
 			dbg("found bus_node(base, length) = %x, %x\n",
 					bus_node->base, bus_node->length);
-			dbg("populated slot =%d \n", populated_slot);
+			dbg("populated slot = %d\n", populated_slot);
 			if (!populated_slot) {
 				bus_node->next = ctrl->bus_head;
 				ctrl->bus_head = bus_node;
@@ -1389,7 +1378,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
 		}
 
 		i--;
-		one_slot += sizeof (struct slot_rt);
+		one_slot += sizeof(struct slot_rt);
 	}
 
 	/* If all of the following fail, we don't have any resources for
@@ -1413,7 +1402,7 @@ int cpqhp_find_available_resources(struct controller *ctrl, void __iomem *rom_st
  *
  * returns 0 if success
  */
-int cpqhp_return_board_resources(struct pci_func * func, struct resource_lists * resources)
+int cpqhp_return_board_resources(struct pci_func *func, struct resource_lists *resources)
 {
 	int rc = 0;
 	struct pci_resource *node;
@@ -1469,7 +1458,7 @@ int cpqhp_return_board_resources(struct pci_func * func, struct resource_lists *
  *
  * Puts node back in the resource list pointed to by head
  */
-void cpqhp_destroy_resource_list (struct resource_lists * resources)
+void cpqhp_destroy_resource_list(struct resource_lists *resources)
 {
 	struct pci_resource *res, *tres;
 
@@ -1516,7 +1505,7 @@ void cpqhp_destroy_resource_list (struct resource_lists * resources)
  *
  * Puts node back in the resource list pointed to by head
  */
-void cpqhp_destroy_board_resources (struct pci_func * func)
+void cpqhp_destroy_board_resources(struct pci_func *func)
 {
 	struct pci_resource *res, *tres;
 
@@ -1556,4 +1545,3 @@ void cpqhp_destroy_board_resources (struct pci_func * func)
 		kfree(tres);
 	}
 }
-

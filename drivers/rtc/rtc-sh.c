@@ -1,18 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * SuperH On-Chip RTC Support
  *
  * Copyright (C) 2006 - 2009  Paul Mundt
  * Copyright (C) 2006  Jamie Lenehan
  * Copyright (C) 2008  Angelo Castello
+ * Copyright (C) 2025  Wolfram Sang, Renesas Electronics Corporation
  *
  * Based on the old arch/sh/kernel/cpu/rtc.c by:
  *
  *  Copyright (C) 2000  Philipp Rumpf <prumpf@tux.org>
  *  Copyright (C) 1999  Tetsuya Okada & Niibe Yutaka
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -27,10 +25,17 @@
 #include <linux/log2.h>
 #include <linux/clk.h>
 #include <linux/slab.h>
+#ifdef CONFIG_SUPERH
 #include <asm/rtc.h>
+#else
+/* Default values for RZ/A RTC */
+#define rtc_reg_size		sizeof(u16)
+#define RTC_BIT_INVERTED        0	/* no chip bugs */
+#define RTC_CAP_4_DIGIT_YEAR    BIT(0)
+#define RTC_DEF_CAPABILITIES    RTC_CAP_4_DIGIT_YEAR
+#endif
 
 #define DRV_NAME	"sh-rtc"
-#define DRV_VERSION	"0.2.3"
 
 #define RTC_REG(r)	((r) * rtc_reg_size)
 
@@ -65,62 +70,35 @@
  */
 
 /* ALARM Bits - or with BCD encoded value */
-#define AR_ENB		0x80	/* Enable for alarm cmp   */
-
-/* Period Bits */
-#define PF_HP		0x100	/* Enable Half Period to support 8,32,128Hz */
-#define PF_COUNT	0x200	/* Half periodic counter */
-#define PF_OXS		0x400	/* Periodic One x Second */
-#define PF_KOU		0x800	/* Kernel or User periodic request 1=kernel */
-#define PF_MASK		0xf00
+#define AR_ENB		BIT(7)	/* Enable for alarm cmp   */
 
 /* RCR1 Bits */
-#define RCR1_CF		0x80	/* Carry Flag             */
-#define RCR1_CIE	0x10	/* Carry Interrupt Enable */
-#define RCR1_AIE	0x08	/* Alarm Interrupt Enable */
-#define RCR1_AF		0x01	/* Alarm Flag             */
+#define RCR1_CF		BIT(7)	/* Carry Flag             */
+#define RCR1_CIE	BIT(4)	/* Carry Interrupt Enable */
+#define RCR1_AIE	BIT(3)	/* Alarm Interrupt Enable */
+#define RCR1_AF		BIT(0)	/* Alarm Flag             */
 
 /* RCR2 Bits */
-#define RCR2_PEF	0x80	/* PEriodic interrupt Flag */
-#define RCR2_PESMASK	0x70	/* Periodic interrupt Set  */
-#define RCR2_RTCEN	0x08	/* ENable RTC              */
-#define RCR2_ADJ	0x04	/* ADJustment (30-second)  */
-#define RCR2_RESET	0x02	/* Reset bit               */
-#define RCR2_START	0x01	/* Start bit               */
+#define RCR2_RTCEN	BIT(3)	/* ENable RTC              */
+#define RCR2_ADJ	BIT(2)	/* ADJustment (30-second)  */
+#define RCR2_RESET	BIT(1)	/* Reset bit               */
+#define RCR2_START	BIT(0)	/* Start bit               */
 
 struct sh_rtc {
 	void __iomem		*regbase;
-	unsigned long		regsize;
-	struct resource		*res;
 	int			alarm_irq;
-	int			periodic_irq;
-	int			carry_irq;
 	struct clk		*clk;
 	struct rtc_device	*rtc_dev;
-	spinlock_t		lock;
+	spinlock_t		lock;		/* protecting register access */
 	unsigned long		capabilities;	/* See asm/rtc.h for cap bits */
-	unsigned short		periodic_freq;
 };
 
-static int __sh_rtc_interrupt(struct sh_rtc *rtc)
+static irqreturn_t sh_rtc_alarm(int irq, void *dev_id)
 {
+	struct sh_rtc *rtc = dev_id;
 	unsigned int tmp, pending;
 
-	tmp = readb(rtc->regbase + RCR1);
-	pending = tmp & RCR1_CF;
-	tmp &= ~RCR1_CF;
-	writeb(tmp, rtc->regbase + RCR1);
-
-	/* Users have requested One x Second IRQ */
-	if (pending && rtc->periodic_freq & PF_OXS)
-		rtc_update_irq(rtc->rtc_dev, 1, RTC_UF | RTC_IRQF);
-
-	return pending;
-}
-
-static int __sh_rtc_alarm(struct sh_rtc *rtc)
-{
-	unsigned int tmp, pending;
+	spin_lock(&rtc->lock);
 
 	tmp = readb(rtc->regbase + RCR1);
 	pending = tmp & RCR1_AF;
@@ -130,168 +108,12 @@ static int __sh_rtc_alarm(struct sh_rtc *rtc)
 	if (pending)
 		rtc_update_irq(rtc->rtc_dev, 1, RTC_AF | RTC_IRQF);
 
-	return pending;
-}
-
-static int __sh_rtc_periodic(struct sh_rtc *rtc)
-{
-	struct rtc_device *rtc_dev = rtc->rtc_dev;
-	struct rtc_task *irq_task;
-	unsigned int tmp, pending;
-
-	tmp = readb(rtc->regbase + RCR2);
-	pending = tmp & RCR2_PEF;
-	tmp &= ~RCR2_PEF;
-	writeb(tmp, rtc->regbase + RCR2);
-
-	if (!pending)
-		return 0;
-
-	/* Half period enabled than one skipped and the next notified */
-	if ((rtc->periodic_freq & PF_HP) && (rtc->periodic_freq & PF_COUNT))
-		rtc->periodic_freq &= ~PF_COUNT;
-	else {
-		if (rtc->periodic_freq & PF_HP)
-			rtc->periodic_freq |= PF_COUNT;
-		if (rtc->periodic_freq & PF_KOU) {
-			spin_lock(&rtc_dev->irq_task_lock);
-			irq_task = rtc_dev->irq_task;
-			if (irq_task)
-				irq_task->func(irq_task->private_data);
-			spin_unlock(&rtc_dev->irq_task_lock);
-		} else
-			rtc_update_irq(rtc->rtc_dev, 1, RTC_PF | RTC_IRQF);
-	}
-
-	return pending;
-}
-
-static irqreturn_t sh_rtc_interrupt(int irq, void *dev_id)
-{
-	struct sh_rtc *rtc = dev_id;
-	int ret;
-
-	spin_lock(&rtc->lock);
-	ret = __sh_rtc_interrupt(rtc);
 	spin_unlock(&rtc->lock);
 
-	return IRQ_RETVAL(ret);
+	return IRQ_RETVAL(pending);
 }
 
-static irqreturn_t sh_rtc_alarm(int irq, void *dev_id)
-{
-	struct sh_rtc *rtc = dev_id;
-	int ret;
-
-	spin_lock(&rtc->lock);
-	ret = __sh_rtc_alarm(rtc);
-	spin_unlock(&rtc->lock);
-
-	return IRQ_RETVAL(ret);
-}
-
-static irqreturn_t sh_rtc_periodic(int irq, void *dev_id)
-{
-	struct sh_rtc *rtc = dev_id;
-	int ret;
-
-	spin_lock(&rtc->lock);
-	ret = __sh_rtc_periodic(rtc);
-	spin_unlock(&rtc->lock);
-
-	return IRQ_RETVAL(ret);
-}
-
-static irqreturn_t sh_rtc_shared(int irq, void *dev_id)
-{
-	struct sh_rtc *rtc = dev_id;
-	int ret;
-
-	spin_lock(&rtc->lock);
-	ret = __sh_rtc_interrupt(rtc);
-	ret |= __sh_rtc_alarm(rtc);
-	ret |= __sh_rtc_periodic(rtc);
-	spin_unlock(&rtc->lock);
-
-	return IRQ_RETVAL(ret);
-}
-
-static int sh_rtc_irq_set_state(struct device *dev, int enable)
-{
-	struct sh_rtc *rtc = dev_get_drvdata(dev);
-	unsigned int tmp;
-
-	spin_lock_irq(&rtc->lock);
-
-	tmp = readb(rtc->regbase + RCR2);
-
-	if (enable) {
-		rtc->periodic_freq |= PF_KOU;
-		tmp &= ~RCR2_PEF;	/* Clear PES bit */
-		tmp |= (rtc->periodic_freq & ~PF_HP);	/* Set PES2-0 */
-	} else {
-		rtc->periodic_freq &= ~PF_KOU;
-		tmp &= ~(RCR2_PESMASK | RCR2_PEF);
-	}
-
-	writeb(tmp, rtc->regbase + RCR2);
-
-	spin_unlock_irq(&rtc->lock);
-
-	return 0;
-}
-
-static int sh_rtc_irq_set_freq(struct device *dev, int freq)
-{
-	struct sh_rtc *rtc = dev_get_drvdata(dev);
-	int tmp, ret = 0;
-
-	spin_lock_irq(&rtc->lock);
-	tmp = rtc->periodic_freq & PF_MASK;
-
-	switch (freq) {
-	case 0:
-		rtc->periodic_freq = 0x00;
-		break;
-	case 1:
-		rtc->periodic_freq = 0x60;
-		break;
-	case 2:
-		rtc->periodic_freq = 0x50;
-		break;
-	case 4:
-		rtc->periodic_freq = 0x40;
-		break;
-	case 8:
-		rtc->periodic_freq = 0x30 | PF_HP;
-		break;
-	case 16:
-		rtc->periodic_freq = 0x30;
-		break;
-	case 32:
-		rtc->periodic_freq = 0x20 | PF_HP;
-		break;
-	case 64:
-		rtc->periodic_freq = 0x20;
-		break;
-	case 128:
-		rtc->periodic_freq = 0x10 | PF_HP;
-		break;
-	case 256:
-		rtc->periodic_freq = 0x10;
-		break;
-	default:
-		ret = -ENOTSUPP;
-	}
-
-	if (ret == 0)
-		rtc->periodic_freq |= tmp;
-
-	spin_unlock_irq(&rtc->lock);
-	return ret;
-}
-
-static inline void sh_rtc_setaie(struct device *dev, unsigned int enable)
+static int sh_rtc_alarm_irq_enable(struct device *dev, unsigned int enable)
 {
 	struct sh_rtc *rtc = dev_get_drvdata(dev);
 	unsigned int tmp;
@@ -308,53 +130,17 @@ static inline void sh_rtc_setaie(struct device *dev, unsigned int enable)
 	writeb(tmp, rtc->regbase + RCR1);
 
 	spin_unlock_irq(&rtc->lock);
-}
 
-static int sh_rtc_proc(struct device *dev, struct seq_file *seq)
-{
-	struct sh_rtc *rtc = dev_get_drvdata(dev);
-	unsigned int tmp;
-
-	tmp = readb(rtc->regbase + RCR1);
-	seq_printf(seq, "carry_IRQ\t: %s\n", (tmp & RCR1_CIE) ? "yes" : "no");
-
-	tmp = readb(rtc->regbase + RCR2);
-	seq_printf(seq, "periodic_IRQ\t: %s\n",
-		   (tmp & RCR2_PESMASK) ? "yes" : "no");
-
-	return 0;
-}
-
-static inline void sh_rtc_setcie(struct device *dev, unsigned int enable)
-{
-	struct sh_rtc *rtc = dev_get_drvdata(dev);
-	unsigned int tmp;
-
-	spin_lock_irq(&rtc->lock);
-
-	tmp = readb(rtc->regbase + RCR1);
-
-	if (!enable)
-		tmp &= ~RCR1_CIE;
-	else
-		tmp |= RCR1_CIE;
-
-	writeb(tmp, rtc->regbase + RCR1);
-
-	spin_unlock_irq(&rtc->lock);
-}
-
-static int sh_rtc_alarm_irq_enable(struct device *dev, unsigned int enabled)
-{
-	sh_rtc_setaie(dev, enabled);
 	return 0;
 }
 
 static int sh_rtc_read_time(struct device *dev, struct rtc_time *tm)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct sh_rtc *rtc = platform_get_drvdata(pdev);
+	struct sh_rtc *rtc = dev_get_drvdata(dev);
 	unsigned int sec128, sec2, yr, yr100, cf_bit;
+
+	if (!(readb(rtc->regbase + RCR2) & RCR2_RTCEN))
+		return -EINVAL;
 
 	do {
 		unsigned int tmp;
@@ -397,23 +183,16 @@ static int sh_rtc_read_time(struct device *dev, struct rtc_time *tm)
 		tm->tm_sec--;
 #endif
 
-	/* only keep the carry interrupt enabled if UIE is on */
-	if (!(rtc->periodic_freq & PF_OXS))
-		sh_rtc_setcie(dev, 0);
-
-	dev_dbg(dev, "%s: tm is secs=%d, mins=%d, hours=%d, "
-		"mday=%d, mon=%d, year=%d, wday=%d\n",
-		__func__,
-		tm->tm_sec, tm->tm_min, tm->tm_hour,
+	dev_dbg(dev, "%s: tm is secs=%d, mins=%d, hours=%d, mday=%d, mon=%d, year=%d, wday=%d\n",
+		__func__, tm->tm_sec, tm->tm_min, tm->tm_hour,
 		tm->tm_mday, tm->tm_mon + 1, tm->tm_year, tm->tm_wday);
 
-	return rtc_valid_tm(tm);
+	return 0;
 }
 
 static int sh_rtc_set_time(struct device *dev, struct rtc_time *tm)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct sh_rtc *rtc = platform_get_drvdata(pdev);
+	struct sh_rtc *rtc = dev_get_drvdata(dev);
 	unsigned int tmp;
 	int year;
 
@@ -455,7 +234,7 @@ static int sh_rtc_set_time(struct device *dev, struct rtc_time *tm)
 static inline int sh_rtc_read_alarm_value(struct sh_rtc *rtc, int reg_off)
 {
 	unsigned int byte;
-	int value = 0xff;	/* return 0xff for ignored values */
+	int value = -1;			/* return -1 for ignored values */
 
 	byte = readb(rtc->regbase + reg_off);
 	if (byte & AR_ENB) {
@@ -468,8 +247,7 @@ static inline int sh_rtc_read_alarm_value(struct sh_rtc *rtc, int reg_off)
 
 static int sh_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct sh_rtc *rtc = platform_get_drvdata(pdev);
+	struct sh_rtc *rtc = dev_get_drvdata(dev);
 	struct rtc_time *tm = &wkalrm->time;
 
 	spin_lock_irq(&rtc->lock);
@@ -482,7 +260,6 @@ static int sh_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 	tm->tm_mon	= sh_rtc_read_alarm_value(rtc, RMONAR);
 	if (tm->tm_mon > 0)
 		tm->tm_mon -= 1; /* RTC is 1-12, tm_mon is 0-11 */
-	tm->tm_year     = 0xffff;
 
 	wkalrm->enabled = (readb(rtc->regbase + RCR1) & RCR1_AIE) ? 1 : 0;
 
@@ -501,52 +278,12 @@ static inline void sh_rtc_write_alarm_value(struct sh_rtc *rtc,
 		writeb(bin2bcd(value) | AR_ENB,  rtc->regbase + reg_off);
 }
 
-static int sh_rtc_check_alarm(struct rtc_time *tm)
-{
-	/*
-	 * The original rtc says anything > 0xc0 is "don't care" or "match
-	 * all" - most users use 0xff but rtc-dev uses -1 for the same thing.
-	 * The original rtc doesn't support years - some things use -1 and
-	 * some 0xffff. We use -1 to make out tests easier.
-	 */
-	if (tm->tm_year == 0xffff)
-		tm->tm_year = -1;
-	if (tm->tm_mon >= 0xff)
-		tm->tm_mon = -1;
-	if (tm->tm_mday >= 0xff)
-		tm->tm_mday = -1;
-	if (tm->tm_wday >= 0xff)
-		tm->tm_wday = -1;
-	if (tm->tm_hour >= 0xff)
-		tm->tm_hour = -1;
-	if (tm->tm_min >= 0xff)
-		tm->tm_min = -1;
-	if (tm->tm_sec >= 0xff)
-		tm->tm_sec = -1;
-
-	if (tm->tm_year > 9999 ||
-		tm->tm_mon >= 12 ||
-		tm->tm_mday == 0 || tm->tm_mday >= 32 ||
-		tm->tm_wday >= 7 ||
-		tm->tm_hour >= 24 ||
-		tm->tm_min >= 60 ||
-		tm->tm_sec >= 60)
-		return -EINVAL;
-
-	return 0;
-}
-
 static int sh_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct sh_rtc *rtc = platform_get_drvdata(pdev);
+	struct sh_rtc *rtc = dev_get_drvdata(dev);
 	unsigned int rcr1;
 	struct rtc_time *tm = &wkalrm->time;
-	int mon, err;
-
-	err = sh_rtc_check_alarm(tm);
-	if (unlikely(err < 0))
-		return err;
+	int mon;
 
 	spin_lock_irq(&rtc->lock);
 
@@ -576,70 +313,69 @@ static int sh_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 	return 0;
 }
 
-static struct rtc_class_ops sh_rtc_ops = {
+static const struct rtc_class_ops sh_rtc_ops = {
 	.read_time	= sh_rtc_read_time,
 	.set_time	= sh_rtc_set_time,
 	.read_alarm	= sh_rtc_read_alarm,
 	.set_alarm	= sh_rtc_set_alarm,
-	.proc		= sh_rtc_proc,
 	.alarm_irq_enable = sh_rtc_alarm_irq_enable,
 };
 
 static int __init sh_rtc_probe(struct platform_device *pdev)
 {
 	struct sh_rtc *rtc;
-	struct resource *res;
-	struct rtc_time r;
-	char clk_name[6];
+	struct resource *res, *req_res;
+	char clk_name[14];
 	int clk_id, ret;
+	unsigned int tmp;
+	resource_size_t regsize;
 
-	rtc = kzalloc(sizeof(struct sh_rtc), GFP_KERNEL);
+	rtc = devm_kzalloc_obj(&pdev->dev, *rtc);
 	if (unlikely(!rtc))
 		return -ENOMEM;
 
 	spin_lock_init(&rtc->lock);
 
-	/* get periodic/carry/alarm irqs */
 	ret = platform_get_irq(pdev, 0);
 	if (unlikely(ret <= 0)) {
-		ret = -ENOENT;
 		dev_err(&pdev->dev, "No IRQ resource\n");
-		goto err_badres;
+		return -ENOENT;
 	}
 
-	rtc->periodic_irq = ret;
-	rtc->carry_irq = platform_get_irq(pdev, 1);
-	rtc->alarm_irq = platform_get_irq(pdev, 2);
+	if (!pdev->dev.of_node)
+		rtc->alarm_irq = platform_get_irq(pdev, 2);
+	else
+		rtc->alarm_irq = ret;
 
 	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
-	if (unlikely(res == NULL)) {
-		ret = -ENOENT;
+	if (!res)
+		res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res) {
 		dev_err(&pdev->dev, "No IO resource\n");
-		goto err_badres;
+		return -ENOENT;
 	}
 
-	rtc->regsize = resource_size(res);
+	regsize = resource_size(res);
+	req_res = devm_request_mem_region(&pdev->dev, res->start, regsize, pdev->name);
+	if (!req_res)
+		return -EBUSY;
 
-	rtc->res = request_mem_region(res->start, rtc->regsize, pdev->name);
-	if (unlikely(!rtc->res)) {
-		ret = -EBUSY;
-		goto err_badres;
+	rtc->regbase = devm_ioremap(&pdev->dev, req_res->start, regsize);
+	if (!rtc->regbase)
+		return -EINVAL;
+
+	if (!pdev->dev.of_node) {
+		clk_id = pdev->id;
+		/* With a single device, the clock id is still "rtc0" */
+		if (clk_id < 0)
+			clk_id = 0;
+
+		snprintf(clk_name, sizeof(clk_name), "rtc%d", clk_id);
+	} else {
+		snprintf(clk_name, sizeof(clk_name), "fck");
 	}
 
-	rtc->regbase = ioremap_nocache(rtc->res->start, rtc->regsize);
-	if (unlikely(!rtc->regbase)) {
-		ret = -EINVAL;
-		goto err_badmap;
-	}
-
-	clk_id = pdev->id;
-	/* With a single device, the clock id is still "rtc0" */
-	if (clk_id < 0)
-		clk_id = 0;
-
-	snprintf(clk_name, sizeof(clk_name), "rtc%d", clk_id);
-
-	rtc->clk = clk_get(&pdev->dev, clk_name);
+	rtc->clk = devm_clk_get(&pdev->dev, clk_name);
 	if (IS_ERR(rtc->clk)) {
 		/*
 		 * No error handling for rtc->clk intentionally, not all
@@ -650,11 +386,18 @@ static int __init sh_rtc_probe(struct platform_device *pdev)
 		rtc->clk = NULL;
 	}
 
+	rtc->rtc_dev = devm_rtc_allocate_device(&pdev->dev);
+	if (IS_ERR(rtc->rtc_dev))
+		return PTR_ERR(rtc->rtc_dev);
+
 	clk_enable(rtc->clk);
 
 	rtc->capabilities = RTC_DEF_CAPABILITIES;
-	if (pdev->dev.platform_data) {
-		struct sh_rtc_platform_info *pinfo = pdev->dev.platform_data;
+
+#ifdef CONFIG_SUPERH
+	if (dev_get_platdata(&pdev->dev)) {
+		struct sh_rtc_platform_info *pinfo =
+			dev_get_platdata(&pdev->dev);
 
 		/*
 		 * Some CPUs have special capabilities in addition to the
@@ -662,159 +405,93 @@ static int __init sh_rtc_probe(struct platform_device *pdev)
 		 */
 		rtc->capabilities |= pinfo->capabilities;
 	}
+#endif
 
-	if (rtc->carry_irq <= 0) {
-		/* register shared periodic/carry/alarm irq */
-		ret = request_irq(rtc->periodic_irq, sh_rtc_shared,
-				  0, "sh-rtc", rtc);
-		if (unlikely(ret)) {
-			dev_err(&pdev->dev,
-				"request IRQ failed with %d, IRQ %d\n", ret,
-				rtc->periodic_irq);
-			goto err_unmap;
-		}
-	} else {
-		/* register periodic/carry/alarm irqs */
-		ret = request_irq(rtc->periodic_irq, sh_rtc_periodic,
-				  0, "sh-rtc period", rtc);
-		if (unlikely(ret)) {
-			dev_err(&pdev->dev,
-				"request period IRQ failed with %d, IRQ %d\n",
-				ret, rtc->periodic_irq);
-			goto err_unmap;
-		}
-
-		ret = request_irq(rtc->carry_irq, sh_rtc_interrupt,
-				  0, "sh-rtc carry", rtc);
-		if (unlikely(ret)) {
-			dev_err(&pdev->dev,
-				"request carry IRQ failed with %d, IRQ %d\n",
-				ret, rtc->carry_irq);
-			free_irq(rtc->periodic_irq, rtc);
-			goto err_unmap;
-		}
-
-		ret = request_irq(rtc->alarm_irq, sh_rtc_alarm,
-				  0, "sh-rtc alarm", rtc);
-		if (unlikely(ret)) {
-			dev_err(&pdev->dev,
-				"request alarm IRQ failed with %d, IRQ %d\n",
-				ret, rtc->alarm_irq);
-			free_irq(rtc->carry_irq, rtc);
-			free_irq(rtc->periodic_irq, rtc);
-			goto err_unmap;
-		}
+	ret = devm_request_irq(&pdev->dev, rtc->alarm_irq, sh_rtc_alarm, 0, "sh-rtc", rtc);
+	if (ret) {
+		dev_err(&pdev->dev, "request alarm IRQ failed with %d, IRQ %d\n",
+			ret, rtc->alarm_irq);
+		goto err_unmap;
 	}
 
 	platform_set_drvdata(pdev, rtc);
 
 	/* everything disabled by default */
-	sh_rtc_irq_set_freq(&pdev->dev, 0);
-	sh_rtc_irq_set_state(&pdev->dev, 0);
-	sh_rtc_setaie(&pdev->dev, 0);
-	sh_rtc_setcie(&pdev->dev, 0);
+	tmp = readb(rtc->regbase + RCR1);
+	tmp &= ~(RCR1_CIE | RCR1_AIE);
+	writeb(tmp, rtc->regbase + RCR1);
 
-	rtc->rtc_dev = rtc_device_register("sh", &pdev->dev,
-					   &sh_rtc_ops, THIS_MODULE);
-	if (IS_ERR(rtc->rtc_dev)) {
-		ret = PTR_ERR(rtc->rtc_dev);
-		free_irq(rtc->periodic_irq, rtc);
-		free_irq(rtc->carry_irq, rtc);
-		free_irq(rtc->alarm_irq, rtc);
+	rtc->rtc_dev->ops = &sh_rtc_ops;
+
+	if (rtc->capabilities & RTC_CAP_4_DIGIT_YEAR) {
+		rtc->rtc_dev->range_min = RTC_TIMESTAMP_BEGIN_1900;
+		rtc->rtc_dev->range_max = RTC_TIMESTAMP_END_9999;
+	} else {
+		rtc->rtc_dev->range_min = mktime64(1999, 1, 1, 0, 0, 0);
+		rtc->rtc_dev->range_max = mktime64(2098, 12, 31, 23, 59, 59);
+	}
+
+	ret = devm_rtc_register_device(rtc->rtc_dev);
+	if (ret)
 		goto err_unmap;
-	}
 
-	rtc->rtc_dev->max_user_freq = 256;
-
-	/* reset rtc to epoch 0 if time is invalid */
-	if (rtc_read_time(rtc->rtc_dev, &r) < 0) {
-		rtc_time_to_tm(0, &r);
-		rtc_set_time(rtc->rtc_dev, &r);
-	}
-
-	device_init_wakeup(&pdev->dev, 1);
+	device_init_wakeup(&pdev->dev, true);
 	return 0;
 
 err_unmap:
 	clk_disable(rtc->clk);
-	clk_put(rtc->clk);
-	iounmap(rtc->regbase);
-err_badmap:
-	release_mem_region(rtc->res->start, rtc->regsize);
-err_badres:
-	kfree(rtc);
 
 	return ret;
 }
 
-static int __exit sh_rtc_remove(struct platform_device *pdev)
+static void __exit sh_rtc_remove(struct platform_device *pdev)
 {
 	struct sh_rtc *rtc = platform_get_drvdata(pdev);
 
-	rtc_device_unregister(rtc->rtc_dev);
-	sh_rtc_irq_set_state(&pdev->dev, 0);
-
-	sh_rtc_setaie(&pdev->dev, 0);
-	sh_rtc_setcie(&pdev->dev, 0);
-
-	free_irq(rtc->periodic_irq, rtc);
-
-	if (rtc->carry_irq > 0) {
-		free_irq(rtc->carry_irq, rtc);
-		free_irq(rtc->alarm_irq, rtc);
-	}
-
-	iounmap(rtc->regbase);
-	release_mem_region(rtc->res->start, rtc->regsize);
+	sh_rtc_alarm_irq_enable(&pdev->dev, 0);
 
 	clk_disable(rtc->clk);
-	clk_put(rtc->clk);
-
-	platform_set_drvdata(pdev, NULL);
-
-	kfree(rtc);
-
-	return 0;
 }
 
-static void sh_rtc_set_irq_wake(struct device *dev, int enabled)
-{
-	struct platform_device *pdev = to_platform_device(dev);
-	struct sh_rtc *rtc = platform_get_drvdata(pdev);
-
-	irq_set_irq_wake(rtc->periodic_irq, enabled);
-
-	if (rtc->carry_irq > 0) {
-		irq_set_irq_wake(rtc->carry_irq, enabled);
-		irq_set_irq_wake(rtc->alarm_irq, enabled);
-	}
-}
-
-#ifdef CONFIG_PM_SLEEP
 static int sh_rtc_suspend(struct device *dev)
 {
+	struct sh_rtc *rtc = dev_get_drvdata(dev);
+
 	if (device_may_wakeup(dev))
-		sh_rtc_set_irq_wake(dev, 1);
+		irq_set_irq_wake(rtc->alarm_irq, 1);
 
 	return 0;
 }
 
 static int sh_rtc_resume(struct device *dev)
 {
+	struct sh_rtc *rtc = dev_get_drvdata(dev);
+
 	if (device_may_wakeup(dev))
-		sh_rtc_set_irq_wake(dev, 0);
+		irq_set_irq_wake(rtc->alarm_irq, 0);
 
 	return 0;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(sh_rtc_pm_ops, sh_rtc_suspend, sh_rtc_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(sh_rtc_pm_ops, sh_rtc_suspend, sh_rtc_resume);
 
-static struct platform_driver sh_rtc_platform_driver = {
+static const struct of_device_id sh_rtc_of_match[] = {
+	{ .compatible = "renesas,sh-rtc", },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, sh_rtc_of_match);
+
+/*
+ * sh_rtc_remove() lives in .exit.text. For drivers registered via
+ * module_platform_driver_probe() this is ok because they cannot get unbound at
+ * runtime. So mark the driver struct with __refdata to prevent modpost
+ * triggering a section mismatch warning.
+ */
+static struct platform_driver sh_rtc_platform_driver __refdata = {
 	.driver		= {
 		.name	= DRV_NAME,
-		.owner	= THIS_MODULE,
-		.pm	= &sh_rtc_pm_ops,
+		.pm	= pm_sleep_ptr(&sh_rtc_pm_ops),
+		.of_match_table = sh_rtc_of_match,
 	},
 	.remove		= __exit_p(sh_rtc_remove),
 };
@@ -822,9 +499,8 @@ static struct platform_driver sh_rtc_platform_driver = {
 module_platform_driver_probe(sh_rtc_platform_driver, sh_rtc_probe);
 
 MODULE_DESCRIPTION("SuperH on-chip RTC driver");
-MODULE_VERSION(DRV_VERSION);
-MODULE_AUTHOR("Paul Mundt <lethal@linux-sh.org>, "
-	      "Jamie Lenehan <lenehan@twibble.org>, "
-	      "Angelo Castello <angelo.castello@st.com>");
-MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Paul Mundt <lethal@linux-sh.org>");
+MODULE_AUTHOR("Jamie Lenehan <lenehan@twibble.org>");
+MODULE_AUTHOR("Angelo Castello <angelo.castello@st.com>");
+MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:" DRV_NAME);

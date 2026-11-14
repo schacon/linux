@@ -1,9 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for alpha-specific library files..
 #
 
 asflags-y := $(KBUILD_CFLAGS)
-ccflags-y := -Werror
 
 # Many of these routines have implementations tuned for ev6.
 # Choose them iff we're targeting ev6 specifically.
@@ -13,6 +13,7 @@ ev6-$(CONFIG_ALPHA_EV6) := ev6-
 ev67-$(CONFIG_ALPHA_EV67) := ev67-
 
 lib-y =	__divqu.o __remqu.o __divlu.o __remlu.o \
+	udiv-qrnnd.o \
 	udelay.o \
 	$(ev6-y)memset.o \
 	$(ev6-y)memcpy.o \
@@ -20,12 +21,8 @@ lib-y =	__divqu.o __remqu.o __divlu.o __remlu.o \
 	checksum.o \
 	csum_partial_copy.o \
 	$(ev67-y)strlen.o \
-	$(ev67-y)strcat.o \
-	strcpy.o \
-	$(ev67-y)strncat.o \
-	strncpy.o \
-	$(ev6-y)stxcpy.o \
-	$(ev6-y)stxncpy.o \
+	stycpy.o \
+	styncpy.o \
 	$(ev67-y)strchr.o \
 	$(ev67-y)strrchr.o \
 	$(ev6-y)memchr.o \
@@ -38,7 +35,7 @@ lib-y =	__divqu.o __remqu.o __divlu.o __remlu.o \
 	callback_srm.o srm_puts.o srm_printk.o \
 	fls.o
 
-lib-$(CONFIG_SMP) += dec_and_lock.o
+obj-$(CONFIG_ARCH_SUPPORTS_INT128) += tishift.o
 
 # The division routines are built from single source, with different defines.
 AFLAGS___divqu.o = -DDIV
@@ -46,11 +43,6 @@ AFLAGS___remqu.o =       -DREM
 AFLAGS___divlu.o = -DDIV       -DINTSIZE
 AFLAGS___remlu.o =       -DREM -DINTSIZE
 
-$(obj)/__divqu.o: $(obj)/$(ev6-y)divide.S
-	$(cmd_as_o_S)
-$(obj)/__remqu.o: $(obj)/$(ev6-y)divide.S
-	$(cmd_as_o_S)
-$(obj)/__divlu.o: $(obj)/$(ev6-y)divide.S
-	$(cmd_as_o_S)
-$(obj)/__remlu.o: $(obj)/$(ev6-y)divide.S
-	$(cmd_as_o_S)
+$(addprefix $(obj)/,__divqu.o __remqu.o __divlu.o __remlu.o): \
+						$(src)/$(ev6-y)divide.S FORCE
+	$(call if_changed_rule,as_o_S)

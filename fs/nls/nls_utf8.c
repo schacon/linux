@@ -46,7 +46,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= identity,	/* no conversion */
 	.charset2upper	= identity,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_utf8(void)
@@ -65,4 +64,5 @@ static void __exit exit_nls_utf8(void)
 
 module_init(init_nls_utf8)
 module_exit(exit_nls_utf8)
+MODULE_DESCRIPTION("NLS UTF-8");
 MODULE_LICENSE("Dual BSD/GPL");

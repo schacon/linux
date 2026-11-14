@@ -1,42 +1,75 @@
+# SPDX-License-Identifier: GPL-2.0
 ###
 # scripts contains sources for various helper programs used throughout
 # the kernel for the build process.
-# ---------------------------------------------------------------------------
-# kallsyms:      Find all symbols in vmlinux
-# pnmttologo:    Convert pnm files to logo files
-# conmakehash:   Create chartable
-# conmakehash:	 Create arrays for initializing the kernel console tables
-# docproc:       Used in Documentation/DocBook
 
-HOST_EXTRACFLAGS += -I$(srctree)/tools/include
+hostprogs-always-y				+= kallsyms
+hostprogs-always-$(BUILD_C_RECORDMCOUNT)		+= recordmcount
+hostprogs-always-$(CONFIG_BUILDTIME_TABLE_SORT)		+= sorttable
+hostprogs-always-$(CONFIG_ASN1)				+= asn1_compiler
+hostprogs-always-$(CONFIG_MODULE_SIG_FORMAT)		+= sign-file
+hostprogs-always-$(CONFIG_SYSTEM_EXTRA_CERTIFICATE)	+= insert-sys-cert
+hostprogs-always-$(CONFIG_RUST_KERNEL_DOCTESTS)		+= rustdoc_test_builder
+hostprogs-always-$(CONFIG_RUST_KERNEL_DOCTESTS)		+= rustdoc_test_gen
+hostprogs-always-$(CONFIG_TRACEPOINTS)			+= tracepoint-update
 
-hostprogs-$(CONFIG_KALLSYMS)     += kallsyms
-hostprogs-$(CONFIG_LOGO)         += pnmtologo
-hostprogs-$(CONFIG_VT)           += conmakehash
-hostprogs-$(CONFIG_IKCONFIG)     += bin2c
-hostprogs-$(BUILD_C_RECORDMCOUNT) += recordmcount
-hostprogs-$(CONFIG_BUILDTIME_EXTABLE_SORT) += sortextable
-hostprogs-$(CONFIG_ASN1)	 += asn1_compiler
+kallsyms-objs := kallsyms.o kallsyms-sysmap.o elf-parse.o
+sorttable-objs := sorttable.o elf-parse.o
+tracepoint-update-objs := tracepoint-update.o elf-parse.o
 
-HOSTCFLAGS_sortextable.o = -I$(srctree)/tools/include
+ifneq ($(or $(CONFIG_X86_64),$(CONFIG_X86_32)),)
+always-$(CONFIG_RUST)					+= target.json
+filechk_rust_target = $< < include/config/auto.conf
+
+$(obj)/target.json: scripts/generate_rust_target include/config/auto.conf FORCE
+	$(call filechk,rust_target)
+endif
+
+hostprogs += generate_rust_target
+generate_rust_target-rust := y
+rustdoc_test_builder-rust := y
+rustdoc_test_gen-rust := y
+
+HOSTCFLAGS_tracepoint-update.o = -I$(srctree)/tools/include
+HOSTCFLAGS_kallsyms.o = -I$(srctree)/tools/include
+HOSTCFLAGS_kallsyms-sysmap.o = -I$(srctree)/tools/include
+HOSTCFLAGS_elf-parse.o = -I$(srctree)/tools/include
+HOSTCFLAGS_sorttable.o = -I$(srctree)/tools/include
+HOSTLDLIBS_sorttable = -lpthread
 HOSTCFLAGS_asn1_compiler.o = -I$(srctree)/include
+HOSTCFLAGS_sign-file.o = $(shell $(HOSTPKG_CONFIG) --cflags libcrypto 2> /dev/null)
+HOSTCFLAGS_sign-file.o += -I$(srctree)/tools/include/uapi/
+HOSTLDLIBS_sign-file = $(shell $(HOSTPKG_CONFIG) --libs libcrypto 2> /dev/null || echo -lcrypto)
 
-always		:= $(hostprogs-y) $(hostprogs-m)
+ifdef CONFIG_UNWINDER_ORC
+ifeq ($(ARCH),x86_64)
+SRCARCH := x86
+endif
+ifeq ($(ARCH),loongarch)
+SRCARCH := loongarch
+endif
+HOSTCFLAGS_sorttable.o += -I$(srctree)/tools/arch/$(SRCARCH)/include
+HOSTCFLAGS_sorttable.o += -DUNWINDER_ORC_ENABLED
+endif
 
-# The following hostprogs-y programs are only build on demand
-hostprogs-y += unifdef docproc
+ifdef CONFIG_BUILDTIME_MCOUNT_SORT
+HOSTCFLAGS_sorttable.o += -DMCOUNT_SORT_ENABLED
+endif
 
-# These targets are used internally to avoid "is up to date" messages
-PHONY += build_unifdef
-build_unifdef: scripts/unifdef FORCE
-	@:
-build_docproc: scripts/docproc FORCE
-	@:
+hostprogs += gen_init_cpio
+always-$(CONFIG_BLK_DEV_INITRD) += gen_init_cpio
 
-subdir-$(CONFIG_MODVERSIONS) += genksyms
-subdir-y                     += mod
+# The following programs are only built on demand
+hostprogs += unifdef gen_packed_field_checks
+
+# The module linker script is preprocessed on demand
+targets += module.lds
+
+subdir-$(CONFIG_GCC_PLUGINS) += gcc-plugins
+subdir-$(CONFIG_GENKSYMS) += genksyms
+subdir-$(CONFIG_GENDWARFKSYMS) += gendwarfksyms
 subdir-$(CONFIG_SECURITY_SELINUX) += selinux
-subdir-$(CONFIG_DTC)         += dtc
+subdir-$(CONFIG_SECURITY_IPE) += ipe
 
 # Let clean descend into subdirs
-subdir-	+= basic kconfig package selinux
+subdir-	+= basic dtc gdb kconfig mod

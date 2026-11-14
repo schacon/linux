@@ -1,8 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2004 Matthew Wilcox <matthew@wil.cx>
  * Copyright (C) 2004 Intel Corp.
- *
- * This code is released under the GNU General Public License version 2.
  */
 
 /*
@@ -12,9 +11,8 @@
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/rcupdate.h>
-#include <asm/e820.h>
+#include <asm/e820/api.h>
 #include <asm/pci_x86.h>
-#include <acpi/acpi.h>
 
 /* Assume systems with more busses have correct MCFG */
 #define mmcfg_virt_addr ((void __iomem *) fix_to_virt(FIX_PCIE_MCFG))
@@ -133,7 +131,7 @@ const struct pci_raw_ops pci_mmcfg = {
 
 int __init pci_mmcfg_arch_init(void)
 {
-	printk(KERN_INFO "PCI: Using MMCONFIG for extended config space\n");
+	printk(KERN_INFO "PCI: Using ECAM for extended config space\n");
 	raw_pci_ext_ops = &pci_mmcfg;
 	return 1;
 }

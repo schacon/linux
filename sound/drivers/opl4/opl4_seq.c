@@ -63,23 +63,17 @@ static int snd_opl4_seq_use(void *private_data, struct snd_seq_port_subscribe *i
 	struct snd_opl4 *opl4 = private_data;
 	int err;
 
-	mutex_lock(&opl4->access_mutex);
+	scoped_guard(mutex, &opl4->access_mutex) {
+		if (opl4->used)
+			return -EBUSY;
+		opl4->used++;
 
-	if (opl4->used) {
-		mutex_unlock(&opl4->access_mutex);
-		return -EBUSY;
-	}
-	opl4->used++;
-
-	if (info->sender.client != SNDRV_SEQ_CLIENT_SYSTEM) {
-		err = snd_opl4_seq_use_inc(opl4);
-		if (err < 0) {
-			mutex_unlock(&opl4->access_mutex);
-			return err;
+		if (info->sender.client != SNDRV_SEQ_CLIENT_SYSTEM) {
+			err = snd_opl4_seq_use_inc(opl4);
+			if (err < 0)
+				return err;
 		}
 	}
-
-	mutex_unlock(&opl4->access_mutex);
 
 	snd_opl4_synth_reset(opl4);
 	return 0;
@@ -91,16 +85,16 @@ static int snd_opl4_seq_unuse(void *private_data, struct snd_seq_port_subscribe 
 
 	snd_opl4_synth_shutdown(opl4);
 
-	mutex_lock(&opl4->access_mutex);
-	opl4->used--;
-	mutex_unlock(&opl4->access_mutex);
+	scoped_guard(mutex, &opl4->access_mutex) {
+		opl4->used--;
+	}
 
 	if (info->sender.client != SNDRV_SEQ_CLIENT_SYSTEM)
 		snd_opl4_seq_use_dec(opl4);
 	return 0;
 }
 
-static struct snd_midi_op opl4_ops = {
+static const struct snd_midi_op opl4_ops = {
 	.note_on =		snd_opl4_note_on,
 	.note_off =		snd_opl4_note_off,
 	.note_terminate =	snd_opl4_terminate_note,
@@ -124,7 +118,7 @@ static void snd_opl4_seq_free_port(void *private_data)
 	snd_midi_channel_free_set(opl4->chset);
 }
 
-static int snd_opl4_seq_new_device(struct snd_seq_device *dev)
+static int snd_opl4_seq_probe(struct snd_seq_device *dev)
 {
 	struct snd_opl4 *opl4;
 	int client;
@@ -180,36 +174,28 @@ static int snd_opl4_seq_new_device(struct snd_seq_device *dev)
 	return 0;
 }
 
-static int snd_opl4_seq_delete_device(struct snd_seq_device *dev)
+static void snd_opl4_seq_remove(struct snd_seq_device *dev)
 {
 	struct snd_opl4 *opl4;
 
 	opl4 = *(struct snd_opl4 **)SNDRV_SEQ_DEVICE_ARGPTR(dev);
 	if (!opl4)
-		return -EINVAL;
+		return;
 
 	if (opl4->seq_client >= 0) {
 		snd_seq_delete_kernel_client(opl4->seq_client);
 		opl4->seq_client = -1;
 	}
-	return 0;
 }
 
-static int __init alsa_opl4_synth_init(void)
-{
-	static struct snd_seq_dev_ops ops = {
-		snd_opl4_seq_new_device,
-		snd_opl4_seq_delete_device
-	};
+static struct snd_seq_driver opl4_seq_driver = {
+	.probe = snd_opl4_seq_probe,
+	.remove = snd_opl4_seq_remove,
+	.driver = {
+		.name = KBUILD_MODNAME,
+	},
+	.id = SNDRV_SEQ_DEV_ID_OPL4,
+	.argsize = sizeof(struct snd_opl4 *),
+};
 
-	return snd_seq_device_register_driver(SNDRV_SEQ_DEV_ID_OPL4, &ops,
-					      sizeof(struct snd_opl4 *));
-}
-
-static void __exit alsa_opl4_synth_exit(void)
-{
-	snd_seq_device_unregister_driver(SNDRV_SEQ_DEV_ID_OPL4);
-}
-
-module_init(alsa_opl4_synth_init)
-module_exit(alsa_opl4_synth_exit)
+module_snd_seq_driver(opl4_seq_driver);

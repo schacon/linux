@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AD5624R, AD5644R, AD5664R Digital to analog convertors spi driver
  *
  * Copyright 2010-2011 Analog Devices Inc.
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/interrupt.h>
@@ -19,10 +18,12 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 
+#include <linux/unaligned.h>
+
 #include "ad5624r.h"
 
 static int ad5624r_spi_write(struct spi_device *spi,
-			     u8 cmd, u8 addr, u16 val, u8 len)
+			     u8 cmd, u8 addr, u16 val, u8 shift)
 {
 	u32 data;
 	u8 msg[3];
@@ -35,12 +36,10 @@ static int ad5624r_spi_write(struct spi_device *spi,
 	 * 14-, 12-bit input code followed by 0, 2, or 4 don't care bits,
 	 * for the AD5664R, AD5644R, and AD5624R, respectively.
 	 */
-	data = (0 << 22) | (cmd << 19) | (addr << 16) | (val << (16 - len));
-	msg[0] = data >> 16;
-	msg[1] = data >> 8;
-	msg[2] = data;
+	data = (0 << 22) | (cmd << 19) | (addr << 16) | (val << shift);
+	put_unaligned_be24(data, &msg[0]);
 
-	return spi_write(spi, msg, 3);
+	return spi_write(spi, msg, sizeof(msg));
 }
 
 static int ad5624r_read_raw(struct iio_dev *indio_dev,
@@ -50,15 +49,12 @@ static int ad5624r_read_raw(struct iio_dev *indio_dev,
 			   long m)
 {
 	struct ad5624r_state *st = iio_priv(indio_dev);
-	unsigned long scale_uv;
 
 	switch (m) {
 	case IIO_CHAN_INFO_SCALE:
-		scale_uv = (st->vref_mv * 1000) >> chan->scan_type.realbits;
-		*val =  scale_uv / 1000;
-		*val2 = (scale_uv % 1000) * 1000;
-		return IIO_VAL_INT_PLUS_MICRO;
-
+		*val = st->vref_mv;
+		*val2 = chan->scan_type.realbits;
+		return IIO_VAL_FRACTIONAL_LOG2;
 	}
 	return -EINVAL;
 }
@@ -70,7 +66,6 @@ static int ad5624r_write_raw(struct iio_dev *indio_dev,
 			       long mask)
 {
 	struct ad5624r_state *st = iio_priv(indio_dev);
-	int ret;
 
 	switch (mask) {
 	case IIO_CHAN_INFO_RAW:
@@ -82,10 +77,8 @@ static int ad5624r_write_raw(struct iio_dev *indio_dev,
 				chan->address, val,
 				chan->scan_type.shift);
 	default:
-		ret = -EINVAL;
+		return -EINVAL;
 	}
-
-	return -EINVAL;
 }
 
 static const char * const ad5624r_powerdown_modes[] = {
@@ -124,8 +117,8 @@ static ssize_t ad5624r_read_dac_powerdown(struct iio_dev *indio_dev,
 {
 	struct ad5624r_state *st = iio_priv(indio_dev);
 
-	return sprintf(buf, "%d\n",
-			!!(st->pwr_down_mask & (1 << chan->channel)));
+	return sysfs_emit(buf, "%d\n",
+			  !!(st->pwr_down_mask & (1 << chan->channel)));
 }
 
 static ssize_t ad5624r_write_dac_powerdown(struct iio_dev *indio_dev,
@@ -136,7 +129,7 @@ static ssize_t ad5624r_write_dac_powerdown(struct iio_dev *indio_dev,
 	int ret;
 	struct ad5624r_state *st = iio_priv(indio_dev);
 
-	ret = strtobool(buf, &pwr_down);
+	ret = kstrtobool(buf, &pwr_down);
 	if (ret)
 		return ret;
 
@@ -155,7 +148,6 @@ static ssize_t ad5624r_write_dac_powerdown(struct iio_dev *indio_dev,
 static const struct iio_info ad5624r_info = {
 	.write_raw = ad5624r_write_raw,
 	.read_raw = ad5624r_read_raw,
-	.driver_module = THIS_MODULE,
 };
 
 static const struct iio_chan_spec_ext_info ad5624r_ext_info[] = {
@@ -163,10 +155,12 @@ static const struct iio_chan_spec_ext_info ad5624r_ext_info[] = {
 		.name = "powerdown",
 		.read = ad5624r_read_dac_powerdown,
 		.write = ad5624r_write_dac_powerdown,
+		.shared = IIO_SEPARATE,
 	},
-	IIO_ENUM("powerdown_mode", true, &ad5624r_powerdown_mode_enum),
-	IIO_ENUM_AVAILABLE("powerdown_mode", &ad5624r_powerdown_mode_enum),
-	{ },
+	IIO_ENUM("powerdown_mode", IIO_SHARED_BY_TYPE,
+		 &ad5624r_powerdown_mode_enum),
+	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE, &ad5624r_powerdown_mode_enum),
+	{ }
 };
 
 #define AD5624R_CHANNEL(_chan, _bits) { \
@@ -177,7 +171,12 @@ static const struct iio_chan_spec_ext_info ad5624r_ext_info[] = {
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW), \
 	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE), \
 	.address = (_chan), \
-	.scan_type = IIO_ST('u', (_bits), 16, 16 - (_bits)), \
+	.scan_type = { \
+		.sign = 'u', \
+		.realbits = (_bits), \
+		.storagebits = 16, \
+		.shift = 16 - (_bits), \
+	}, \
 	.ext_info = ad5624r_ext_info, \
 }
 
@@ -224,39 +223,28 @@ static int ad5624r_probe(struct spi_device *spi)
 {
 	struct ad5624r_state *st;
 	struct iio_dev *indio_dev;
-	int ret, voltage_uv = 0;
+	bool external_vref;
+	int ret;
 
-	indio_dev = iio_device_alloc(sizeof(*st));
-	if (indio_dev == NULL) {
-		ret = -ENOMEM;
-		goto error_ret;
-	}
+	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	if (!indio_dev)
+		return -ENOMEM;
 	st = iio_priv(indio_dev);
-	st->reg = regulator_get(&spi->dev, "vcc");
-	if (!IS_ERR(st->reg)) {
-		ret = regulator_enable(st->reg);
-		if (ret)
-			goto error_put_reg;
+	ret = devm_regulator_get_enable_read_voltage(&spi->dev, "vref");
+	if (ret == -ENODEV)
+		/* Backwards compatibility. This naming is not correct */
+		ret = devm_regulator_get_enable_read_voltage(&spi->dev, "vcc");
+	if (ret < 0 && ret != -ENODEV)
+		return ret;
 
-		ret = regulator_get_voltage(st->reg);
-		if (ret < 0)
-			goto error_disable_reg;
+	external_vref = ret != -ENODEV;
+	st->vref_mv = external_vref ? ret / 1000 : st->chip_info->int_vref_mv;
 
-		voltage_uv = ret;
-	}
-
-	spi_set_drvdata(spi, indio_dev);
 	st->chip_info =
 		&ad5624r_chip_info_tbl[spi_get_device_id(spi)->driver_data];
 
-	if (voltage_uv)
-		st->vref_mv = voltage_uv / 1000;
-	else
-		st->vref_mv = st->chip_info->int_vref_mv;
-
 	st->us = spi;
 
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->info = &ad5624r_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -264,61 +252,29 @@ static int ad5624r_probe(struct spi_device *spi)
 	indio_dev->num_channels = AD5624R_DAC_CHANNELS;
 
 	ret = ad5624r_spi_write(spi, AD5624R_CMD_INTERNAL_REFER_SETUP, 0,
-				!!voltage_uv, 16);
+				external_vref, 16);
 	if (ret)
-		goto error_disable_reg;
+		return ret;
 
-	ret = iio_device_register(indio_dev);
-	if (ret)
-		goto error_disable_reg;
-
-	return 0;
-
-error_disable_reg:
-	if (!IS_ERR(st->reg))
-		regulator_disable(st->reg);
-error_put_reg:
-	if (!IS_ERR(st->reg))
-		regulator_put(st->reg);
-	iio_device_free(indio_dev);
-error_ret:
-
-	return ret;
-}
-
-static int ad5624r_remove(struct spi_device *spi)
-{
-	struct iio_dev *indio_dev = spi_get_drvdata(spi);
-	struct ad5624r_state *st = iio_priv(indio_dev);
-
-	iio_device_unregister(indio_dev);
-	if (!IS_ERR(st->reg)) {
-		regulator_disable(st->reg);
-		regulator_put(st->reg);
-	}
-	iio_device_free(indio_dev);
-
-	return 0;
+	return devm_iio_device_register(&spi->dev, indio_dev);
 }
 
 static const struct spi_device_id ad5624r_id[] = {
-	{"ad5624r3", ID_AD5624R3},
-	{"ad5644r3", ID_AD5644R3},
-	{"ad5664r3", ID_AD5664R3},
-	{"ad5624r5", ID_AD5624R5},
-	{"ad5644r5", ID_AD5644R5},
-	{"ad5664r5", ID_AD5664R5},
-	{}
+	{ .name = "ad5624r3", .driver_data = ID_AD5624R3 },
+	{ .name = "ad5644r3", .driver_data = ID_AD5644R3 },
+	{ .name = "ad5664r3", .driver_data = ID_AD5664R3 },
+	{ .name = "ad5624r5", .driver_data = ID_AD5624R5 },
+	{ .name = "ad5644r5", .driver_data = ID_AD5644R5 },
+	{ .name = "ad5664r5", .driver_data = ID_AD5664R5 },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad5624r_id);
 
 static struct spi_driver ad5624r_driver = {
 	.driver = {
 		   .name = "ad5624r",
-		   .owner = THIS_MODULE,
 		   },
 	.probe = ad5624r_probe,
-	.remove = ad5624r_remove,
 	.id_table = ad5624r_id,
 };
 module_spi_driver(ad5624r_driver);

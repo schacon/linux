@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *  arch/arm/include/asm/ptrace.h
  *
@@ -25,37 +26,61 @@
 #define PTRACE_GET_THREAD_AREA	22
 #define PTRACE_SET_SYSCALL	23
 /* PTRACE_SYSCALL is 24 */
-#define PTRACE_GETCRUNCHREGS	25
-#define PTRACE_SETCRUNCHREGS	26
+#define PTRACE_GETCRUNCHREGS	25 /* obsolete */
+#define PTRACE_SETCRUNCHREGS	26 /* obsolete */
 #define PTRACE_GETVFPREGS	27
 #define PTRACE_SETVFPREGS	28
 #define PTRACE_GETHBPREGS	29
 #define PTRACE_SETHBPREGS	30
+#define PTRACE_GETFDPIC		31
+
+#define PTRACE_GETFDPIC_EXEC	0
+#define PTRACE_GETFDPIC_INTERP	1
 
 /*
  * PSR bits
+ * Note on V7M there is no mode contained in the PSR
  */
 #define USR26_MODE	0x00000000
 #define FIQ26_MODE	0x00000001
 #define IRQ26_MODE	0x00000002
 #define SVC26_MODE	0x00000003
+#if defined(__KERNEL__) && defined(CONFIG_CPU_V7M)
+/*
+ * Use 0 here to get code right that creates a userspace
+ * or kernel space thread.
+ */
+#define USR_MODE	0x00000000
+#define SVC_MODE	0x00000000
+#else
 #define USR_MODE	0x00000010
+#define SVC_MODE	0x00000013
+#endif
 #define FIQ_MODE	0x00000011
 #define IRQ_MODE	0x00000012
-#define SVC_MODE	0x00000013
+#define MON_MODE	0x00000016
 #define ABT_MODE	0x00000017
 #define HYP_MODE	0x0000001a
 #define UND_MODE	0x0000001b
 #define SYSTEM_MODE	0x0000001f
 #define MODE32_BIT	0x00000010
 #define MODE_MASK	0x0000001f
-#define PSR_T_BIT	0x00000020
-#define PSR_F_BIT	0x00000040
-#define PSR_I_BIT	0x00000080
-#define PSR_A_BIT	0x00000100
-#define PSR_E_BIT	0x00000200
-#define PSR_J_BIT	0x01000000
-#define PSR_Q_BIT	0x08000000
+
+#define V4_PSR_T_BIT	0x00000020	/* >= V4T, but not V7M */
+#define V7M_PSR_T_BIT	0x01000000
+#if defined(__KERNEL__) && defined(CONFIG_CPU_V7M)
+#define PSR_T_BIT	V7M_PSR_T_BIT
+#else
+/* for compatibility */
+#define PSR_T_BIT	V4_PSR_T_BIT
+#endif
+
+#define PSR_F_BIT	0x00000040	/* >= V4, but not V7M */
+#define PSR_I_BIT	0x00000080	/* >= V4, but not V7M */
+#define PSR_A_BIT	0x00000100	/* >= V6, but not V7M */
+#define PSR_E_BIT	0x00000200	/* >= V6, but not V7M */
+#define PSR_J_BIT	0x01000000	/* >= V5J, but not V7M */
+#define PSR_Q_BIT	0x08000000	/* >= V5E, including V7M */
 #define PSR_V_BIT	0x10000000
 #define PSR_C_BIT	0x20000000
 #define PSR_Z_BIT	0x40000000
@@ -76,15 +101,6 @@
 #define PSR_ISET_MASK	0x01000010	/* ISA state (J, T) mask */
 #define PSR_IT_MASK	0x0600fc00	/* If-Then execution state mask */
 #define PSR_ENDIAN_MASK	0x00000200	/* Endianness state mask */
-
-/*
- * Default endianness state
- */
-#ifdef CONFIG_CPU_ENDIAN_BE8
-#define PSR_ENDSTATE	PSR_E_BIT
-#else
-#define PSR_ENDSTATE	0
-#endif
 
 /* 
  * These are 'magic' values for PTRACE_PEEKUSR that return info about where a

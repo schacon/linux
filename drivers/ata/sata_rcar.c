@@ -1,29 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Renesas R-Car SATA driver
  *
  * Author: Vladimir Barinov <source@cogentembedded.com>
- * Copyright (C) 2013 Cogent Embedded, Inc.
- * Copyright (C) 2013 Renesas Solutions Corp.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
+ * Copyright (C) 2013-2015 Cogent Embedded, Inc.
+ * Copyright (C) 2013-2015 Renesas Solutions Corp.
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/ata.h>
 #include <linux/libata.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/clk.h>
+#include <linux/pm_runtime.h>
 #include <linux/err.h>
 
 #define DRV_NAME "sata_rcar"
-
-/* SH-Navi2G/ATAPI-ATA compatible task registers */
-#define DATA_REG			0x100
-#define SDEVCON_REG			0x138
 
 /* SH-Navi2G/ATAPI module compatible control registers */
 #define ATAPI_CONTROL1_REG		0x180
@@ -108,6 +101,8 @@
 #define SATAINTMASK_ERRMSK		BIT(2)
 #define SATAINTMASK_ERRCRTMSK		BIT(1)
 #define SATAINTMASK_ATAMSK		BIT(0)
+#define SATAINTMASK_ALL_GEN1		0x7ff
+#define SATAINTMASK_ALL_GEN2		0xfff
 
 #define SATA_RCAR_INT_MASK		(SATAINTMASK_SERRMSK | \
 					 SATAINTMASK_ATAMSK)
@@ -121,48 +116,103 @@
 /* Descriptor table word 0 bit (when DTA32M = 1) */
 #define SATA_RCAR_DTEND			BIT(0)
 
-struct sata_rcar_priv {
-	void __iomem *base;
-	struct clk *clk;
+#define SATA_RCAR_DMA_BOUNDARY		0x1FFFFFFFUL
+
+/* Gen2 Physical Layer Control Registers */
+#define RCAR_GEN2_PHY_CTL1_REG		0x1704
+#define RCAR_GEN2_PHY_CTL1		0x34180002
+#define RCAR_GEN2_PHY_CTL1_SS		0xC180	/* Spread Spectrum */
+
+#define RCAR_GEN2_PHY_CTL2_REG		0x170C
+#define RCAR_GEN2_PHY_CTL2		0x00002303
+
+#define RCAR_GEN2_PHY_CTL3_REG		0x171C
+#define RCAR_GEN2_PHY_CTL3		0x000B0194
+
+#define RCAR_GEN2_PHY_CTL4_REG		0x1724
+#define RCAR_GEN2_PHY_CTL4		0x00030994
+
+#define RCAR_GEN2_PHY_CTL5_REG		0x1740
+#define RCAR_GEN2_PHY_CTL5		0x03004001
+#define RCAR_GEN2_PHY_CTL5_DC		BIT(1)	/* DC connection */
+#define RCAR_GEN2_PHY_CTL5_TR		BIT(2)	/* Termination Resistor */
+
+enum sata_rcar_type {
+	RCAR_GEN1_SATA,
+	RCAR_GEN2_SATA,
+	RCAR_GEN3_SATA,
+	RCAR_R8A7790_ES1_SATA,
 };
 
-static void sata_rcar_phy_initialize(struct sata_rcar_priv *priv)
+struct sata_rcar_priv {
+	void __iomem *base;
+	u32 sataint_mask;
+	enum sata_rcar_type type;
+};
+
+static void sata_rcar_gen1_phy_preinit(struct sata_rcar_priv *priv)
 {
+	void __iomem *base = priv->base;
+
 	/* idle state */
-	iowrite32(0, priv->base + SATAPHYADDR_REG);
+	iowrite32(0, base + SATAPHYADDR_REG);
 	/* reset */
-	iowrite32(SATAPHYRESET_PHYRST, priv->base + SATAPHYRESET_REG);
+	iowrite32(SATAPHYRESET_PHYRST, base + SATAPHYRESET_REG);
 	udelay(10);
 	/* deassert reset */
-	iowrite32(0, priv->base + SATAPHYRESET_REG);
+	iowrite32(0, base + SATAPHYRESET_REG);
 }
 
-static void sata_rcar_phy_write(struct sata_rcar_priv *priv, u16 reg, u32 val,
-				int group)
+static void sata_rcar_gen1_phy_write(struct sata_rcar_priv *priv, u16 reg,
+				     u32 val, int group)
 {
+	void __iomem *base = priv->base;
 	int timeout;
 
 	/* deassert reset */
-	iowrite32(0, priv->base + SATAPHYRESET_REG);
+	iowrite32(0, base + SATAPHYRESET_REG);
 	/* lane 1 */
-	iowrite32(SATAPHYACCEN_PHYLANE, priv->base + SATAPHYACCEN_REG);
+	iowrite32(SATAPHYACCEN_PHYLANE, base + SATAPHYACCEN_REG);
 	/* write phy register value */
-	iowrite32(val, priv->base + SATAPHYWDATA_REG);
+	iowrite32(val, base + SATAPHYWDATA_REG);
 	/* set register group */
 	if (group)
 		reg |= SATAPHYADDR_PHYRATEMODE;
 	/* write command */
-	iowrite32(SATAPHYADDR_PHYCMD_WRITE | reg, priv->base + SATAPHYADDR_REG);
+	iowrite32(SATAPHYADDR_PHYCMD_WRITE | reg, base + SATAPHYADDR_REG);
 	/* wait for ack */
 	for (timeout = 0; timeout < 100; timeout++) {
-		val = ioread32(priv->base + SATAPHYACK_REG);
+		val = ioread32(base + SATAPHYACK_REG);
 		if (val & SATAPHYACK_PHYACK)
 			break;
 	}
 	if (timeout >= 100)
 		pr_err("%s timeout\n", __func__);
 	/* idle state */
-	iowrite32(0, priv->base + SATAPHYADDR_REG);
+	iowrite32(0, base + SATAPHYADDR_REG);
+}
+
+static void sata_rcar_gen1_phy_init(struct sata_rcar_priv *priv)
+{
+	sata_rcar_gen1_phy_preinit(priv);
+	sata_rcar_gen1_phy_write(priv, SATAPCTLR1_REG, 0x00200188, 0);
+	sata_rcar_gen1_phy_write(priv, SATAPCTLR1_REG, 0x00200188, 1);
+	sata_rcar_gen1_phy_write(priv, SATAPCTLR3_REG, 0x0000A061, 0);
+	sata_rcar_gen1_phy_write(priv, SATAPCTLR2_REG, 0x20000000, 0);
+	sata_rcar_gen1_phy_write(priv, SATAPCTLR2_REG, 0x20000000, 1);
+	sata_rcar_gen1_phy_write(priv, SATAPCTLR4_REG, 0x28E80000, 0);
+}
+
+static void sata_rcar_gen2_phy_init(struct sata_rcar_priv *priv)
+{
+	void __iomem *base = priv->base;
+
+	iowrite32(RCAR_GEN2_PHY_CTL1, base + RCAR_GEN2_PHY_CTL1_REG);
+	iowrite32(RCAR_GEN2_PHY_CTL2, base + RCAR_GEN2_PHY_CTL2_REG);
+	iowrite32(RCAR_GEN2_PHY_CTL3, base + RCAR_GEN2_PHY_CTL3_REG);
+	iowrite32(RCAR_GEN2_PHY_CTL4, base + RCAR_GEN2_PHY_CTL4_REG);
+	iowrite32(RCAR_GEN2_PHY_CTL5 | RCAR_GEN2_PHY_CTL5_DC |
+		  RCAR_GEN2_PHY_CTL5_TR, base + RCAR_GEN2_PHY_CTL5_REG);
 }
 
 static void sata_rcar_freeze(struct ata_port *ap)
@@ -170,7 +220,7 @@ static void sata_rcar_freeze(struct ata_port *ap)
 	struct sata_rcar_priv *priv = ap->host->private_data;
 
 	/* mask */
-	iowrite32(0x7ff, priv->base + SATAINTMASK_REG);
+	iowrite32(priv->sataint_mask, priv->base + SATAINTMASK_REG);
 
 	ata_sff_freeze(ap);
 }
@@ -178,14 +228,15 @@ static void sata_rcar_freeze(struct ata_port *ap)
 static void sata_rcar_thaw(struct ata_port *ap)
 {
 	struct sata_rcar_priv *priv = ap->host->private_data;
+	void __iomem *base = priv->base;
 
 	/* ack */
-	iowrite32(~SATA_RCAR_INT_MASK, priv->base + SATAINTSTAT_REG);
+	iowrite32(~(u32)SATA_RCAR_INT_MASK, base + SATAINTSTAT_REG);
 
 	ata_sff_thaw(ap);
 
 	/* unmask */
-	iowrite32(0x7ff & ~SATA_RCAR_INT_MASK, priv->base + SATAINTMASK_REG);
+	iowrite32(priv->sataint_mask & ~SATA_RCAR_INT_MASK, base + SATAINTMASK_REG);
 }
 
 static void sata_rcar_ioread16_rep(void __iomem *reg, void *buffer, int count)
@@ -228,8 +279,7 @@ static void sata_rcar_dev_select(struct ata_port *ap, unsigned int device)
 	ata_sff_pause(ap);	/* needed; also flushes, for mmio */
 }
 
-static unsigned int sata_rcar_ata_devchk(struct ata_port *ap,
-					 unsigned int device)
+static bool sata_rcar_ata_devchk(struct ata_port *ap, unsigned int device)
 {
 	struct ata_ioports *ioaddr = &ap->ioaddr;
 	u8 nsect, lbal;
@@ -249,9 +299,9 @@ static unsigned int sata_rcar_ata_devchk(struct ata_port *ap,
 	lbal  = ioread32(ioaddr->lbal_addr);
 
 	if (nsect == 0x55 && lbal == 0xaa)
-		return 1;	/* found a device */
+		return true;	/* found a device */
 
-	return 0;		/* nothing found */
+	return false;		/* nothing found */
 }
 
 static int sata_rcar_wait_after_reset(struct ata_link *link,
@@ -267,8 +317,6 @@ static int sata_rcar_wait_after_reset(struct ata_link *link,
 static int sata_rcar_bus_softreset(struct ata_port *ap, unsigned long deadline)
 {
 	struct ata_ioports *ioaddr = &ap->ioaddr;
-
-	DPRINTK("ata%u: bus reset via SRST\n", ap->print_id);
 
 	/* software reset.  causes dev0 to be selected */
 	iowrite32(ap->ctl, ioaddr->ctl_addr);
@@ -295,7 +343,6 @@ static int sata_rcar_softreset(struct ata_link *link, unsigned int *classes,
 		devmask |= 1 << 0;
 
 	/* issue bus reset */
-	DPRINTK("about to softreset, devmask=%x\n", devmask);
 	rc = sata_rcar_bus_softreset(ap, deadline);
 	/* if link is occupied, -ENODEV too is an error */
 	if (rc && (rc != -ENODEV || sata_scr_valid(link))) {
@@ -306,7 +353,6 @@ static int sata_rcar_softreset(struct ata_link *link, unsigned int *classes,
 	/* determine by signature whether we have ATA or ATAPI devices */
 	classes[0] = ata_sff_dev_classify(&link->device[0], devmask, &err);
 
-	DPRINTK("classes[0]=%u\n", classes[0]);
 	return 0;
 }
 
@@ -328,12 +374,6 @@ static void sata_rcar_tf_load(struct ata_port *ap,
 		iowrite32(tf->hob_lbal, ioaddr->lbal_addr);
 		iowrite32(tf->hob_lbam, ioaddr->lbam_addr);
 		iowrite32(tf->hob_lbah, ioaddr->lbah_addr);
-		VPRINTK("hob: feat 0x%X nsect 0x%X, lba 0x%X 0x%X 0x%X\n",
-			tf->hob_feature,
-			tf->hob_nsect,
-			tf->hob_lbal,
-			tf->hob_lbam,
-			tf->hob_lbah);
 	}
 
 	if (is_addr) {
@@ -342,18 +382,10 @@ static void sata_rcar_tf_load(struct ata_port *ap,
 		iowrite32(tf->lbal, ioaddr->lbal_addr);
 		iowrite32(tf->lbam, ioaddr->lbam_addr);
 		iowrite32(tf->lbah, ioaddr->lbah_addr);
-		VPRINTK("feat 0x%X nsect 0x%X lba 0x%X 0x%X 0x%X\n",
-			tf->feature,
-			tf->nsect,
-			tf->lbal,
-			tf->lbam,
-			tf->lbah);
 	}
 
-	if (tf->flags & ATA_TFLAG_DEVICE) {
+	if (tf->flags & ATA_TFLAG_DEVICE)
 		iowrite32(tf->device, ioaddr->device_addr);
-		VPRINTK("device 0x%X\n", tf->device);
-	}
 
 	ata_wait_idle(ap);
 }
@@ -362,8 +394,8 @@ static void sata_rcar_tf_read(struct ata_port *ap, struct ata_taskfile *tf)
 {
 	struct ata_ioports *ioaddr = &ap->ioaddr;
 
-	tf->command = sata_rcar_check_status(ap);
-	tf->feature = ioread32(ioaddr->error_addr);
+	tf->status = sata_rcar_check_status(ap);
+	tf->error = ioread32(ioaddr->error_addr);
 	tf->nsect = ioread32(ioaddr->nsect_addr);
 	tf->lbal = ioread32(ioaddr->lbal_addr);
 	tf->lbam = ioread32(ioaddr->lbam_addr);
@@ -385,17 +417,15 @@ static void sata_rcar_tf_read(struct ata_port *ap, struct ata_taskfile *tf)
 static void sata_rcar_exec_command(struct ata_port *ap,
 				   const struct ata_taskfile *tf)
 {
-	DPRINTK("ata%u: cmd 0x%X\n", ap->print_id, tf->command);
-
 	iowrite32(tf->command, ap->ioaddr.command_addr);
 	ata_sff_pause(ap);
 }
 
-static unsigned int sata_rcar_data_xfer(struct ata_device *dev,
+static unsigned int sata_rcar_data_xfer(struct ata_queued_cmd *qc,
 					      unsigned char *buf,
 					      unsigned int buflen, int rw)
 {
-	struct ata_port *ap = dev->link->ap;
+	struct ata_port *ap = qc->dev->link->ap;
 	void __iomem *data_addr = ap->ioaddr.data_addr;
 	unsigned int words = buflen >> 1;
 
@@ -444,7 +474,6 @@ static void sata_rcar_drain_fifo(struct ata_queued_cmd *qc)
 			count < 65536; count += 2)
 		ioread32(ap->ioaddr.data_addr);
 
-	/* Can become DEBUG later */
 	if (count)
 		ata_port_dbg(ap, "drained %d bytes to clear DRQ\n", count);
 }
@@ -474,11 +503,10 @@ static void sata_rcar_bmdma_fill_sg(struct ata_queued_cmd *qc)
 	struct ata_port *ap = qc->ap;
 	struct ata_bmdma_prd *prd = ap->bmdma_prd;
 	struct scatterlist *sg;
-	unsigned int si, pi;
+	unsigned int si;
 
-	pi = 0;
 	for_each_sg(qc->sg, sg, qc->n_elem, si) {
-		u32 addr, sg_len, len;
+		u32 addr, sg_len;
 
 		/*
 		 * Note: h/w doesn't support 64-bit, so we unconditionally
@@ -487,47 +515,38 @@ static void sata_rcar_bmdma_fill_sg(struct ata_queued_cmd *qc)
 		addr = (u32)sg_dma_address(sg);
 		sg_len = sg_dma_len(sg);
 
-		/* H/w transfer count is only 29 bits long, let's be careful */
-		while (sg_len) {
-			len = sg_len;
-			if (len > 0x1ffffffe)
-				len = 0x1ffffffe;
-
-			prd[pi].addr = cpu_to_le32(addr);
-			prd[pi].flags_len = cpu_to_le32(len);
-			VPRINTK("PRD[%u] = (0x%X, 0x%X)\n", pi, addr, len);
-
-			pi++;
-			sg_len -= len;
-			addr += len;
-		}
+		prd[si].addr = cpu_to_le32(addr);
+		prd[si].flags_len = cpu_to_le32(sg_len);
 	}
 
 	/* end-of-table flag */
-	prd[pi - 1].addr |= cpu_to_le32(SATA_RCAR_DTEND);
+	prd[si - 1].addr |= cpu_to_le32(SATA_RCAR_DTEND);
 }
 
-static void sata_rcar_qc_prep(struct ata_queued_cmd *qc)
+static enum ata_completion_errors sata_rcar_qc_prep(struct ata_queued_cmd *qc)
 {
 	if (!(qc->flags & ATA_QCFLAG_DMAMAP))
-		return;
+		return AC_ERR_OK;
 
 	sata_rcar_bmdma_fill_sg(qc);
+
+	return AC_ERR_OK;
 }
 
 static void sata_rcar_bmdma_setup(struct ata_queued_cmd *qc)
 {
 	struct ata_port *ap = qc->ap;
 	unsigned int rw = qc->tf.flags & ATA_TFLAG_WRITE;
-	u32 dmactl;
 	struct sata_rcar_priv *priv = ap->host->private_data;
+	void __iomem *base = priv->base;
+	u32 dmactl;
 
 	/* load PRD table addr. */
 	mb();   /* make sure PRD table writes are visible to controller */
-	iowrite32(ap->bmdma_prd_dma, priv->base + ATAPI_DTB_ADR_REG);
+	iowrite32(ap->bmdma_prd_dma, base + ATAPI_DTB_ADR_REG);
 
 	/* specify data direction, triple-check start bit is clear */
-	dmactl = ioread32(priv->base + ATAPI_CONTROL1_REG);
+	dmactl = ioread32(base + ATAPI_CONTROL1_REG);
 	dmactl &= ~(ATAPI_CONTROL1_RW | ATAPI_CONTROL1_STOP);
 	if (dmactl & ATAPI_CONTROL1_START) {
 		dmactl &= ~ATAPI_CONTROL1_START;
@@ -535,7 +554,7 @@ static void sata_rcar_bmdma_setup(struct ata_queued_cmd *qc)
 	}
 	if (!rw)
 		dmactl |= ATAPI_CONTROL1_RW;
-	iowrite32(dmactl, priv->base + ATAPI_CONTROL1_REG);
+	iowrite32(dmactl, base + ATAPI_CONTROL1_REG);
 
 	/* issue r/w command */
 	ap->ops->sff_exec_command(ap, &qc->tf);
@@ -544,28 +563,30 @@ static void sata_rcar_bmdma_setup(struct ata_queued_cmd *qc)
 static void sata_rcar_bmdma_start(struct ata_queued_cmd *qc)
 {
 	struct ata_port *ap = qc->ap;
-	u32 dmactl;
 	struct sata_rcar_priv *priv = ap->host->private_data;
+	void __iomem *base = priv->base;
+	u32 dmactl;
 
 	/* start host DMA transaction */
-	dmactl = ioread32(priv->base + ATAPI_CONTROL1_REG);
+	dmactl = ioread32(base + ATAPI_CONTROL1_REG);
 	dmactl &= ~ATAPI_CONTROL1_STOP;
 	dmactl |= ATAPI_CONTROL1_START;
-	iowrite32(dmactl, priv->base + ATAPI_CONTROL1_REG);
+	iowrite32(dmactl, base + ATAPI_CONTROL1_REG);
 }
 
 static void sata_rcar_bmdma_stop(struct ata_queued_cmd *qc)
 {
 	struct ata_port *ap = qc->ap;
 	struct sata_rcar_priv *priv = ap->host->private_data;
+	void __iomem *base = priv->base;
 	u32 dmactl;
 
 	/* force termination of DMA transfer if active */
-	dmactl = ioread32(priv->base + ATAPI_CONTROL1_REG);
+	dmactl = ioread32(base + ATAPI_CONTROL1_REG);
 	if (dmactl & ATAPI_CONTROL1_START) {
 		dmactl &= ~ATAPI_CONTROL1_START;
 		dmactl |= ATAPI_CONTROL1_STOP;
-		iowrite32(dmactl, priv->base + ATAPI_CONTROL1_REG);
+		iowrite32(dmactl, base + ATAPI_CONTROL1_REG);
 	}
 
 	/* one-PIO-cycle guaranteed wait, per spec, for HDMA1:0 transition */
@@ -575,8 +596,8 @@ static void sata_rcar_bmdma_stop(struct ata_queued_cmd *qc)
 static u8 sata_rcar_bmdma_status(struct ata_port *ap)
 {
 	struct sata_rcar_priv *priv = ap->host->private_data;
-	u32 status;
 	u8 host_stat = 0;
+	u32 status;
 
 	status = ioread32(priv->base + ATAPI_STATUS_REG);
 	if (status & ATAPI_STATUS_DEVINT)
@@ -587,8 +608,15 @@ static u8 sata_rcar_bmdma_status(struct ata_port *ap)
 	return host_stat;
 }
 
-static struct scsi_host_template sata_rcar_sht = {
-	ATA_BMDMA_SHT(DRV_NAME),
+static const struct scsi_host_template sata_rcar_sht = {
+	ATA_BASE_SHT(DRV_NAME),
+	/*
+	 * This controller allows transfer chunks up to 512MB which cross 64KB
+	 * boundaries, therefore the DMA limits are more relaxed than standard
+	 * ATA SFF.
+	 */
+	.sg_tablesize		= ATA_MAX_PRD,
+	.dma_boundary		= SATA_RCAR_DMA_BOUNDARY,
 };
 
 static struct ata_port_operations sata_rcar_port_ops = {
@@ -596,7 +624,7 @@ static struct ata_port_operations sata_rcar_port_ops = {
 
 	.freeze			= sata_rcar_freeze,
 	.thaw			= sata_rcar_thaw,
-	.softreset		= sata_rcar_softreset,
+	.reset.softreset	= sata_rcar_softreset,
 
 	.scr_read		= sata_rcar_scr_read,
 	.scr_write		= sata_rcar_scr_write,
@@ -630,7 +658,7 @@ static void sata_rcar_serr_interrupt(struct ata_port *ap)
 	if (!serror)
 		return;
 
-	DPRINTK("SError @host_intr: 0x%x\n", serror);
+	ata_port_dbg(ap, "SError @host_intr: 0x%x\n", serror);
 
 	/* first, analyze and record host port events */
 	ata_ehi_clear_desc(ehi);
@@ -668,19 +696,20 @@ static irqreturn_t sata_rcar_interrupt(int irq, void *dev_instance)
 {
 	struct ata_host *host = dev_instance;
 	struct sata_rcar_priv *priv = host->private_data;
-	struct ata_port *ap;
+	void __iomem *base = priv->base;
 	unsigned int handled = 0;
+	struct ata_port *ap;
 	u32 sataintstat;
 	unsigned long flags;
 
 	spin_lock_irqsave(&host->lock, flags);
 
-	sataintstat = ioread32(priv->base + SATAINTSTAT_REG);
+	sataintstat = ioread32(base + SATAINTSTAT_REG);
 	sataintstat &= SATA_RCAR_INT_MASK;
 	if (!sataintstat)
 		goto done;
 	/* ack */
-	iowrite32(~sataintstat & 0x7ff, priv->base + SATAINTSTAT_REG);
+	iowrite32(~sataintstat & priv->sataint_mask, base + SATAINTSTAT_REG);
 
 	ap = host->ports[0];
 
@@ -702,15 +731,19 @@ static void sata_rcar_setup_port(struct ata_host *host)
 	struct ata_port *ap = host->ports[0];
 	struct ata_ioports *ioaddr = &ap->ioaddr;
 	struct sata_rcar_priv *priv = host->private_data;
+	void __iomem *base = priv->base;
 
 	ap->ops		= &sata_rcar_port_ops;
 	ap->pio_mask	= ATA_PIO4;
 	ap->udma_mask	= ATA_UDMA6;
 	ap->flags	|= ATA_FLAG_SATA;
 
-	ioaddr->cmd_addr = priv->base + SDATA_REG;
-	ioaddr->ctl_addr = priv->base + SSDEVCON_REG;
-	ioaddr->scr_addr = priv->base + SCRSSTS_REG;
+	if (priv->type == RCAR_R8A7790_ES1_SATA)
+		ap->flags	|= ATA_FLAG_NO_DIPM;
+
+	ioaddr->cmd_addr = base + SDATA_REG;
+	ioaddr->ctl_addr = base + SSDEVCON_REG;
+	ioaddr->scr_addr = base + SCRSSTS_REG;
 	ioaddr->altstatus_addr = ioaddr->ctl_addr;
 
 	ioaddr->data_addr	= ioaddr->cmd_addr + (ATA_REG_DATA << 2);
@@ -725,85 +758,138 @@ static void sata_rcar_setup_port(struct ata_host *host)
 	ioaddr->command_addr	= ioaddr->cmd_addr + (ATA_REG_CMD << 2);
 }
 
-static void sata_rcar_init_controller(struct ata_host *host)
+static void sata_rcar_init_module(struct sata_rcar_priv *priv)
 {
-	struct sata_rcar_priv *priv = host->private_data;
+	void __iomem *base = priv->base;
 	u32 val;
 
-	/* reset and setup phy */
-	sata_rcar_phy_initialize(priv);
-	sata_rcar_phy_write(priv, SATAPCTLR1_REG, 0x00200188, 0);
-	sata_rcar_phy_write(priv, SATAPCTLR1_REG, 0x00200188, 1);
-	sata_rcar_phy_write(priv, SATAPCTLR3_REG, 0x0000A061, 0);
-	sata_rcar_phy_write(priv, SATAPCTLR2_REG, 0x20000000, 0);
-	sata_rcar_phy_write(priv, SATAPCTLR2_REG, 0x20000000, 1);
-	sata_rcar_phy_write(priv, SATAPCTLR4_REG, 0x28E80000, 0);
-
 	/* SATA-IP reset state */
-	val = ioread32(priv->base + ATAPI_CONTROL1_REG);
+	val = ioread32(base + ATAPI_CONTROL1_REG);
 	val |= ATAPI_CONTROL1_RESET;
-	iowrite32(val, priv->base + ATAPI_CONTROL1_REG);
+	iowrite32(val, base + ATAPI_CONTROL1_REG);
 
 	/* ISM mode, PRD mode, DTEND flag at bit 0 */
-	val = ioread32(priv->base + ATAPI_CONTROL1_REG);
+	val = ioread32(base + ATAPI_CONTROL1_REG);
 	val |= ATAPI_CONTROL1_ISM;
 	val |= ATAPI_CONTROL1_DESE;
 	val |= ATAPI_CONTROL1_DTA32M;
-	iowrite32(val, priv->base + ATAPI_CONTROL1_REG);
+	iowrite32(val, base + ATAPI_CONTROL1_REG);
 
 	/* Release the SATA-IP from the reset state */
-	val = ioread32(priv->base + ATAPI_CONTROL1_REG);
+	val = ioread32(base + ATAPI_CONTROL1_REG);
 	val &= ~ATAPI_CONTROL1_RESET;
-	iowrite32(val, priv->base + ATAPI_CONTROL1_REG);
+	iowrite32(val, base + ATAPI_CONTROL1_REG);
 
 	/* ack and mask */
-	iowrite32(0, priv->base + SATAINTSTAT_REG);
-	iowrite32(0x7ff, priv->base + SATAINTMASK_REG);
+	iowrite32(0, base + SATAINTSTAT_REG);
+	iowrite32(priv->sataint_mask, base + SATAINTMASK_REG);
+
 	/* enable interrupts */
-	iowrite32(ATAPI_INT_ENABLE_SATAINT, priv->base + ATAPI_INT_ENABLE_REG);
+	iowrite32(ATAPI_INT_ENABLE_SATAINT, base + ATAPI_INT_ENABLE_REG);
 }
+
+static void sata_rcar_init_controller(struct ata_host *host)
+{
+	struct sata_rcar_priv *priv = host->private_data;
+
+	priv->sataint_mask = SATAINTMASK_ALL_GEN2;
+
+	/* reset and setup phy */
+	switch (priv->type) {
+	case RCAR_GEN1_SATA:
+		priv->sataint_mask = SATAINTMASK_ALL_GEN1;
+		sata_rcar_gen1_phy_init(priv);
+		break;
+	case RCAR_GEN2_SATA:
+	case RCAR_R8A7790_ES1_SATA:
+		sata_rcar_gen2_phy_init(priv);
+		break;
+	case RCAR_GEN3_SATA:
+		break;
+	default:
+		dev_warn(host->dev, "SATA phy is not initialized\n");
+		break;
+	}
+
+	sata_rcar_init_module(priv);
+}
+
+static const struct of_device_id sata_rcar_match[] = {
+	{
+		/* Deprecated by "renesas,sata-r8a7779" */
+		.compatible = "renesas,rcar-sata",
+		.data = (void *)RCAR_GEN1_SATA,
+	},
+	{
+		.compatible = "renesas,sata-r8a7779",
+		.data = (void *)RCAR_GEN1_SATA,
+	},
+	{
+		.compatible = "renesas,sata-r8a7790",
+		.data = (void *)RCAR_GEN2_SATA
+	},
+	{
+		.compatible = "renesas,sata-r8a7790-es1",
+		.data = (void *)RCAR_R8A7790_ES1_SATA
+	},
+	{
+		.compatible = "renesas,sata-r8a7791",
+		.data = (void *)RCAR_GEN2_SATA
+	},
+	{
+		.compatible = "renesas,sata-r8a7793",
+		.data = (void *)RCAR_GEN2_SATA
+	},
+	{
+		.compatible = "renesas,sata-r8a7795",
+		.data = (void *)RCAR_GEN3_SATA
+	},
+	{
+		.compatible = "renesas,rcar-gen2-sata",
+		.data = (void *)RCAR_GEN2_SATA
+	},
+	{
+		.compatible = "renesas,rcar-gen3-sata",
+		.data = (void *)RCAR_GEN3_SATA
+	},
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, sata_rcar_match);
 
 static int sata_rcar_probe(struct platform_device *pdev)
 {
+	struct device *dev = &pdev->dev;
 	struct ata_host *host;
 	struct sata_rcar_priv *priv;
-	struct resource *mem;
-	int irq;
-	int ret = 0;
-
-	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (mem == NULL)
-		return -EINVAL;
+	int irq, ret;
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq <= 0)
-		return -EINVAL;
+	if (irq < 0)
+		return irq;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(struct sata_rcar_priv),
-			   GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, struct sata_rcar_priv);
 	if (!priv)
 		return -ENOMEM;
 
-	priv->clk = devm_clk_get(&pdev->dev, NULL);
-	if (IS_ERR(priv->clk)) {
-		dev_err(&pdev->dev, "failed to get access to sata clock\n");
-		return PTR_ERR(priv->clk);
-	}
-	clk_enable(priv->clk);
+	priv->type = (unsigned long)of_device_get_match_data(dev);
 
-	host = ata_host_alloc(&pdev->dev, 1);
+	pm_runtime_enable(dev);
+	ret = pm_runtime_get_sync(dev);
+	if (ret < 0)
+		goto err_pm_put;
+
+	host = ata_host_alloc(dev, 1);
 	if (!host) {
-		dev_err(&pdev->dev, "ata_host_alloc failed\n");
 		ret = -ENOMEM;
-		goto cleanup;
+		goto err_pm_put;
 	}
 
 	host->private_data = priv;
 
-	priv->base = devm_ioremap_resource(&pdev->dev, mem);
+	priv->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(priv->base)) {
 		ret = PTR_ERR(priv->base);
-		goto cleanup;
+		goto err_pm_put;
 	}
 
 	/* setup port */
@@ -817,62 +903,94 @@ static int sata_rcar_probe(struct platform_device *pdev)
 	if (!ret)
 		return 0;
 
-cleanup:
-	clk_disable(priv->clk);
-
+err_pm_put:
+	pm_runtime_put(dev);
+	pm_runtime_disable(dev);
 	return ret;
 }
 
-static int sata_rcar_remove(struct platform_device *pdev)
+static void sata_rcar_remove(struct platform_device *pdev)
 {
-	struct ata_host *host = dev_get_drvdata(&pdev->dev);
+	struct ata_host *host = platform_get_drvdata(pdev);
 	struct sata_rcar_priv *priv = host->private_data;
+	void __iomem *base = priv->base;
 
 	ata_host_detach(host);
 
 	/* disable interrupts */
-	iowrite32(0, priv->base + ATAPI_INT_ENABLE_REG);
+	iowrite32(0, base + ATAPI_INT_ENABLE_REG);
 	/* ack and mask */
-	iowrite32(0, priv->base + SATAINTSTAT_REG);
-	iowrite32(0x7ff, priv->base + SATAINTMASK_REG);
+	iowrite32(0, base + SATAINTSTAT_REG);
+	iowrite32(priv->sataint_mask, base + SATAINTMASK_REG);
 
-	clk_disable(priv->clk);
-
-	return 0;
+	pm_runtime_put(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
 }
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 static int sata_rcar_suspend(struct device *dev)
 {
 	struct ata_host *host = dev_get_drvdata(dev);
 	struct sata_rcar_priv *priv = host->private_data;
-	int ret;
+	void __iomem *base = priv->base;
 
-	ret = ata_host_suspend(host, PMSG_SUSPEND);
-	if (!ret) {
-		/* disable interrupts */
-		iowrite32(0, priv->base + ATAPI_INT_ENABLE_REG);
-		/* mask */
-		iowrite32(0x7ff, priv->base + SATAINTMASK_REG);
+	ata_host_suspend(host, PMSG_SUSPEND);
 
-		clk_disable(priv->clk);
-	}
+	/* disable interrupts */
+	iowrite32(0, base + ATAPI_INT_ENABLE_REG);
+	/* mask */
+	iowrite32(priv->sataint_mask, base + SATAINTMASK_REG);
 
-	return ret;
+	pm_runtime_put(dev);
+
+	return 0;
 }
 
 static int sata_rcar_resume(struct device *dev)
 {
 	struct ata_host *host = dev_get_drvdata(dev);
 	struct sata_rcar_priv *priv = host->private_data;
+	void __iomem *base = priv->base;
+	int ret;
 
-	clk_enable(priv->clk);
+	ret = pm_runtime_get_sync(dev);
+	if (ret < 0) {
+		pm_runtime_put(dev);
+		return ret;
+	}
 
-	/* ack and mask */
-	iowrite32(0, priv->base + SATAINTSTAT_REG);
-	iowrite32(0x7ff, priv->base + SATAINTMASK_REG);
-	/* enable interrupts */
-	iowrite32(ATAPI_INT_ENABLE_SATAINT, priv->base + ATAPI_INT_ENABLE_REG);
+	if (priv->type == RCAR_GEN3_SATA) {
+		sata_rcar_init_module(priv);
+	} else {
+		/* ack and mask */
+		iowrite32(0, base + SATAINTSTAT_REG);
+		iowrite32(priv->sataint_mask, base + SATAINTMASK_REG);
+
+		/* enable interrupts */
+		iowrite32(ATAPI_INT_ENABLE_SATAINT,
+			  base + ATAPI_INT_ENABLE_REG);
+	}
+
+	ata_host_resume(host);
+
+	return 0;
+}
+
+static int sata_rcar_restore(struct device *dev)
+{
+	struct ata_host *host = dev_get_drvdata(dev);
+	int ret;
+
+	ret = pm_runtime_get_sync(dev);
+	if (ret < 0) {
+		pm_runtime_put(dev);
+		return ret;
+	}
+
+	sata_rcar_setup_port(host);
+
+	/* initialize host controller */
+	sata_rcar_init_controller(host);
 
 	ata_host_resume(host);
 
@@ -882,23 +1000,20 @@ static int sata_rcar_resume(struct device *dev)
 static const struct dev_pm_ops sata_rcar_pm_ops = {
 	.suspend	= sata_rcar_suspend,
 	.resume		= sata_rcar_resume,
+	.freeze		= sata_rcar_suspend,
+	.thaw		= sata_rcar_resume,
+	.poweroff	= sata_rcar_suspend,
+	.restore	= sata_rcar_restore,
 };
 #endif
-
-static struct of_device_id sata_rcar_match[] = {
-	{ .compatible = "renesas,rcar-sata", },
-	{},
-};
-MODULE_DEVICE_TABLE(of, sata_rcar_match);
 
 static struct platform_driver sata_rcar_driver = {
 	.probe		= sata_rcar_probe,
 	.remove		= sata_rcar_remove,
 	.driver = {
 		.name		= DRV_NAME,
-		.owner		= THIS_MODULE,
 		.of_match_table	= sata_rcar_match,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 		.pm		= &sata_rcar_pm_ops,
 #endif
 	},

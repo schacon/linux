@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * kdebug.h:  Defines and definitions for debugging the Linux kernel
  *            under various kernel debuggers.
@@ -18,7 +19,7 @@
 
 #define DEBUG_BP_TRAP     126
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 /* The debug vector is passed in %o1 at boot time.  It is a pointer to
  * a structure in the debuggers address space.  Here is its format.
  */
@@ -63,7 +64,7 @@ enum die_val {
 	DIE_OOPS,
 };
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* !(__ASSEMBLER__) */
 
 /* Some nice offset defines for assembler code. */
 #define KDEBUG_ENTRY_OFF    0x0

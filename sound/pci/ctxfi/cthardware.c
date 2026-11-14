@@ -1,9 +1,6 @@
-/**
+// SPDX-License-Identifier: GPL-2.0-only
+/*
  * Copyright (C) 2008, Creative Technology Ltd. All Rights Reserved.
- *
- * This source file is released under GPL v2 license (no other versions).
- * See the COPYING file included in the main directory of this source
- * distribution for the license terms and conditions.
  *
  * @File	cthardware.c
  *
@@ -12,7 +9,6 @@
  *
  * @Author	Liu Chun
  * @Date 	Jun 26 2008
- *
  */
 
 #include "cthardware.h"
@@ -69,7 +65,8 @@ unsigned int get_field(unsigned int data, unsigned int field)
 {
 	int i;
 
-	BUG_ON(!field);
+	if (WARN_ON(!field))
+		return 0;
 	/* @field should always be greater than 0 */
 	for (i = 0; !(field & (1 << i)); )
 		i++;
@@ -81,7 +78,8 @@ void set_field(unsigned int *data, unsigned int field, unsigned int value)
 {
 	int i;
 
-	BUG_ON(!field);
+	if (WARN_ON(!field))
+		return;
 	/* @field should always be greater than 0 */
 	for (i = 0; !(field & (1 << i)); )
 		i++;

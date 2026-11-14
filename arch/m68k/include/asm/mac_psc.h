@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Apple Peripheral System Controller (PSC)
  *
@@ -206,10 +207,9 @@
 				 * Unknown, always 0x0000.
 				 */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 extern volatile __u8 *psc;
-extern int psc_present;
 
 extern void psc_register_interrupts(void);
 extern void psc_irq_enable(int);
@@ -249,4 +249,4 @@ static inline u32 psc_read_long(int offset)
 	return *((volatile __u32 *)(psc + offset));
 }
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */

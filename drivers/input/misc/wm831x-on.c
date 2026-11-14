@@ -1,4 +1,4 @@
-/**
+/*
  * wm831x-on.c - WM831X ON pin driver
  *
  * Copyright (C) 2009 Wolfson Microelectronics plc
@@ -18,7 +18,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -76,8 +75,7 @@ static int wm831x_on_probe(struct platform_device *pdev)
 	int irq = wm831x_irq(wm831x, platform_get_irq(pdev, 0));
 	int ret;
 
-	wm831x_on = devm_kzalloc(&pdev->dev, sizeof(struct wm831x_on),
-				 GFP_KERNEL);
+	wm831x_on = devm_kzalloc_obj(&pdev->dev, struct wm831x_on);
 	if (!wm831x_on) {
 		dev_err(&pdev->dev, "Can't allocate data\n");
 		return -ENOMEM;
@@ -97,10 +95,10 @@ static int wm831x_on_probe(struct platform_device *pdev)
 	wm831x_on->dev->keybit[BIT_WORD(KEY_POWER)] = BIT_MASK(KEY_POWER);
 	wm831x_on->dev->name = "wm831x_on";
 	wm831x_on->dev->phys = "wm831x_on/input0";
-	wm831x_on->dev->dev.parent = &pdev->dev;
 
 	ret = request_threaded_irq(irq, NULL, wm831x_on_irq,
-				   IRQF_TRIGGER_RISING, "wm831x_on",
+				   IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+				   "wm831x_on",
 				   wm831x_on);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Unable to request IRQ: %d\n", ret);
@@ -123,15 +121,13 @@ err:
 	return ret;
 }
 
-static int wm831x_on_remove(struct platform_device *pdev)
+static void wm831x_on_remove(struct platform_device *pdev)
 {
 	struct wm831x_on *wm831x_on = platform_get_drvdata(pdev);
 	int irq = platform_get_irq(pdev, 0);
 
 	free_irq(irq, wm831x_on);
 	cancel_delayed_work_sync(&wm831x_on->work);
-
-	return 0;
 }
 
 static struct platform_driver wm831x_on_driver = {
@@ -139,7 +135,6 @@ static struct platform_driver wm831x_on_driver = {
 	.remove		= wm831x_on_remove,
 	.driver		= {
 		.name	= "wm831x-on",
-		.owner	= THIS_MODULE,
 	},
 };
 module_platform_driver(wm831x_on_driver);

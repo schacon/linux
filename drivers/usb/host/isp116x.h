@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ISP116x register declarations and HCD data structures
  *
@@ -259,7 +260,6 @@ struct isp116x {
 
 	struct isp116x_platform_data *board;
 
-	struct dentry *dentry;
 	unsigned long stat1, stat2, stat4, stat8, stat16;
 
 	/* HC registers */
@@ -325,11 +325,7 @@ struct isp116x_ep {
 
 /*-------------------------------------------------------------------------*/
 
-#ifdef DEBUG
-#define DBG(stuff...)		printk(KERN_DEBUG "116x: " stuff)
-#else
-#define DBG(stuff...)		do{}while(0)
-#endif
+#define DBG(stuff...)		pr_debug("116x: " stuff)
 
 #ifdef VERBOSE
 #    define VDBG		DBG
@@ -358,15 +354,8 @@ struct isp116x_ep {
 #define isp116x_check_platform_delay(h)	0
 #endif
 
-#if defined(DEBUG)
-#define	IRQ_TEST()	BUG_ON(!irqs_disabled())
-#else
-#define	IRQ_TEST()	do{}while(0)
-#endif
-
 static inline void isp116x_write_addr(struct isp116x *isp116x, unsigned reg)
 {
-	IRQ_TEST();
 	writew(reg & 0xff, isp116x->addr_reg);
 	isp116x_delay(isp116x, 300);
 }

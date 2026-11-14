@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/alpha/lib/memcpy.c
  *
@@ -16,6 +17,8 @@
  */
 
 #include <linux/types.h>
+#include <linux/export.h>
+#include <linux/string.h>
 
 /*
  * This should be done in one go with ldq_u*2/mask/stq_u. Do it
@@ -148,6 +151,8 @@ static inline void __memcpy_aligned_dn (unsigned long d, unsigned long s,
 	DO_REST_ALIGNED_DN(d,s,n);
 }
 
+#undef memcpy
+
 void * memcpy(void * dest, const void *src, size_t n)
 {
 	if (!(((unsigned long) dest ^ (unsigned long) src) & 7)) {
@@ -158,6 +163,4 @@ void * memcpy(void * dest, const void *src, size_t n)
 	__memcpy_unaligned_up ((unsigned long) dest, (unsigned long) src, n);
 	return dest;
 }
-
-/* For backward modules compatibility, define __memcpy.  */
-asm("__memcpy = memcpy; .globl __memcpy");
+EXPORT_SYMBOL(memcpy);

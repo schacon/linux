@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 1999-2013 Petko Manolov (petkan@nucleusys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
  */
 
 
@@ -83,13 +80,11 @@ typedef struct pegasus {
 	struct usb_device	*usb;
 	struct usb_interface	*intf;
 	struct net_device	*net;
-	struct net_device_stats	stats;
 	struct mii_if_info	mii;
 	unsigned		flags;
 	unsigned		features;
 	u32			msg_enable;
 	u32			wolopts;
-	int			dev_index;
 	int			intr_interval;
 	struct tasklet_struct	rx_tl;
 	struct delayed_work	carrier_check;
@@ -106,8 +101,6 @@ typedef struct pegasus {
 
 struct usb_eth_dev {
 	char	*name;
-	__u16	vendor;
-	__u16	device;
 	__u32	private; /* LSB is gpio reset value */
 };
 

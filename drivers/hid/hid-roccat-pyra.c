@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Roccat Pyra driver for Linux
  *
@@ -5,10 +6,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
 /*
@@ -29,12 +26,11 @@
 
 static uint profile_numbers[5] = {0, 1, 2, 3, 4};
 
-/* pyra_class is used for creating sysfs attributes via roccat char device */
-static struct class *pyra_class;
-
 static void profile_activated(struct pyra_device *pyra,
 		unsigned int new_profile)
 {
+	if (new_profile >= ARRAY_SIZE(pyra->profile_settings))
+		return;
 	pyra->actual_profile = new_profile;
 	pyra->actual_cpi = pyra->profile_settings[pyra->actual_profile].y_cpi;
 }
@@ -88,8 +84,7 @@ static ssize_t pyra_sysfs_read(struct file *fp, struct kobject *kobj,
 		char *buf, loff_t off, size_t count,
 		size_t real_size, uint command)
 {
-	struct device *dev =
-			container_of(kobj, struct device, kobj)->parent->parent;
+	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct pyra_device *pyra = hid_get_drvdata(dev_get_drvdata(dev));
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	int retval;
@@ -114,8 +109,7 @@ static ssize_t pyra_sysfs_write(struct file *fp, struct kobject *kobj,
 		void const *buf, loff_t off, size_t count,
 		size_t real_size, uint command)
 {
-	struct device *dev =
-			container_of(kobj, struct device, kobj)->parent->parent;
+	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct pyra_device *pyra = hid_get_drvdata(dev_get_drvdata(dev));
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	int retval;
@@ -135,8 +129,8 @@ static ssize_t pyra_sysfs_write(struct file *fp, struct kobject *kobj,
 
 #define PYRA_SYSFS_W(thingy, THINGY) \
 static ssize_t pyra_sysfs_write_ ## thingy(struct file *fp, \
-		struct kobject *kobj, struct bin_attribute *attr, char *buf, \
-		loff_t off, size_t count) \
+		struct kobject *kobj, const struct bin_attribute *attr, \
+		char *buf, loff_t off, size_t count) \
 { \
 	return pyra_sysfs_write(fp, kobj, buf, off, count, \
 			PYRA_SIZE_ ## THINGY, PYRA_COMMAND_ ## THINGY); \
@@ -144,8 +138,8 @@ static ssize_t pyra_sysfs_write_ ## thingy(struct file *fp, \
 
 #define PYRA_SYSFS_R(thingy, THINGY) \
 static ssize_t pyra_sysfs_read_ ## thingy(struct file *fp, \
-		struct kobject *kobj, struct bin_attribute *attr, char *buf, \
-		loff_t off, size_t count) \
+		struct kobject *kobj, const struct bin_attribute *attr, \
+		char *buf, loff_t off, size_t count) \
 { \
 	return pyra_sysfs_read(fp, kobj, buf, off, count, \
 			PYRA_SIZE_ ## THINGY, PYRA_COMMAND_ ## THINGY); \
@@ -156,7 +150,8 @@ PYRA_SYSFS_W(thingy, THINGY) \
 PYRA_SYSFS_R(thingy, THINGY)
 
 #define PYRA_BIN_ATTRIBUTE_RW(thingy, THINGY) \
-{ \
+PYRA_SYSFS_RW(thingy, THINGY); \
+static const struct bin_attribute bin_attr_##thingy = { \
 	.attr = { .name = #thingy, .mode = 0660 }, \
 	.size = PYRA_SIZE_ ## THINGY, \
 	.read = pyra_sysfs_read_ ## thingy, \
@@ -164,31 +159,31 @@ PYRA_SYSFS_R(thingy, THINGY)
 }
 
 #define PYRA_BIN_ATTRIBUTE_R(thingy, THINGY) \
-{ \
+PYRA_SYSFS_R(thingy, THINGY); \
+static const struct bin_attribute bin_attr_##thingy = { \
 	.attr = { .name = #thingy, .mode = 0440 }, \
-	.size = PYRA_SIZE_ ## THINGY, \
+	.size_new = PYRA_SIZE_ ## THINGY, \
 	.read = pyra_sysfs_read_ ## thingy, \
 }
 
 #define PYRA_BIN_ATTRIBUTE_W(thingy, THINGY) \
-{ \
+PYRA_SYSFS_W(thingy, THINGY); \
+static const struct bin_attribute bin_attr_##thingy = { \
 	.attr = { .name = #thingy, .mode = 0220 }, \
 	.size = PYRA_SIZE_ ## THINGY, \
 	.write = pyra_sysfs_write_ ## thingy \
 }
 
-PYRA_SYSFS_W(control, CONTROL)
-PYRA_SYSFS_RW(info, INFO)
-PYRA_SYSFS_RW(profile_settings, PROFILE_SETTINGS)
-PYRA_SYSFS_RW(profile_buttons, PROFILE_BUTTONS)
-PYRA_SYSFS_R(settings, SETTINGS)
+PYRA_BIN_ATTRIBUTE_W(control, CONTROL);
+PYRA_BIN_ATTRIBUTE_RW(info, INFO);
+PYRA_BIN_ATTRIBUTE_RW(profile_settings, PROFILE_SETTINGS);
+PYRA_BIN_ATTRIBUTE_RW(profile_buttons, PROFILE_BUTTONS);
 
 static ssize_t pyra_sysfs_read_profilex_settings(struct file *fp,
-		struct kobject *kobj, struct bin_attribute *attr, char *buf,
-		loff_t off, size_t count)
+		struct kobject *kobj, const struct bin_attribute *attr,
+		char *buf, loff_t off, size_t count)
 {
-	struct device *dev =
-			container_of(kobj, struct device, kobj)->parent->parent;
+	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	ssize_t retval;
 
@@ -203,11 +198,10 @@ static ssize_t pyra_sysfs_read_profilex_settings(struct file *fp,
 }
 
 static ssize_t pyra_sysfs_read_profilex_buttons(struct file *fp,
-		struct kobject *kobj, struct bin_attribute *attr, char *buf,
-		loff_t off, size_t count)
+		struct kobject *kobj, const struct bin_attribute *attr,
+		char *buf, loff_t off, size_t count)
 {
-	struct device *dev =
-			container_of(kobj, struct device, kobj)->parent->parent;
+	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	ssize_t retval;
 
@@ -221,12 +215,30 @@ static ssize_t pyra_sysfs_read_profilex_buttons(struct file *fp,
 			PYRA_COMMAND_PROFILE_BUTTONS);
 }
 
+#define PROFILE_ATTR(number)						\
+static const struct bin_attribute bin_attr_profile##number##_settings = {	\
+	.attr = { .name = "profile" #number "_settings", .mode = 0440 },	\
+	.size = PYRA_SIZE_PROFILE_SETTINGS,				\
+	.read = pyra_sysfs_read_profilex_settings,			\
+	.private = &profile_numbers[number-1],				\
+};									\
+static const struct bin_attribute bin_attr_profile##number##_buttons = {	\
+	.attr = { .name = "profile" #number "_buttons", .mode = 0440 },	\
+	.size = PYRA_SIZE_PROFILE_BUTTONS,				\
+	.read = pyra_sysfs_read_profilex_buttons,			\
+	.private = &profile_numbers[number-1],				\
+};
+PROFILE_ATTR(1);
+PROFILE_ATTR(2);
+PROFILE_ATTR(3);
+PROFILE_ATTR(4);
+PROFILE_ATTR(5);
+
 static ssize_t pyra_sysfs_write_settings(struct file *fp,
-		struct kobject *kobj, struct bin_attribute *attr, char *buf,
-		loff_t off, size_t count)
+		struct kobject *kobj, const struct bin_attribute *attr,
+		char *buf, loff_t off, size_t count)
 {
-	struct device *dev =
-			container_of(kobj, struct device, kobj)->parent->parent;
+	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct pyra_device *pyra = hid_get_drvdata(dev_get_drvdata(dev));
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	int retval = 0;
@@ -236,9 +248,11 @@ static ssize_t pyra_sysfs_write_settings(struct file *fp,
 	if (off != 0 || count != PYRA_SIZE_SETTINGS)
 		return -EINVAL;
 
-	mutex_lock(&pyra->pyra_lock);
-
 	settings = (struct pyra_settings const *)buf;
+	if (settings->startup_profile >= ARRAY_SIZE(pyra->profile_settings))
+		return -EINVAL;
+
+	mutex_lock(&pyra->pyra_lock);
 
 	retval = pyra_set_settings(usb_dev, settings);
 	if (retval) {
@@ -258,14 +272,20 @@ static ssize_t pyra_sysfs_write_settings(struct file *fp,
 	return PYRA_SIZE_SETTINGS;
 }
 
+PYRA_SYSFS_R(settings, SETTINGS);
+static const struct bin_attribute bin_attr_settings =
+	__BIN_ATTR(settings, (S_IWUSR | S_IRUGO),
+		   pyra_sysfs_read_settings, pyra_sysfs_write_settings,
+		   PYRA_SIZE_SETTINGS);
 
 static ssize_t pyra_sysfs_show_actual_cpi(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct pyra_device *pyra =
 			hid_get_drvdata(dev_get_drvdata(dev->parent->parent));
-	return snprintf(buf, PAGE_SIZE, "%d\n", pyra->actual_cpi);
+	return sysfs_emit(buf, "%d\n", pyra->actual_cpi);
 }
+static DEVICE_ATTR(actual_cpi, 0440, pyra_sysfs_show_actual_cpi, NULL);
 
 static ssize_t pyra_sysfs_show_actual_profile(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -280,8 +300,10 @@ static ssize_t pyra_sysfs_show_actual_profile(struct device *dev,
 			&settings, PYRA_SIZE_SETTINGS);
 	mutex_unlock(&pyra->pyra_lock);
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", settings.startup_profile);
+	return sysfs_emit(buf, "%d\n", settings.startup_profile);
 }
+static DEVICE_ATTR(actual_profile, 0440, pyra_sysfs_show_actual_profile, NULL);
+static DEVICE_ATTR(startup_profile, 0440, pyra_sysfs_show_actual_profile, NULL);
 
 static ssize_t pyra_sysfs_show_firmware_version(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -299,86 +321,52 @@ static ssize_t pyra_sysfs_show_firmware_version(struct device *dev,
 			&info, PYRA_SIZE_INFO);
 	mutex_unlock(&pyra->pyra_lock);
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", info.firmware_version);
+	return sysfs_emit(buf, "%d\n", info.firmware_version);
 }
+static DEVICE_ATTR(firmware_version, 0440, pyra_sysfs_show_firmware_version,
+		   NULL);
 
-static struct device_attribute pyra_attributes[] = {
-	__ATTR(actual_cpi, 0440, pyra_sysfs_show_actual_cpi, NULL),
-	__ATTR(actual_profile, 0440, pyra_sysfs_show_actual_profile, NULL),
-	__ATTR(firmware_version, 0440,
-			pyra_sysfs_show_firmware_version, NULL),
-	__ATTR(startup_profile, 0440,
-			pyra_sysfs_show_actual_profile, NULL),
-	__ATTR_NULL
+static struct attribute *pyra_attrs[] = {
+	&dev_attr_actual_cpi.attr,
+	&dev_attr_actual_profile.attr,
+	&dev_attr_firmware_version.attr,
+	&dev_attr_startup_profile.attr,
+	NULL,
 };
 
-static struct bin_attribute pyra_bin_attributes[] = {
-	PYRA_BIN_ATTRIBUTE_W(control, CONTROL),
-	PYRA_BIN_ATTRIBUTE_RW(info, INFO),
-	PYRA_BIN_ATTRIBUTE_RW(profile_settings, PROFILE_SETTINGS),
-	PYRA_BIN_ATTRIBUTE_RW(profile_buttons, PROFILE_BUTTONS),
-	PYRA_BIN_ATTRIBUTE_RW(settings, SETTINGS),
-	{
-		.attr = { .name = "profile1_settings", .mode = 0440 },
-		.size = PYRA_SIZE_PROFILE_SETTINGS,
-		.read = pyra_sysfs_read_profilex_settings,
-		.private = &profile_numbers[0]
-	},
-	{
-		.attr = { .name = "profile2_settings", .mode = 0440 },
-		.size = PYRA_SIZE_PROFILE_SETTINGS,
-		.read = pyra_sysfs_read_profilex_settings,
-		.private = &profile_numbers[1]
-	},
-	{
-		.attr = { .name = "profile3_settings", .mode = 0440 },
-		.size = PYRA_SIZE_PROFILE_SETTINGS,
-		.read = pyra_sysfs_read_profilex_settings,
-		.private = &profile_numbers[2]
-	},
-	{
-		.attr = { .name = "profile4_settings", .mode = 0440 },
-		.size = PYRA_SIZE_PROFILE_SETTINGS,
-		.read = pyra_sysfs_read_profilex_settings,
-		.private = &profile_numbers[3]
-	},
-	{
-		.attr = { .name = "profile5_settings", .mode = 0440 },
-		.size = PYRA_SIZE_PROFILE_SETTINGS,
-		.read = pyra_sysfs_read_profilex_settings,
-		.private = &profile_numbers[4]
-	},
-	{
-		.attr = { .name = "profile1_buttons", .mode = 0440 },
-		.size = PYRA_SIZE_PROFILE_BUTTONS,
-		.read = pyra_sysfs_read_profilex_buttons,
-		.private = &profile_numbers[0]
-	},
-	{
-		.attr = { .name = "profile2_buttons", .mode = 0440 },
-		.size = PYRA_SIZE_PROFILE_BUTTONS,
-		.read = pyra_sysfs_read_profilex_buttons,
-		.private = &profile_numbers[1]
-	},
-	{
-		.attr = { .name = "profile3_buttons", .mode = 0440 },
-		.size = PYRA_SIZE_PROFILE_BUTTONS,
-		.read = pyra_sysfs_read_profilex_buttons,
-		.private = &profile_numbers[2]
-	},
-	{
-		.attr = { .name = "profile4_buttons", .mode = 0440 },
-		.size = PYRA_SIZE_PROFILE_BUTTONS,
-		.read = pyra_sysfs_read_profilex_buttons,
-		.private = &profile_numbers[3]
-	},
-	{
-		.attr = { .name = "profile5_buttons", .mode = 0440 },
-		.size = PYRA_SIZE_PROFILE_BUTTONS,
-		.read = pyra_sysfs_read_profilex_buttons,
-		.private = &profile_numbers[4]
-	},
-	__ATTR_NULL
+static const struct bin_attribute *const pyra_bin_attributes[] = {
+	&bin_attr_control,
+	&bin_attr_info,
+	&bin_attr_profile_settings,
+	&bin_attr_profile_buttons,
+	&bin_attr_settings,
+	&bin_attr_profile1_settings,
+	&bin_attr_profile2_settings,
+	&bin_attr_profile3_settings,
+	&bin_attr_profile4_settings,
+	&bin_attr_profile5_settings,
+	&bin_attr_profile1_buttons,
+	&bin_attr_profile2_buttons,
+	&bin_attr_profile3_buttons,
+	&bin_attr_profile4_buttons,
+	&bin_attr_profile5_buttons,
+	NULL,
+};
+
+static const struct attribute_group pyra_group = {
+	.attrs = pyra_attrs,
+	.bin_attrs = pyra_bin_attributes,
+};
+
+static const struct attribute_group *pyra_groups[] = {
+	&pyra_group,
+	NULL,
+};
+
+/* pyra_class is used for creating sysfs attributes via roccat char device */
+static const struct class pyra_class = {
+	.name = "pyra",
+	.dev_groups = pyra_groups,
 };
 
 static int pyra_init_pyra_device_struct(struct usb_device *usb_dev,
@@ -415,7 +403,7 @@ static int pyra_init_specials(struct hid_device *hdev)
 	if (intf->cur_altsetting->desc.bInterfaceProtocol
 			== USB_INTERFACE_PROTOCOL_MOUSE) {
 
-		pyra = kzalloc(sizeof(*pyra), GFP_KERNEL);
+		pyra = kzalloc_obj(*pyra);
 		if (!pyra) {
 			hid_err(hdev, "can't alloc device descriptor\n");
 			return -ENOMEM;
@@ -428,7 +416,7 @@ static int pyra_init_specials(struct hid_device *hdev)
 			goto exit_free;
 		}
 
-		retval = roccat_connect(pyra_class, hdev,
+		retval = roccat_connect(&pyra_class, hdev,
 				sizeof(struct pyra_roccat_report));
 		if (retval < 0) {
 			hid_err(hdev, "couldn't init char dev\n");
@@ -463,6 +451,9 @@ static void pyra_remove_specials(struct hid_device *hdev)
 static int pyra_probe(struct hid_device *hdev, const struct hid_device_id *id)
 {
 	int retval;
+
+	if (!hid_is_usb(hdev))
+		return -EINVAL;
 
 	retval = hid_parse(hdev);
 	if (retval) {
@@ -566,6 +557,9 @@ static int pyra_raw_event(struct hid_device *hdev, struct hid_report *report,
 	if (pyra == NULL)
 		return 0;
 
+	if (size < sizeof(struct pyra_mouse_event_button))
+		return 0;
+
 	pyra_keep_values_up_to_date(pyra, data);
 
 	if (pyra->roccat_claimed)
@@ -597,22 +591,20 @@ static int __init pyra_init(void)
 	int retval;
 
 	/* class name has to be same as driver name */
-	pyra_class = class_create(THIS_MODULE, "pyra");
-	if (IS_ERR(pyra_class))
-		return PTR_ERR(pyra_class);
-	pyra_class->dev_attrs = pyra_attributes;
-	pyra_class->dev_bin_attrs = pyra_bin_attributes;
+	retval = class_register(&pyra_class);
+	if (retval)
+		return retval;
 
 	retval = hid_register_driver(&pyra_driver);
 	if (retval)
-		class_destroy(pyra_class);
+		class_unregister(&pyra_class);
 	return retval;
 }
 
 static void __exit pyra_exit(void)
 {
 	hid_unregister_driver(&pyra_driver);
-	class_destroy(pyra_class);
+	class_unregister(&pyra_class);
 }
 
 module_init(pyra_init);

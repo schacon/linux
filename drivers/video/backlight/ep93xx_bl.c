@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for the Cirrus EP93xx lcd backlight
  *
  * Copyright (c) 2010 H Hartley Sweeten <hsweeten@visionengravers.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * This driver controls the pulse width modulated brightness control output,
  * BRIGHT, on the Cirrus EP9307, EP9312, and EP9315 processors.
@@ -14,7 +11,6 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
-#include <linux/fb.h>
 #include <linux/backlight.h>
 
 #define EP93XX_MAX_COUNT		255
@@ -39,13 +35,7 @@ static int ep93xxbl_set(struct backlight_device *bl, int brightness)
 
 static int ep93xxbl_update_status(struct backlight_device *bl)
 {
-	int brightness = bl->props.brightness;
-
-	if (bl->props.power != FB_BLANK_UNBLANK ||
-	    bl->props.fb_blank != FB_BLANK_UNBLANK)
-		brightness = 0;
-
-	return ep93xxbl_set(bl, brightness);
+	return ep93xxbl_set(bl, backlight_get_brightness(bl));
 }
 
 static int ep93xxbl_get_brightness(struct backlight_device *bl)
@@ -67,7 +57,7 @@ static int ep93xxbl_probe(struct platform_device *dev)
 	struct backlight_properties props;
 	struct resource *res;
 
-	ep93xxbl = devm_kzalloc(&dev->dev, sizeof(*ep93xxbl), GFP_KERNEL);
+	ep93xxbl = devm_kzalloc_obj(&dev->dev, *ep93xxbl);
 	if (!ep93xxbl)
 		return -ENOMEM;
 
@@ -92,8 +82,8 @@ static int ep93xxbl_probe(struct platform_device *dev)
 	memset(&props, 0, sizeof(struct backlight_properties));
 	props.type = BACKLIGHT_RAW;
 	props.max_brightness = EP93XX_MAX_BRIGHT;
-	bl = backlight_device_register(dev->name, &dev->dev, ep93xxbl,
-				       &ep93xxbl_ops, &props);
+	bl = devm_backlight_device_register(&dev->dev, dev->name, &dev->dev,
+					ep93xxbl, &ep93xxbl_ops, &props);
 	if (IS_ERR(bl))
 		return PTR_ERR(bl);
 
@@ -103,15 +93,6 @@ static int ep93xxbl_probe(struct platform_device *dev)
 
 	ep93xxbl_update_status(bl);
 
-	return 0;
-}
-
-static int ep93xxbl_remove(struct platform_device *dev)
-{
-	struct backlight_device *bl = platform_get_drvdata(dev);
-
-	backlight_device_unregister(bl);
-	platform_set_drvdata(dev, NULL);
 	return 0;
 }
 
@@ -137,11 +118,9 @@ static SIMPLE_DEV_PM_OPS(ep93xxbl_pm_ops, ep93xxbl_suspend, ep93xxbl_resume);
 static struct platform_driver ep93xxbl_driver = {
 	.driver		= {
 		.name	= "ep93xx-bl",
-		.owner	= THIS_MODULE,
 		.pm	= &ep93xxbl_pm_ops,
 	},
 	.probe		= ep93xxbl_probe,
-	.remove		= ep93xxbl_remove,
 };
 
 module_platform_driver(ep93xxbl_driver);

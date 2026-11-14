@@ -1,28 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Sleepable Read-Copy Update mechanism for mutual exclusion
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2006
  * Copyright (C) Fujitsu, 2012
  *
- * Author: Paul McKenney <paulmck@us.ibm.com>
+ * Author: Paul McKenney <paulmck@linux.ibm.com>
  *	   Lai Jiangshan <laijs@cn.fujitsu.com>
  *
  * For detailed explanation of Read-Copy Update mechanism see -
- * 		Documentation/RCU/ *.txt
+ *		Documentation/RCU/ *.txt
  *
  */
 
@@ -31,117 +18,203 @@
 
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
+#include <linux/rculist.h>
 #include <linux/workqueue.h>
+#include <linux/rcu_segcblist.h>
 
-struct srcu_struct_array {
-	unsigned long c[2];
-	unsigned long seq[2];
-};
-
-struct rcu_batch {
-	struct rcu_head *head, **tail;
-};
-
-#define RCU_BATCH_INIT(name) { NULL, &(name.head) }
-
-struct srcu_struct {
-	unsigned completed;
-	struct srcu_struct_array __percpu *per_cpu_ref;
-	spinlock_t queue_lock; /* protect ->batch_queue, ->running */
-	bool running;
-	/* callbacks just queued */
-	struct rcu_batch batch_queue;
-	/* callbacks try to do the first check_zero */
-	struct rcu_batch batch_check0;
-	/* callbacks done with the first check_zero and the flip */
-	struct rcu_batch batch_check1;
-	struct rcu_batch batch_done;
-	struct delayed_work work;
-#ifdef CONFIG_DEBUG_LOCK_ALLOC
-	struct lockdep_map dep_map;
-#endif /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
-};
+context_lock_struct(srcu_struct, __reentrant_ctx_lock);
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 
-int __init_srcu_struct(struct srcu_struct *sp, const char *name,
-		       struct lock_class_key *key);
+int init_srcu_struct_lockdep(struct srcu_struct *ssp, const char *name,
+				     struct lock_class_key *key);
+static inline int __init_srcu_struct(struct srcu_struct *ssp, const char *name,
+				     struct lock_class_key *key)
+{
+	return init_srcu_struct_lockdep(ssp, name, key);
+}
+#ifndef CONFIG_TINY_SRCU
+int __init_srcu_struct_fast(struct srcu_struct *ssp, const char *name, struct lock_class_key *key);
+int __init_srcu_struct_fast_updown(struct srcu_struct *ssp, const char *name,
+				   struct lock_class_key *key);
+int __init_srcu_struct_atomic(struct srcu_struct *ssp, const char *name,
+			      struct lock_class_key *key);
+#endif // #ifndef CONFIG_TINY_SRCU
 
-#define init_srcu_struct(sp) \
+#define init_srcu_struct_fast(ssp) \
 ({ \
 	static struct lock_class_key __srcu_key; \
 	\
-	__init_srcu_struct((sp), #sp, &__srcu_key); \
+	__init_srcu_struct_fast((ssp), #ssp, &__srcu_key); \
+})
+
+#define init_srcu_struct_fast_updown(ssp) \
+({ \
+	static struct lock_class_key __srcu_key; \
+	\
+	__init_srcu_struct_fast_updown((ssp), #ssp, &__srcu_key); \
+})
+
+#define init_srcu_struct_atomic(ssp) \
+({ \
+	static struct lock_class_key __srcu_key; \
+	\
+	__init_srcu_struct_atomic((ssp), #ssp, &__srcu_key); \
 })
 
 #define __SRCU_DEP_MAP_INIT(srcu_name)	.dep_map = { .name = #srcu_name },
 #else /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
 
-int init_srcu_struct(struct srcu_struct *sp);
+int init_srcu_struct_generic(struct srcu_struct *ssp);
+static inline int __init_srcu_struct(struct srcu_struct *ssp, const char *name,
+				     struct lock_class_key *key)
+{
+	return init_srcu_struct_generic(ssp);
+}
+#ifndef CONFIG_TINY_SRCU
+int init_srcu_struct_fast(struct srcu_struct *ssp);
+int init_srcu_struct_fast_updown(struct srcu_struct *ssp);
+int init_srcu_struct_atomic(struct srcu_struct *ssp);
+#endif // #ifndef CONFIG_TINY_SRCU
 
 #define __SRCU_DEP_MAP_INIT(srcu_name)
 #endif /* #else #ifdef CONFIG_DEBUG_LOCK_ALLOC */
 
-void process_srcu(struct work_struct *work);
+#define init_srcu_struct(ssp) \
+({ \
+	static struct lock_class_key __srcu_key; \
+	\
+	__init_srcu_struct((ssp), #ssp, &__srcu_key); \
+})
 
-#define __SRCU_STRUCT_INIT(name)					\
-	{								\
-		.completed = -300,					\
-		.per_cpu_ref = &name##_srcu_array,			\
-		.queue_lock = __SPIN_LOCK_UNLOCKED(name.queue_lock),	\
-		.running = false,					\
-		.batch_queue = RCU_BATCH_INIT(name.batch_queue),	\
-		.batch_check0 = RCU_BATCH_INIT(name.batch_check0),	\
-		.batch_check1 = RCU_BATCH_INIT(name.batch_check1),	\
-		.batch_done = RCU_BATCH_INIT(name.batch_done),		\
-		.work = __DELAYED_WORK_INITIALIZER(name.work, process_srcu, 0),\
-		__SRCU_DEP_MAP_INIT(name)				\
-	}
+/* Values for SRCU Tree srcu_data ->srcu_reader_flavor, but also used by rcutorture. */
+#define SRCU_READ_FLAVOR_NORMAL		0x01		// srcu_read_lock().
+#define SRCU_READ_FLAVOR_NMI		0x02		// srcu_read_lock_nmisafe().
+//					0x04		// SRCU-lite is no longer with us.
+#define SRCU_READ_FLAVOR_FAST		0x04		// srcu_read_lock_fast(), also NMI-safe.
+#define SRCU_READ_FLAVOR_FAST_UPDOWN	0x08		// srcu_read_lock_fast_updown().
+#define SRCU_READ_FLAVOR_ATOMIC		0x10		// srcu_read_lock_atomic().
+#define SRCU_READ_FLAVOR_ALL		(SRCU_READ_FLAVOR_NORMAL | SRCU_READ_FLAVOR_NMI | \
+					 SRCU_READ_FLAVOR_FAST | SRCU_READ_FLAVOR_FAST_UPDOWN | \
+					 SRCU_READ_FLAVOR_ATOMIC)
+						// All of the above.
+#define SRCU_READ_FLAVOR_PREDEF		(SRCU_READ_FLAVOR_FAST | SRCU_READ_FLAVOR_ATOMIC)
+						// Flavors special DEFINE_SRCU() flavors.
+#define SRCU_READ_FLAVOR_SLOWGP		(SRCU_READ_FLAVOR_FAST | SRCU_READ_FLAVOR_FAST_UPDOWN)
+						// Flavors requiring synchronize_rcu()
+						// instead of smp_mb().
+void __srcu_read_unlock(struct srcu_struct *ssp, int idx) __releases_shared(ssp);
 
-/*
- * define and init a srcu struct at build time.
- * dont't call init_srcu_struct() nor cleanup_srcu_struct() on it.
- */
-#define DEFINE_SRCU(name)						\
-	static DEFINE_PER_CPU(struct srcu_struct_array, name##_srcu_array);\
-	struct srcu_struct name = __SRCU_STRUCT_INIT(name);
+#ifdef CONFIG_TINY_SRCU
+#include <linux/srcutiny.h>
+#elif defined(CONFIG_TREE_SRCU)
+#include <linux/srcutree.h>
+#else
+#error "Unknown SRCU implementation specified to kernel configuration"
+#endif
 
-#define DEFINE_STATIC_SRCU(name)					\
-	static DEFINE_PER_CPU(struct srcu_struct_array, name##_srcu_array);\
-	static struct srcu_struct name = __SRCU_STRUCT_INIT(name);
+void call_srcu(struct srcu_struct *ssp, struct rcu_head *head,
+		void (*func)(struct rcu_head *head));
+void cleanup_srcu_struct(struct srcu_struct *ssp);
+void synchronize_srcu(struct srcu_struct *ssp);
+void synchronize_srcu_atomic(struct srcu_struct *ssp);
 
 /**
- * call_srcu() - Queue a callback for invocation after an SRCU grace period
- * @sp: srcu_struct in queue the callback
- * @head: structure to be used for queueing the SRCU callback.
- * @func: function to be invoked after the SRCU grace period
+ * list_splice_init_srcu - splice an SRCU-protected list into an existing list
+ * @list:	the SRCU-protected list to splice
+ * @head:	the place in the existing list to splice the first list into
+ * @ssp:	the srcu_struct that readers of @list use
  *
- * The callback function will be invoked some time after a full SRCU
- * grace period elapses, in other words after all pre-existing SRCU
- * read-side critical sections have completed.  However, the callback
- * function might well execute concurrently with other SRCU read-side
- * critical sections that started after call_srcu() was invoked.  SRCU
- * read-side critical sections are delimited by srcu_read_lock() and
- * srcu_read_unlock(), and may be nested.
+ * Like list_splice_init_rcu(), but wait for the SRCU readers of @list
+ * instead of RCU ones, so that none of them can follow a next pointer
+ * onto @head.
  *
- * The callback will be invoked from process context, but must nevertheless
- * be fast and must not block.
+ * Note that this function blocks, and that the caller must prevent any
+ * other updates to @list.
  */
-void call_srcu(struct srcu_struct *sp, struct rcu_head *head,
-		void (*func)(struct rcu_head *head));
+static inline void list_splice_init_srcu(struct list_head *list,
+					 struct list_head *head,
+					 struct srcu_struct *ssp)
+{
+	struct list_head *first = list->next;
+	struct list_head *last = list->prev;
+	struct list_head *next = head->next;
 
-void cleanup_srcu_struct(struct srcu_struct *sp);
-int __srcu_read_lock(struct srcu_struct *sp) __acquires(sp);
-void __srcu_read_unlock(struct srcu_struct *sp, int idx) __releases(sp);
-void synchronize_srcu(struct srcu_struct *sp);
-void synchronize_srcu_expedited(struct srcu_struct *sp);
-long srcu_batches_completed(struct srcu_struct *sp);
-void srcu_barrier(struct srcu_struct *sp);
+	if (list_empty(list))
+		return;
+
+	INIT_LIST_HEAD_RCU(list);
+	synchronize_srcu(ssp);
+	ASSERT_EXCLUSIVE_ACCESS(*first);
+	ASSERT_EXCLUSIVE_ACCESS(*last);
+
+	last->next = next;
+	rcu_assign_pointer(list_next_rcu(head), first);
+	first->prev = head;
+	next->prev = last;
+}
+
+#define SRCU_GET_STATE_COMPLETED 0x1
+
+/**
+ * get_completed_synchronize_srcu - Return a pre-completed polled state cookie
+ *
+ * Returns a value that poll_state_synchronize_srcu() will always treat
+ * as a cookie whose grace period has already completed.
+ */
+static inline unsigned long get_completed_synchronize_srcu(void)
+{
+	return SRCU_GET_STATE_COMPLETED;
+}
+
+unsigned long get_state_synchronize_srcu(struct srcu_struct *ssp);
+unsigned long start_poll_synchronize_srcu(struct srcu_struct *ssp);
+bool poll_state_synchronize_srcu(struct srcu_struct *ssp, unsigned long cookie);
+
+// Maximum number of unsigned long values corresponding to
+// not-yet-completed SRCU grace periods.
+#define NUM_ACTIVE_SRCU_POLL_OLDSTATE 2
+
+/**
+ * same_state_synchronize_srcu - Are two old-state values identical?
+ * @oldstate1: First old-state value.
+ * @oldstate2: Second old-state value.
+ *
+ * The two old-state values must have been obtained from either
+ * get_state_synchronize_srcu(), start_poll_synchronize_srcu(), or
+ * get_completed_synchronize_srcu().  Returns @true if the two values are
+ * identical and @false otherwise.  This allows structures whose lifetimes
+ * are tracked by old-state values to push these values to a list header,
+ * allowing those structures to be slightly smaller.
+ */
+static inline bool same_state_synchronize_srcu(unsigned long oldstate1, unsigned long oldstate2)
+{
+	return oldstate1 == oldstate2;
+}
+
+#ifdef CONFIG_NEED_SRCU_NMI_SAFE
+int __srcu_read_lock_nmisafe(struct srcu_struct *ssp) __acquires_shared(ssp);
+void __srcu_read_unlock_nmisafe(struct srcu_struct *ssp, int idx) __releases_shared(ssp);
+#else
+static inline int __srcu_read_lock_nmisafe(struct srcu_struct *ssp)
+	__acquires_shared(ssp)
+{
+	return __srcu_read_lock(ssp);
+}
+static inline void __srcu_read_unlock_nmisafe(struct srcu_struct *ssp, int idx)
+	__releases_shared(ssp)
+{
+	__srcu_read_unlock(ssp, idx);
+}
+#endif /* CONFIG_NEED_SRCU_NMI_SAFE */
+
+void srcu_init(void);
 
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 
 /**
  * srcu_read_lock_held - might we be in SRCU read-side critical section?
+ * @ssp: The srcu_struct structure to check
  *
  * If CONFIG_DEBUG_LOCK_ALLOC is selected, returns nonzero iff in an SRCU
  * read-side critical section.  In absence of CONFIG_DEBUG_LOCK_ALLOC,
@@ -155,26 +228,65 @@ void srcu_barrier(struct srcu_struct *sp);
  * relies on normal RCU, it can be called from the CPU which
  * is in the idle loop from an RCU point of view or offline.
  */
-static inline int srcu_read_lock_held(struct srcu_struct *sp)
+static inline int srcu_read_lock_held(const struct srcu_struct *ssp)
 {
 	if (!debug_lockdep_rcu_enabled())
 		return 1;
-	return lock_is_held(&sp->dep_map);
+	return lock_is_held(&ssp->dep_map);
+}
+
+/*
+ * Annotations provide deadlock detection for SRCU.
+ *
+ * Similar to other lockdep annotations, except there is an additional
+ * srcu_lock_sync(), which is basically an empty *write*-side critical section,
+ * see lock_sync() for more information.
+ */
+
+/* Annotates a srcu_read_lock() */
+static inline void srcu_lock_acquire(struct lockdep_map *map)
+{
+	lock_map_acquire_read(map);
+}
+
+/* Annotates a srcu_read_lock() */
+static inline void srcu_lock_release(struct lockdep_map *map)
+{
+	lock_map_release(map);
+}
+
+/* Annotates a synchronize_srcu() */
+static inline void srcu_lock_sync(struct lockdep_map *map)
+{
+	lock_map_sync(map);
 }
 
 #else /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
 
-static inline int srcu_read_lock_held(struct srcu_struct *sp)
+static inline int srcu_read_lock_held(const struct srcu_struct *ssp)
 {
 	return 1;
 }
 
+#define srcu_lock_acquire(m) do { } while (0)
+#define srcu_lock_release(m) do { } while (0)
+#define srcu_lock_sync(m) do { } while (0)
+
 #endif /* #else #ifdef CONFIG_DEBUG_LOCK_ALLOC */
+
+/*
+ * No-op helper to denote that ssp must be held. Because SRCU-protected pointers
+ * should still be marked with __rcu_guarded, and we do not want to mark them
+ * with __guarded_by(ssp) as it would complicate annotations for writers, we
+ * choose the following strategy: srcu_dereference_check() calls this helper
+ * that checks that the passed ssp is held, and then fake-acquires 'RCU'.
+ */
+static inline void __srcu_read_lock_must_hold(const struct srcu_struct *ssp) __must_hold_shared(ssp) { }
 
 /**
  * srcu_dereference_check - fetch SRCU-protected pointer for later dereferencing
  * @p: the pointer to fetch and protect for later dereferencing
- * @sp: pointer to the srcu_struct, which is used to check that we
+ * @ssp: pointer to the srcu_struct, which is used to check that we
  *	really are in an SRCU read-side critical section.
  * @c: condition to check for update-side use
  *
@@ -183,24 +295,39 @@ static inline int srcu_read_lock_held(struct srcu_struct *sp)
  * to 1.  The @c argument will normally be a logical expression containing
  * lockdep_is_held() calls.
  */
-#define srcu_dereference_check(p, sp, c) \
-	__rcu_dereference_check((p), srcu_read_lock_held(sp) || (c), __rcu)
+#define srcu_dereference_check(p, ssp, c)					\
+({										\
+	__srcu_read_lock_must_hold(ssp);					\
+	__acquire_shared_ctx_lock(RCU);					\
+	__auto_type __v = __rcu_dereference_check((p), __UNIQUE_ID(rcu),	\
+				(c) || srcu_read_lock_held(ssp), __rcu);	\
+	__release_shared_ctx_lock(RCU);					\
+	__v;									\
+})
 
 /**
  * srcu_dereference - fetch SRCU-protected pointer for later dereferencing
  * @p: the pointer to fetch and protect for later dereferencing
- * @sp: pointer to the srcu_struct, which is used to check that we
+ * @ssp: pointer to the srcu_struct, which is used to check that we
  *	really are in an SRCU read-side critical section.
  *
  * Makes rcu_dereference_check() do the dirty work.  If PROVE_RCU
  * is enabled, invoking this outside of an RCU read-side critical
  * section will result in an RCU-lockdep splat.
  */
-#define srcu_dereference(p, sp) srcu_dereference_check((p), (sp), 0)
+#define srcu_dereference(p, ssp) srcu_dereference_check((p), (ssp), 0)
+
+/**
+ * srcu_dereference_notrace - no tracing and no lockdep calls from here
+ * @p: the pointer to fetch and protect for later dereferencing
+ * @ssp: pointer to the srcu_struct, which is used to check that we
+ *	really are in an SRCU read-side critical section.
+ */
+#define srcu_dereference_notrace(p, ssp) srcu_dereference_check((p), (ssp), 1)
 
 /**
  * srcu_read_lock - register a new reader for an SRCU-protected structure.
- * @sp: srcu_struct in which to register the new reader.
+ * @ssp: srcu_struct in which to register the new reader.
  *
  * Enter an SRCU read-side critical section.  Note that SRCU read-side
  * critical sections may be nested.  However, it is illegal to
@@ -210,74 +337,430 @@ static inline int srcu_read_lock_held(struct srcu_struct *sp)
  * a mutex that is held elsewhere while calling synchronize_srcu() or
  * synchronize_srcu_expedited().
  *
- * Note that srcu_read_lock() and the matching srcu_read_unlock() must
- * occur in the same context, for example, it is illegal to invoke
- * srcu_read_unlock() in an irq handler if the matching srcu_read_lock()
- * was invoked in process context.
+ * The return value from srcu_read_lock() is guaranteed to be
+ * non-negative.  This value must be passed unaltered to the matching
+ * srcu_read_unlock().  Note that srcu_read_lock() and the matching
+ * srcu_read_unlock() must occur in the same context, for example, it is
+ * illegal to invoke srcu_read_unlock() in an irq handler if the matching
+ * srcu_read_lock() was invoked in process context.  Or, for that matter to
+ * invoke srcu_read_unlock() from one task and the matching srcu_read_lock()
+ * from another.
  */
-static inline int srcu_read_lock(struct srcu_struct *sp) __acquires(sp)
+static inline int srcu_read_lock(struct srcu_struct *ssp)
+	__acquires_shared(ssp)
 {
-	int retval = __srcu_read_lock(sp);
+	int retval;
 
-	rcu_lock_acquire(&(sp)->dep_map);
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_NORMAL);
+	retval = __srcu_read_lock(ssp);
+	srcu_lock_acquire(&ssp->dep_map);
 	return retval;
 }
 
 /**
+ * srcu_read_lock_atomic - register a new reader promising an atomic section
+ * @ssp: srcu_struct in which to register the new reader.
+ *
+ * As srcu_read_lock(), but the caller promises that the read-side
+ * critical section never sleeps and never blocks on anything which
+ * may itself depend on memory allocation to make progress. Preemption
+ * is disabled for the duration, which both enforces that promise (any
+ * sleepable call in the section will splat on every configuration)
+ * and bounds the section so that the update side may spin rather
+ * than sleep when waiting for readers: see synchronize_srcu_atomic().
+ *
+ * The lock and matching srcu_read_unlock_atomic() must be invoked on
+ * the same CPU, from the same context; passing the return value to
+ * another task is not permitted for this flavor.
+ */
+static inline int srcu_read_lock_atomic(struct srcu_struct *ssp)
+	__acquires_shared(ssp)
+{
+	int retval;
+
+	preempt_disable();
+	/*
+	 * Arm might_sleep() to catch even a *potentially* sleeping call
+	 * in the section, not just an actual schedule: the atomic-domain
+	 * promise must hold on every path, contended or not. In hardirq,
+	 * softirq, or NMI the annotation would land on the interrupted
+	 * task, and can also result in data races against that task's
+	 * own non_block_start()/non_block_end() invocations; it is also
+	 * redundant there, so skip it.
+	 */
+	if (in_task())
+		non_block_start();
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_ATOMIC);
+	retval = __srcu_read_lock(ssp);
+	srcu_lock_acquire(&ssp->dep_map);
+	return retval;
+}
+
+/**
+ * srcu_read_lock_fast - register a new reader for an SRCU-protected structure.
+ * @ssp: srcu_struct in which to register the new reader.
+ *
+ * Enter an SRCU read-side critical section, but for a light-weight
+ * smp_mb()-free reader.  See srcu_read_lock() for more information.  This
+ * function is NMI-safe, in a manner similar to srcu_read_lock_nmisafe().
+ *
+ * For srcu_read_lock_fast() to be used on an srcu_struct structure,
+ * that structure must have been defined using either DEFINE_SRCU_FAST()
+ * or DEFINE_STATIC_SRCU_FAST() on the one hand or initialized with
+ * init_srcu_struct_fast() on the other.  Such an srcu_struct structure
+ * cannot be passed to any non-fast variant of srcu_read_{,un}lock() or
+ * srcu_{down,up}_read().  In kernels built with CONFIG_PROVE_RCU=y,
+ * __srcu_check_read_flavor() will complain bitterly if you ignore this
+ * restriction.
+ *
+ * Grace-period auto-expediting is disabled for SRCU-fast srcu_struct
+ * structures because SRCU-fast expedited grace periods invoke
+ * synchronize_rcu_expedited(), IPIs and all.  If you need expedited
+ * SRCU-fast grace periods, use synchronize_srcu_expedited().
+ *
+ * The srcu_read_lock_fast() function can be invoked only from those
+ * contexts where RCU is watching, that is, from contexts where it would
+ * be legal to invoke rcu_read_lock().  Otherwise, lockdep will complain.
+ */
+static inline struct srcu_ctr __percpu *srcu_read_lock_fast(struct srcu_struct *ssp) __acquires_shared(ssp)
+	__acquires_shared(ssp)
+{
+	struct srcu_ctr __percpu *retval;
+
+	RCU_LOCKDEP_WARN(!rcu_is_watching(), "RCU must be watching srcu_read_lock_fast().");
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_FAST);
+	retval = __srcu_read_lock_fast(ssp);
+	rcu_try_lock_acquire(&ssp->dep_map);
+	return retval;
+}
+
+/**
+ * srcu_read_lock_fast_updown - register a new reader for an SRCU-fast-updown structure.
+ * @ssp: srcu_struct in which to register the new reader.
+ *
+ * Enter an SRCU read-side critical section, but for a light-weight
+ * smp_mb()-free reader.  See srcu_read_lock() for more information.
+ * This function is compatible with srcu_down_read_fast(), but is not
+ * NMI-safe.
+ *
+ * For srcu_read_lock_fast_updown() to be used on an srcu_struct
+ * structure, that structure must have been defined using either
+ * DEFINE_SRCU_FAST_UPDOWN() or DEFINE_STATIC_SRCU_FAST_UPDOWN() on the one
+ * hand or initialized with init_srcu_struct_fast_updown() on the other.
+ * Such an srcu_struct structure cannot be passed to any non-fast-updown
+ * variant of srcu_read_{,un}lock() or srcu_{down,up}_read().  In kernels
+ * built with CONFIG_PROVE_RCU=y, __srcu_check_read_flavor() will complain
+ * bitterly if you ignore this * restriction.
+ *
+ * Grace-period auto-expediting is disabled for SRCU-fast-updown
+ * srcu_struct structures because SRCU-fast-updown expedited grace periods
+ * invoke synchronize_rcu_expedited(), IPIs and all.  If you need expedited
+ * SRCU-fast-updown grace periods, use synchronize_srcu_expedited().
+ *
+ * The srcu_read_lock_fast_updown() function can be invoked only from
+ * those contexts where RCU is watching, that is, from contexts where
+ * it would be legal to invoke rcu_read_lock().  Otherwise, lockdep will
+ * complain.
+ */
+static inline struct srcu_ctr __percpu *srcu_read_lock_fast_updown(struct srcu_struct *ssp)
+	__acquires_shared(ssp)
+{
+	struct srcu_ctr __percpu *retval;
+
+	RCU_LOCKDEP_WARN(!rcu_is_watching(), "RCU must be watching srcu_read_lock_fast_updown().");
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_FAST_UPDOWN);
+	retval = __srcu_read_lock_fast_updown(ssp);
+	rcu_try_lock_acquire(&ssp->dep_map);
+	return retval;
+}
+
+/*
+ * Used by tracing, cannot be traced and cannot call lockdep.
+ * See srcu_read_lock_fast() for more information.
+ */
+static inline struct srcu_ctr __percpu *srcu_read_lock_fast_notrace(struct srcu_struct *ssp)
+	__acquires_shared(ssp)
+{
+	struct srcu_ctr __percpu *retval;
+
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_FAST);
+	retval = __srcu_read_lock_fast(ssp);
+	return retval;
+}
+
+/**
+ * srcu_down_read_fast - register a new reader for an SRCU-protected structure.
+ * @ssp: srcu_struct in which to register the new reader.
+ *
+ * Enter a semaphore-like SRCU read-side critical section, but for
+ * a light-weight smp_mb()-free reader.  See srcu_read_lock_fast() and
+ * srcu_down_read() for more information.
+ *
+ * The same srcu_struct may be used concurrently by srcu_down_read_fast()
+ * and srcu_read_lock_fast().  However, the same definition/initialization
+ * requirements called out for srcu_read_lock_fast_updown() apply.
+ */
+static inline struct srcu_ctr __percpu *srcu_down_read_fast(struct srcu_struct *ssp) __acquires_shared(ssp)
+{
+	WARN_ON_ONCE(IS_ENABLED(CONFIG_PROVE_RCU) && in_nmi());
+	RCU_LOCKDEP_WARN(!rcu_is_watching(), "RCU must be watching srcu_down_read_fast().");
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_FAST_UPDOWN);
+	return __srcu_read_lock_fast_updown(ssp);
+}
+
+/**
+ * srcu_read_lock_nmisafe - register a new reader for an SRCU-protected structure.
+ * @ssp: srcu_struct in which to register the new reader.
+ *
+ * Enter an SRCU read-side critical section, but in an NMI-safe manner.
+ * See srcu_read_lock() for more information.
+ *
+ * If srcu_read_lock_nmisafe() is ever used on an srcu_struct structure,
+ * then none of the other flavors may be used, whether before, during,
+ * or after.
+ */
+static inline int srcu_read_lock_nmisafe(struct srcu_struct *ssp)
+	__acquires_shared(ssp)
+{
+	int retval;
+
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_NMI);
+	retval = __srcu_read_lock_nmisafe(ssp);
+	rcu_try_lock_acquire(&ssp->dep_map);
+	return retval;
+}
+
+/* Used by tracing, cannot be traced and cannot invoke lockdep. */
+static inline notrace int
+srcu_read_lock_notrace(struct srcu_struct *ssp)
+	__acquires_shared(ssp)
+{
+	int retval;
+
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_NORMAL);
+	retval = __srcu_read_lock(ssp);
+	return retval;
+}
+
+/**
+ * srcu_down_read - register a new reader for an SRCU-protected structure.
+ * @ssp: srcu_struct in which to register the new reader.
+ *
+ * Enter a semaphore-like SRCU read-side critical section.  Note that
+ * SRCU read-side critical sections may be nested.  However, it is
+ * illegal to call anything that waits on an SRCU grace period for the
+ * same srcu_struct, whether directly or indirectly.  Please note that
+ * one way to indirectly wait on an SRCU grace period is to acquire
+ * a mutex that is held elsewhere while calling synchronize_srcu() or
+ * synchronize_srcu_expedited().  But if you want lockdep to help you
+ * keep this stuff straight, you should instead use srcu_read_lock().
+ *
+ * The semaphore-like nature of srcu_down_read() means that the matching
+ * srcu_up_read() can be invoked from some other context, for example,
+ * from some other task or from an irq handler.  However, neither
+ * srcu_down_read() nor srcu_up_read() may be invoked from an NMI handler.
+ *
+ * Calls to srcu_down_read() may be nested, similar to the manner in
+ * which calls to down_read() may be nested.  The same srcu_struct may be
+ * used concurrently by srcu_down_read() and srcu_read_lock().
+ */
+static inline int srcu_down_read(struct srcu_struct *ssp)
+	__acquires_shared(ssp)
+{
+	WARN_ON_ONCE(in_nmi());
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_NORMAL);
+	return __srcu_read_lock(ssp);
+}
+
+/**
  * srcu_read_unlock - unregister a old reader from an SRCU-protected structure.
- * @sp: srcu_struct in which to unregister the old reader.
+ * @ssp: srcu_struct in which to unregister the old reader.
  * @idx: return value from corresponding srcu_read_lock().
  *
  * Exit an SRCU read-side critical section.
  */
-static inline void srcu_read_unlock(struct srcu_struct *sp, int idx)
-	__releases(sp)
+static inline void srcu_read_unlock(struct srcu_struct *ssp, int idx)
+	__releases_shared(ssp)
 {
-	rcu_lock_release(&(sp)->dep_map);
-	__srcu_read_unlock(sp, idx);
+	WARN_ON_ONCE(idx & ~0x1);
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_NORMAL);
+	srcu_lock_release(&ssp->dep_map);
+	__srcu_read_unlock(ssp, idx);
 }
 
 /**
- * srcu_read_lock_raw - register a new reader for an SRCU-protected structure.
- * @sp: srcu_struct in which to register the new reader.
- *
- * Enter an SRCU read-side critical section.  Similar to srcu_read_lock(),
- * but avoids the RCU-lockdep checking.  This means that it is legal to
- * use srcu_read_lock_raw() in one context, for example, in an exception
- * handler, and then have the matching srcu_read_unlock_raw() in another
- * context, for example in the task that took the exception.
- *
- * However, the entire SRCU read-side critical section must reside within a
- * single task.  For example, beware of using srcu_read_lock_raw() in
- * a device interrupt handler and srcu_read_unlock() in the interrupted
- * task:  This will not work if interrupts are threaded.
+ * srcu_read_unlock_atomic - unregister an atomic-section reader
+ * @ssp: srcu_struct from which to unregister the old reader.
+ * @idx: return value from corresponding srcu_read_lock_atomic().
  */
-static inline int srcu_read_lock_raw(struct srcu_struct *sp)
+static inline void srcu_read_unlock_atomic(struct srcu_struct *ssp, int idx)
+	__releases_shared(ssp)
 {
-	unsigned long flags;
-	int ret;
-
-	local_irq_save(flags);
-	ret =  __srcu_read_lock(sp);
-	local_irq_restore(flags);
-	return ret;
+	WARN_ON_ONCE(idx & ~0x1);
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_ATOMIC);
+	srcu_lock_release(&ssp->dep_map);
+	__srcu_read_unlock(ssp, idx);
+	if (in_task())
+		non_block_end();
+	preempt_enable();
 }
 
 /**
- * srcu_read_unlock_raw - unregister reader from an SRCU-protected structure.
- * @sp: srcu_struct in which to unregister the old reader.
- * @idx: return value from corresponding srcu_read_lock_raw().
+ * srcu_read_unlock_fast - unregister a old reader from an SRCU-protected structure.
+ * @ssp: srcu_struct in which to unregister the old reader.
+ * @scp: return value from corresponding srcu_read_lock_fast().
  *
- * Exit an SRCU read-side critical section without lockdep-RCU checking.
- * See srcu_read_lock_raw() for more details.
+ * Exit a light-weight SRCU read-side critical section.
  */
-static inline void srcu_read_unlock_raw(struct srcu_struct *sp, int idx)
+static inline void srcu_read_unlock_fast(struct srcu_struct *ssp, struct srcu_ctr __percpu *scp)
+	__releases_shared(ssp)
 {
-	unsigned long flags;
-
-	local_irq_save(flags);
-	__srcu_read_unlock(sp, idx);
-	local_irq_restore(flags);
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_FAST);
+	srcu_lock_release(&ssp->dep_map);
+	__srcu_read_unlock_fast(ssp, scp);
+	RCU_LOCKDEP_WARN(!rcu_is_watching(), "RCU must be watching srcu_read_unlock_fast().");
 }
+
+/**
+ * srcu_read_unlock_fast_updown - unregister a old reader from an SRCU-fast-updown structure.
+ * @ssp: srcu_struct in which to unregister the old reader.
+ * @scp: return value from corresponding srcu_read_lock_fast_updown().
+ *
+ * Exit an SRCU-fast-updown read-side critical section.
+ */
+static inline void
+srcu_read_unlock_fast_updown(struct srcu_struct *ssp, struct srcu_ctr __percpu *scp) __releases_shared(ssp)
+{
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_FAST_UPDOWN);
+	srcu_lock_release(&ssp->dep_map);
+	__srcu_read_unlock_fast_updown(ssp, scp);
+	RCU_LOCKDEP_WARN(!rcu_is_watching(),
+			 "RCU must be watching srcu_read_unlock_fast_updown().");
+}
+
+/*
+ * Used by tracing, cannot be traced and cannot call lockdep.
+ * See srcu_read_unlock_fast() for more information.
+ */
+static inline void srcu_read_unlock_fast_notrace(struct srcu_struct *ssp,
+						 struct srcu_ctr __percpu *scp) __releases_shared(ssp)
+{
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_FAST);
+	__srcu_read_unlock_fast(ssp, scp);
+}
+
+/**
+ * srcu_up_read_fast - unregister a old reader from an SRCU-protected structure.
+ * @ssp: srcu_struct in which to unregister the old reader.
+ * @scp: return value from corresponding srcu_read_lock_fast().
+ *
+ * Exit an SRCU read-side critical section, but not necessarily from
+ * the same context as the maching srcu_down_read_fast().
+ */
+static inline void srcu_up_read_fast(struct srcu_struct *ssp, struct srcu_ctr __percpu *scp)
+	__releases_shared(ssp)
+{
+	WARN_ON_ONCE(IS_ENABLED(CONFIG_PROVE_RCU) && in_nmi());
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_FAST_UPDOWN);
+	__srcu_read_unlock_fast_updown(ssp, scp);
+	RCU_LOCKDEP_WARN(!rcu_is_watching(), "RCU must be watching srcu_up_read_fast_updown().");
+}
+
+/**
+ * srcu_read_unlock_nmisafe - unregister a old reader from an SRCU-protected structure.
+ * @ssp: srcu_struct in which to unregister the old reader.
+ * @idx: return value from corresponding srcu_read_lock_nmisafe().
+ *
+ * Exit an SRCU read-side critical section, but in an NMI-safe manner.
+ */
+static inline void srcu_read_unlock_nmisafe(struct srcu_struct *ssp, int idx)
+	__releases_shared(ssp)
+{
+	WARN_ON_ONCE(idx & ~0x1);
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_NMI);
+	rcu_lock_release(&ssp->dep_map);
+	__srcu_read_unlock_nmisafe(ssp, idx);
+}
+
+/* Used by tracing, cannot be traced and cannot call lockdep. */
+static inline notrace void
+srcu_read_unlock_notrace(struct srcu_struct *ssp, int idx) __releases_shared(ssp)
+{
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_NORMAL);
+	__srcu_read_unlock(ssp, idx);
+}
+
+/**
+ * srcu_up_read - unregister a old reader from an SRCU-protected structure.
+ * @ssp: srcu_struct in which to unregister the old reader.
+ * @idx: return value from corresponding srcu_read_lock().
+ *
+ * Exit an SRCU read-side critical section, but not necessarily from
+ * the same context as the maching srcu_down_read().
+ */
+static inline void srcu_up_read(struct srcu_struct *ssp, int idx)
+	__releases_shared(ssp)
+{
+	WARN_ON_ONCE(idx & ~0x1);
+	WARN_ON_ONCE(in_nmi());
+	srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_NORMAL);
+	__srcu_read_unlock(ssp, idx);
+}
+
+/**
+ * smp_mb__after_srcu_read_unlock - ensure full ordering after srcu_read_unlock
+ *
+ * Converts the preceding srcu_read_unlock into a two-way memory barrier.
+ *
+ * Call this after srcu_read_unlock, to guarantee that all memory operations
+ * that occur after smp_mb__after_srcu_read_unlock will appear to happen after
+ * the preceding srcu_read_unlock.
+ */
+static inline void smp_mb__after_srcu_read_unlock(void)
+{
+	/* __srcu_read_unlock has smp_mb() internally so nothing to do here. */
+}
+
+/**
+ * smp_mb__after_srcu_read_lock - ensure full ordering after srcu_read_lock
+ *
+ * Converts the preceding srcu_read_lock into a two-way memory barrier.
+ *
+ * Call this after srcu_read_lock, to guarantee that all memory operations
+ * that occur after smp_mb__after_srcu_read_lock will appear to happen after
+ * the preceding srcu_read_lock.
+ */
+static inline void smp_mb__after_srcu_read_lock(void)
+{
+	/* __srcu_read_lock has smp_mb() internally so nothing to do here. */
+}
+
+DEFINE_LOCK_GUARD_1(srcu, struct srcu_struct,
+		    _T->idx = srcu_read_lock(_T->lock),
+		    srcu_read_unlock(_T->lock, _T->idx),
+		    int idx)
+DECLARE_LOCK_GUARD_1_ATTRS(srcu, __acquires_shared(_T), __releases_shared(*(struct srcu_struct **)_T))
+#define class_srcu_constructor(_T) WITH_LOCK_GUARD_1_ATTRS(srcu, _T)
+
+DEFINE_LOCK_GUARD_1(srcu_fast, struct srcu_struct,
+		    _T->scp = srcu_read_lock_fast(_T->lock),
+		    srcu_read_unlock_fast(_T->lock, _T->scp),
+		    struct srcu_ctr __percpu *scp)
+DECLARE_LOCK_GUARD_1_ATTRS(srcu_fast, __acquires_shared(_T), __releases_shared(*(struct srcu_struct **)_T))
+#define class_srcu_fast_constructor(_T) WITH_LOCK_GUARD_1_ATTRS(srcu_fast, _T)
+
+DEFINE_LOCK_GUARD_1(srcu_fast_notrace, struct srcu_struct,
+		    _T->scp = srcu_read_lock_fast_notrace(_T->lock),
+		    srcu_read_unlock_fast_notrace(_T->lock, _T->scp),
+		    struct srcu_ctr __percpu *scp)
+DECLARE_LOCK_GUARD_1_ATTRS(srcu_fast_notrace, __acquires_shared(_T), __releases_shared(*(struct srcu_struct **)_T))
+#define class_srcu_fast_notrace_constructor(_T) WITH_LOCK_GUARD_1_ATTRS(srcu_fast_notrace, _T)
+
+DEFINE_LOCK_GUARD_1(srcu_fast_updown, struct srcu_struct,
+		    _T->scp = srcu_read_lock_fast_updown(_T->lock),
+		    srcu_read_unlock_fast_updown(_T->lock, _T->scp),
+		    struct srcu_ctr __percpu *scp)
+DECLARE_LOCK_GUARD_1_ATTRS(srcu_fast_updown, __acquires_shared(_T), __releases_shared(*(struct srcu_struct **)_T))
+#define class_srcu_fast_updown_constructor(_T) WITH_LOCK_GUARD_1_ATTRS(srcu_fast_updown, _T)
 
 #endif

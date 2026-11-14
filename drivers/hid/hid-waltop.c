@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  HID driver for Waltop devices not fully compliant with HID standard
  *
@@ -5,10 +6,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
 #include <linux/device.h>
@@ -42,16 +39,11 @@
  * 02 16 02     ink
  */
 
-/*
- * See Slim Tablet 5.8 inch description, device and HID report descriptors at
- * http://sf.net/apps/mediawiki/digimend/?title=Waltop_Slim_Tablet_5.8%22
- */
-
 /* Size of the original report descriptor of Slim Tablet 5.8 inch */
 #define SLIM_TABLET_5_8_INCH_RDESC_ORIG_SIZE	222
 
 /* Fixed Slim Tablet 5.8 inch descriptor */
-static __u8 slim_tablet_5_8_inch_rdesc_fixed[] = {
+static const __u8 slim_tablet_5_8_inch_rdesc_fixed[] = {
 	0x05, 0x0D,         /*  Usage Page (Digitizer),             */
 	0x09, 0x02,         /*  Usage (Pen),                        */
 	0xA1, 0x01,         /*  Collection (Application),           */
@@ -98,16 +90,11 @@ static __u8 slim_tablet_5_8_inch_rdesc_fixed[] = {
 	0xC0                /*  End Collection                      */
 };
 
-/*
- * See Slim Tablet 12.1 inch description, device and HID report descriptors at
- * http://sf.net/apps/mediawiki/digimend/?title=Waltop_Slim_Tablet_12.1%22
- */
-
 /* Size of the original report descriptor of Slim Tablet 12.1 inch */
 #define SLIM_TABLET_12_1_INCH_RDESC_ORIG_SIZE	269
 
 /* Fixed Slim Tablet 12.1 inch descriptor */
-static __u8 slim_tablet_12_1_inch_rdesc_fixed[] = {
+static const __u8 slim_tablet_12_1_inch_rdesc_fixed[] = {
 	0x05, 0x0D,         /*  Usage Page (Digitizer),             */
 	0x09, 0x02,         /*  Usage (Pen),                        */
 	0xA1, 0x01,         /*  Collection (Application),           */
@@ -154,16 +141,11 @@ static __u8 slim_tablet_12_1_inch_rdesc_fixed[] = {
 	0xC0                /*  End Collection                      */
 };
 
-/*
- * See Q Pad description, device and HID report descriptors at
- * http://sf.net/apps/mediawiki/digimend/?title=Waltop_Q_Pad
- */
-
 /* Size of the original report descriptor of Q Pad */
 #define Q_PAD_RDESC_ORIG_SIZE	241
 
 /* Fixed Q Pad descriptor */
-static __u8 q_pad_rdesc_fixed[] = {
+static const __u8 q_pad_rdesc_fixed[] = {
 	0x05, 0x0D,         /*  Usage Page (Digitizer),             */
 	0x09, 0x02,         /*  Usage (Pen),                        */
 	0xA1, 0x01,         /*  Collection (Application),           */
@@ -210,18 +192,13 @@ static __u8 q_pad_rdesc_fixed[] = {
 	0xC0                /*  End Collection                      */
 };
 
-/*
- * See description, device and HID report descriptors of tablet with PID 0038 at
- * http://sf.net/apps/mediawiki/digimend/?title=Waltop_PID_0038
- */
-
 /* Size of the original report descriptor of tablet with PID 0038 */
 #define PID_0038_RDESC_ORIG_SIZE	241
 
 /*
  * Fixed report descriptor for tablet with PID 0038.
  */
-static __u8 pid_0038_rdesc_fixed[] = {
+static const __u8 pid_0038_rdesc_fixed[] = {
 	0x05, 0x0D,         /*  Usage Page (Digitizer),             */
 	0x09, 0x02,         /*  Usage (Pen),                        */
 	0xA1, 0x01,         /*  Collection (Application),           */
@@ -268,16 +245,11 @@ static __u8 pid_0038_rdesc_fixed[] = {
 	0xC0                /*  End Collection                      */
 };
 
-/*
- * See Media Tablet 10.6 inch description, device and HID report descriptors at
- * http://sf.net/apps/mediawiki/digimend/?title=Waltop_Media_Tablet_10.6%22
- */
-
 /* Size of the original report descriptor of Media Tablet 10.6 inch */
 #define MEDIA_TABLET_10_6_INCH_RDESC_ORIG_SIZE	300
 
 /* Fixed Media Tablet 10.6 inch descriptor */
-static __u8 media_tablet_10_6_inch_rdesc_fixed[] = {
+static const __u8 media_tablet_10_6_inch_rdesc_fixed[] = {
 	0x05, 0x0D,         /*  Usage Page (Digitizer),             */
 	0x09, 0x02,         /*  Usage (Pen),                        */
 	0xA1, 0x01,         /*  Collection (Application),           */
@@ -386,16 +358,11 @@ static __u8 media_tablet_10_6_inch_rdesc_fixed[] = {
 	0xC0                /*  End Collection                      */
 };
 
-/*
- * See Media Tablet 14.1 inch description, device and HID report descriptors at
- * http://sf.net/apps/mediawiki/digimend/?title=Waltop_Media_Tablet_14.1%22
- */
-
 /* Size of the original report descriptor of Media Tablet 14.1 inch */
 #define MEDIA_TABLET_14_1_INCH_RDESC_ORIG_SIZE	309
 
 /* Fixed Media Tablet 14.1 inch descriptor */
-static __u8 media_tablet_14_1_inch_rdesc_fixed[] = {
+static const __u8 media_tablet_14_1_inch_rdesc_fixed[] = {
 	0x05, 0x0D,         /*  Usage Page (Digitizer),             */
 	0x09, 0x02,         /*  Usage (Pen),                        */
 	0xA1, 0x01,         /*  Collection (Application),           */
@@ -502,17 +469,11 @@ static __u8 media_tablet_14_1_inch_rdesc_fixed[] = {
 	0xC0                /*  End Collection                      */
 };
 
-/*
- * See Sirius Battery Free Tablet description, device and HID report descriptors
- * at
- * http://sf.net/apps/mediawiki/digimend/?title=Waltop_Sirius_Battery_Free_Tablet
- */
-
 /* Size of the original report descriptor of Sirius Battery Free Tablet */
 #define SIRIUS_BATTERY_FREE_TABLET_RDESC_ORIG_SIZE	335
 
 /* Fixed Sirius Battery Free Tablet descriptor */
-static __u8 sirius_battery_free_tablet_rdesc_fixed[] = {
+static const __u8 sirius_battery_free_tablet_rdesc_fixed[] = {
 	0x05, 0x0D,         /*  Usage Page (Digitizer),             */
 	0x09, 0x02,         /*  Usage (Pen),                        */
 	0xA1, 0x01,         /*  Collection (Application),           */
@@ -638,50 +599,50 @@ static __u8 sirius_battery_free_tablet_rdesc_fixed[] = {
 	0xC0                /*  End Collection                      */
 };
 
-static __u8 *waltop_report_fixup(struct hid_device *hdev, __u8 *rdesc,
+static const __u8 *waltop_report_fixup(struct hid_device *hdev, __u8 *rdesc,
 		unsigned int *rsize)
 {
 	switch (hdev->product) {
 	case USB_DEVICE_ID_WALTOP_SLIM_TABLET_5_8_INCH:
 		if (*rsize == SLIM_TABLET_5_8_INCH_RDESC_ORIG_SIZE) {
-			rdesc = slim_tablet_5_8_inch_rdesc_fixed;
 			*rsize = sizeof(slim_tablet_5_8_inch_rdesc_fixed);
+			return slim_tablet_5_8_inch_rdesc_fixed;
 		}
 		break;
 	case USB_DEVICE_ID_WALTOP_SLIM_TABLET_12_1_INCH:
 		if (*rsize == SLIM_TABLET_12_1_INCH_RDESC_ORIG_SIZE) {
-			rdesc = slim_tablet_12_1_inch_rdesc_fixed;
 			*rsize = sizeof(slim_tablet_12_1_inch_rdesc_fixed);
+			return slim_tablet_12_1_inch_rdesc_fixed;
 		}
 		break;
 	case USB_DEVICE_ID_WALTOP_Q_PAD:
 		if (*rsize == Q_PAD_RDESC_ORIG_SIZE) {
-			rdesc = q_pad_rdesc_fixed;
 			*rsize = sizeof(q_pad_rdesc_fixed);
+			return q_pad_rdesc_fixed;
 		}
 		break;
 	case USB_DEVICE_ID_WALTOP_PID_0038:
 		if (*rsize == PID_0038_RDESC_ORIG_SIZE) {
-			rdesc = pid_0038_rdesc_fixed;
 			*rsize = sizeof(pid_0038_rdesc_fixed);
+			return pid_0038_rdesc_fixed;
 		}
 		break;
 	case USB_DEVICE_ID_WALTOP_MEDIA_TABLET_10_6_INCH:
 		if (*rsize == MEDIA_TABLET_10_6_INCH_RDESC_ORIG_SIZE) {
-			rdesc = media_tablet_10_6_inch_rdesc_fixed;
 			*rsize = sizeof(media_tablet_10_6_inch_rdesc_fixed);
+			return media_tablet_10_6_inch_rdesc_fixed;
 		}
 		break;
 	case USB_DEVICE_ID_WALTOP_MEDIA_TABLET_14_1_INCH:
 		if (*rsize == MEDIA_TABLET_14_1_INCH_RDESC_ORIG_SIZE) {
-			rdesc = media_tablet_14_1_inch_rdesc_fixed;
 			*rsize = sizeof(media_tablet_14_1_inch_rdesc_fixed);
+			return media_tablet_14_1_inch_rdesc_fixed;
 		}
 		break;
 	case USB_DEVICE_ID_WALTOP_SIRIUS_BATTERY_FREE_TABLET:
 		if (*rsize == SIRIUS_BATTERY_FREE_TABLET_RDESC_ORIG_SIZE) {
-			rdesc = sirius_battery_free_tablet_rdesc_fixed;
 			*rsize = sizeof(sirius_battery_free_tablet_rdesc_fixed);
+			return sirius_battery_free_tablet_rdesc_fixed;
 		}
 		break;
 	}
@@ -781,4 +742,5 @@ static struct hid_driver waltop_driver = {
 };
 module_hid_driver(waltop_driver);
 
+MODULE_DESCRIPTION("HID driver for Waltop devices not fully compliant with HID standard");
 MODULE_LICENSE("GPL");

@@ -1,7 +1,7 @@
-#!/usr/bin/perl -w
+#!/usr/bin/env perl
+# SPDX-License-Identifier: GPL-2.0
 #
 # Copyright 2005-2009 - Steven Rostedt
-# Licensed under the terms of the GNU GPL License version 2
 #
 #  It's simple enough to figure out how this works.
 #  If not, then you can ask me at stripconfig@goodmis.org
@@ -21,7 +21,7 @@
 #  1. Boot up the kernel that you want to stream line the config on.
 #  2. Change directory to the directory holding the source of the
 #       kernel that you just booted.
-#  3. Copy the configuraton file to this directory as .config
+#  3. Copy the configuration file to this directory as .config
 #  4. Have all your devices that you need modules for connected and
 #      operational (make sure that their corresponding modules are loaded)
 #  5. Run this script redirecting the output to some other file
@@ -42,6 +42,7 @@
 #    mv config_strip .config
 #    make oldconfig
 #
+use warnings;
 use strict;
 use Getopt::Long;
 
@@ -54,8 +55,6 @@ sub dprint {
     return if (!$debugprint);
     print STDERR @_;
 }
-
-my $config = ".config";
 
 my $uname = `uname -r`;
 chomp $uname;
@@ -137,13 +136,16 @@ my $ksource = ($ARGV[0] ? $ARGV[0] : '.');
 my $kconfig = $ARGV[1];
 my $lsmod_file = $ENV{'LSMOD'};
 
-my @makefiles = `find $ksource -name Makefile 2>/dev/null`;
+my @makefiles = `find $ksource -name Makefile -or -name Kbuild 2>/dev/null`;
 chomp @makefiles;
 
 my %depends;
 my %selects;
 my %prompts;
 my %objects;
+my %config2kfile;
+my %defaults;
+my %types;
 my $var;
 my $iflevel = 0;
 my @ifdeps;
@@ -164,13 +166,13 @@ sub read_kconfig {
     my $last_source = "";
 
     # Check for any environment variables used
-    while ($source =~ /\$(\w+)/ && $last_source ne $source) {
+    while ($source =~ /\$\((\w+)\)/ && $last_source ne $source) {
 	my $env = $1;
 	$last_source = $source;
-	$source =~ s/\$$env/$ENV{$env}/;
+	$source =~ s/\$\($env\)/$ENV{$env}/;
     }
 
-    open(my $kinfile, '<', $source) || die "Can't open $kconfig";
+    open(my $kinfile, '<', $source) || die "Can't open $source";
     while (<$kinfile>) {
 	chomp;
 
@@ -188,7 +190,7 @@ sub read_kconfig {
 	$cont = 0;
 
 	# collect any Kconfig sources
-	if (/^source\s*"(.*)"/) {
+	if (/^source\s+"?([^"]+)/) {
 	    my $kconfig = $1;
 	    # prevent reading twice.
 	    if (!defined($read_kconfigs{$kconfig})) {
@@ -202,6 +204,7 @@ sub read_kconfig {
 	if (/^\s*(menu)?config\s+(\S+)\s*$/) {
 	    $state = "NEW";
 	    $config = $2;
+	    $config2kfile{"CONFIG_$config"} = $kconfig;
 
 	    # Add depends for 'if' nesting
 	    for (my $i = 0; $i < $iflevel; $i++) {
@@ -219,6 +222,15 @@ sub read_kconfig {
 	    $depends{$config} = $1;
 	} elsif ($state eq "DEP" && /^\s*depends\s+on\s+(.*)$/) {
 	    $depends{$config} .= " " . $1;
+	} elsif ($state ne "NONE" && /^\s*def(_(bool|tristate)|ault)\s+(\S.*)$/) {
+	    my $dep = $3;
+            $defaults{$config} = 1;
+	    $types{$config} = $2 if (defined($2));
+	    if ($dep !~ /^\s*(y|m|n)\s*$/) {
+		$dep =~ s/.*\sif\s+//;
+		$depends{$config} .= " " . $dep;
+		dprint "Added default depends $dep to $config\n";
+	    }
 
 	# Get the configs that select this config
 	} elsif ($state ne "NONE" && /^\s*select\s+(\S+)/) {
@@ -230,7 +242,13 @@ sub read_kconfig {
 	    }
 
 	# configs without prompts must be selected
-	} elsif ($state ne "NONE" && /^\s*tristate\s\S/) {
+	} elsif ($state ne "NONE" && /^\s*(bool|boolean)(\s+\S.*)?$/) {
+	    $types{$config} = "bool";
+	    $prompts{$config} = 1 if (defined($2));
+	} elsif ($state ne "NONE" && /^\s*tristate(\s+\S.*)?$/) {
+	    $types{$config} = "tristate";
+	    $prompts{$config} = 1 if (defined($1));
+	} elsif ($state ne "NONE" && /^\s*prompt\b/) {
 	    # note if the config has a prompt
 	    $prompts{$config} = 1;
 
@@ -249,8 +267,8 @@ sub read_kconfig {
 
 	    $iflevel-- if ($iflevel);
 
-	# stop on "help"
-	} elsif (/^\s*help\s*$/) {
+	# stop on "help" and keywords that end a menu entry
+	} elsif (/^\s*(---)?help(---)?\s*$/ || /^(comment|choice|menu)\b/) {
 	    $state = "NONE";
 	}
     }
@@ -309,7 +327,7 @@ foreach my $makefile (@makefiles) {
 	$_ = convert_vars($_, %make_vars);
 
 	# collect objects after obj-$(CONFIG_FOO_BAR)
-	if (/obj-\$\((CONFIG_[^\)]*)\)\s*[+:]?=\s*(.*)/) {
+	if (/obj-\$[({](CONFIG_[^})]*)[)}]\s*[+:]?=\s*(.*)/) {
 	    $var = $1;
 	    $objs = $2;
 
@@ -366,7 +384,7 @@ if (defined($lsmod_file)) {
 	    $lsmod = "$dir/lsmod";
 	    last;
 	}
-}
+    }
     if (!defined($lsmod)) {
 	# try just the path
 	$lsmod = "lsmod";
@@ -405,7 +423,7 @@ foreach my $module (keys(%modules)) {
 	}
     } else {
 	# Most likely, someone has a custom (binary?) module loaded.
-	print STDERR "$module config not found!!\n";
+	print STDERR "$module config not found!\n";
     }
 }
 
@@ -447,7 +465,7 @@ sub parse_config_depends
 	    $p =~ s/^[^$valid]*[$valid]+//;
 
 	    # We only need to process if the depend config is a module
-	    if (!defined($orig_configs{$conf}) || !$orig_configs{conf} eq "m") {
+	    if (!defined($orig_configs{$conf}) || $orig_configs{$conf} eq "y") {
 		next;
 	    }
 
@@ -473,7 +491,7 @@ sub parse_config_depends
 # The idea is we look at all the configs that select it. If one
 # is already in our list of configs to enable, then there's nothing
 # else to do. If there isn't, we pick the first config that was
-# enabled in the orignal config and use that.
+# enabled in the original config and use that.
 sub parse_config_selects
 {
     my ($config, $p) = @_;
@@ -495,7 +513,7 @@ sub parse_config_selects
 
 	    # Check if something other than a module selects this config
 	    if (defined($orig_configs{$conf}) && $orig_configs{$conf} ne "m") {
-		dprint "$conf (non module) selects config, we are good\n";
+		dprint "$conf (non module) selects $config, we are good\n";
 		# we are good with this
 		return;
 	    }
@@ -515,8 +533,16 @@ sub parse_config_selects
 
     # If no possible config selected this, then something happened.
     if (!defined($next_config)) {
-	print STDERR "WARNING: $config is required, but nothing in the\n";
-	print STDERR "  current config selects it.\n";
+
+	# Some config options have no prompt, and nothing selects them, but
+	# they stay turned on once the final checks for the configs
+	# are done. These configs have a default option, so turn off the
+	# warnings for configs with default options.
+	if (!defined($defaults{$config})) {
+	    print STDERR "WARNING: $config is required, but nothing in the\n";
+	    print STDERR "  current config selects it.\n";
+	}
+
 	return;
     }
 
@@ -582,9 +608,26 @@ while ($repeat) {
 
     # Now we need to see if we have to check selects;
     loop_select;
-}	    
+}
 
 my %setconfigs;
+my @preserved_kconfigs;
+if (defined($ENV{'LMC_KEEP'})) {
+	@preserved_kconfigs = split(/:/,$ENV{LMC_KEEP});
+}
+
+sub in_preserved_kconfigs {
+    my $kconfig = $config2kfile{$_[0]};
+    if (!defined($kconfig)) {
+	return 0;
+    }
+    foreach my $excl (@preserved_kconfigs) {
+	if($kconfig =~ /^$excl/) {
+	    return 1;
+	}
+    }
+    return 0;
+}
 
 # Finally, read the .config file and turn off any module enabled that
 # we could not find a reason to keep enabled.
@@ -603,14 +646,53 @@ foreach my $line (@config_file) {
 	next;
     }
 
+    if (/CONFIG_MODULE_SIG_KEY="(.+)"/) {
+	my $orig_cert = $1;
+	my $default_cert = "certs/signing_key.pem";
+
+	# Check that the logic in this script still matches the one in Kconfig
+	if (!defined($depends{"MODULE_SIG_KEY"}) ||
+	    $depends{"MODULE_SIG_KEY"} !~ /"\Q$default_cert\E"/) {
+	    print STDERR "WARNING: MODULE_SIG_KEY assertion failure, ",
+		"update needed to ", __FILE__, " line ", __LINE__, "\n";
+	    print;
+	} elsif ($orig_cert ne $default_cert && ! -f $orig_cert) {
+	    print STDERR "Module signature verification enabled but ",
+		"module signing key \"$orig_cert\" not found. Resetting ",
+		"signing key to default value.\n";
+	    print "CONFIG_MODULE_SIG_KEY=\"$default_cert\"\n";
+	} else {
+	    print;
+	}
+	next;
+    }
+
+    if (/CONFIG_SYSTEM_TRUSTED_KEYS="(.+)"/) {
+	my $orig_keys = $1;
+
+	if (! -f $orig_keys) {
+	    print STDERR "System keyring enabled but keys \"$orig_keys\" ",
+		"not found. Resetting keys to default value.\n";
+	    print "CONFIG_SYSTEM_TRUSTED_KEYS=\"\"\n";
+	} else {
+	    print;
+	}
+	next;
+    }
+
     if (/^(CONFIG.*)=(m|y)/) {
+	if (in_preserved_kconfigs($1)) {
+	    dprint "Preserve config $1";
+	    print;
+	    next;
+	}
 	if (defined($configs{$1})) {
 	    if ($localyesconfig) {
-	        $setconfigs{$1} = 'y';
+		$setconfigs{$1} = 'y';
 		print "$1=y\n";
 		next;
 	    } else {
-	        $setconfigs{$1} = $2;
+		$setconfigs{$1} = $2;
 	    }
 	} elsif ($2 eq "m") {
 	    print "# $1 is not set\n";
@@ -633,8 +715,18 @@ foreach my $module (keys(%modules)) {
 	}
 	print STDERR "module $module did not have configs";
 	foreach my $conf (@arr) {
-	    print STDERR " " , $conf;
+	    my $c = $conf;
+	    $c =~ s/^CONFIG_//;
+	    if (!$localyesconfig && defined($types{$c}) && $types{$c} eq "bool") {
+		print STDERR " $conf (boolean, not supported with =m)";
+	    } elsif (defined($types{$c})) {
+		print STDERR " $conf ($types{$c})";
+	    } else {
+		print STDERR " " , $conf;
+	    }
 	}
 	print STDERR "\n";
     }
 }
+
+# vim: softtabstop=4

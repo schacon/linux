@@ -1,35 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* IBM POWER Barrier Synchronization Register Driver
  *
  * Copyright IBM Corporation 2008
  *
  * Author: Sonny Rao <sonnyrao@us.ibm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
+#include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
-#include <linux/of_platform.h>
+#include <linux/of_address.h>
 #include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/cdev.h>
 #include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
-#include <asm/pgtable.h>
 #include <asm/io.h>
 
 /*
@@ -73,8 +59,7 @@ struct bsr_dev {
 };
 
 static unsigned total_bsr_devs;
-static struct list_head bsr_devs = LIST_HEAD_INIT(bsr_devs);
-static struct class *bsr_class;
+static LIST_HEAD(bsr_devs);
 static int bsr_major;
 
 enum {
@@ -95,6 +80,7 @@ bsr_size_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct bsr_dev *bsr_dev = dev_get_drvdata(dev);
 	return sprintf(buf, "%u\n", bsr_dev->bsr_bytes);
 }
+static DEVICE_ATTR_RO(bsr_size);
 
 static ssize_t
 bsr_stride_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -102,19 +88,27 @@ bsr_stride_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct bsr_dev *bsr_dev = dev_get_drvdata(dev);
 	return sprintf(buf, "%u\n", bsr_dev->bsr_stride);
 }
+static DEVICE_ATTR_RO(bsr_stride);
 
 static ssize_t
-bsr_len_show(struct device *dev, struct device_attribute *attr, char *buf)
+bsr_length_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct bsr_dev *bsr_dev = dev_get_drvdata(dev);
 	return sprintf(buf, "%llu\n", bsr_dev->bsr_len);
 }
+static DEVICE_ATTR_RO(bsr_length);
 
-static struct device_attribute bsr_dev_attrs[] = {
-	__ATTR(bsr_size, S_IRUGO, bsr_size_show, NULL),
-	__ATTR(bsr_stride, S_IRUGO, bsr_stride_show, NULL),
-	__ATTR(bsr_length, S_IRUGO, bsr_len_show, NULL),
-	__ATTR_NULL
+static struct attribute *bsr_dev_attrs[] = {
+	&dev_attr_bsr_size.attr,
+	&dev_attr_bsr_stride.attr,
+	&dev_attr_bsr_length.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(bsr_dev);
+
+static const struct class bsr_class = {
+	.name		= "bsr",
+	.dev_groups	= bsr_dev_groups,
 };
 
 static int bsr_mmap(struct file *filp, struct vm_area_struct *vma)
@@ -142,7 +136,7 @@ static int bsr_mmap(struct file *filp, struct vm_area_struct *vma)
 	return 0;
 }
 
-static int bsr_open(struct inode * inode, struct file * filp)
+static int bsr_open(struct inode *inode, struct file *filp)
 {
 	struct cdev *cdev = inode->i_cdev;
 	struct bsr_dev *dev = container_of(cdev, struct bsr_dev, bsr_cdev);
@@ -192,8 +186,7 @@ static int bsr_add_node(struct device_node *bn)
 	num_bsr_devs = bsr_bytes_len / sizeof(u32);
 
 	for (i = 0 ; i < num_bsr_devs; i++) {
-		struct bsr_dev *cur = kzalloc(sizeof(struct bsr_dev),
-					      GFP_KERNEL);
+		struct bsr_dev *cur = kzalloc_obj(struct bsr_dev);
 		struct resource res;
 		int result;
 
@@ -253,8 +246,8 @@ static int bsr_add_node(struct device_node *bn)
 			goto out_err;
 		}
 
-		cur->bsr_device = device_create(bsr_class, NULL, cur->bsr_dev,
-						cur, cur->bsr_name);
+		cur->bsr_device = device_create(&bsr_class, NULL, cur->bsr_dev,
+						cur, "%s", cur->bsr_name);
 		if (IS_ERR(cur->bsr_device)) {
 			printk(KERN_ERR "device_create failed for %s\n",
 			       cur->bsr_name);
@@ -302,13 +295,9 @@ static int __init bsr_init(void)
 	if (!np)
 		goto out_err;
 
-	bsr_class = class_create(THIS_MODULE, "bsr");
-	if (IS_ERR(bsr_class)) {
-		printk(KERN_ERR "class_create() failed for bsr_class\n");
-		ret = PTR_ERR(bsr_class);
+	ret = class_register(&bsr_class);
+	if (ret)
 		goto out_err_1;
-	}
-	bsr_class->dev_attrs = bsr_dev_attrs;
 
 	ret = alloc_chrdev_region(&bsr_dev, 0, BSR_MAX_DEVS, "bsr");
 	bsr_major = MAJOR(bsr_dev);
@@ -317,7 +306,8 @@ static int __init bsr_init(void)
 		goto out_err_2;
 	}
 
-	if ((ret = bsr_create_devs(np)) < 0) {
+	ret = bsr_create_devs(np);
+	if (ret < 0) {
 		np = NULL;
 		goto out_err_3;
 	}
@@ -328,7 +318,7 @@ static int __init bsr_init(void)
 	unregister_chrdev_region(bsr_dev, BSR_MAX_DEVS);
 
  out_err_2:
-	class_destroy(bsr_class);
+	class_unregister(&bsr_class);
 
  out_err_1:
 	of_node_put(np);
@@ -343,8 +333,7 @@ static void __exit  bsr_exit(void)
 
 	bsr_cleanup_devs();
 
-	if (bsr_class)
-		class_destroy(bsr_class);
+	class_unregister(&bsr_class);
 
 	if (bsr_major)
 		unregister_chrdev_region(MKDEV(bsr_major, 0), BSR_MAX_DEVS);
@@ -352,5 +341,6 @@ static void __exit  bsr_exit(void)
 
 module_init(bsr_init);
 module_exit(bsr_exit);
+MODULE_DESCRIPTION("IBM POWER Barrier Synchronization Register Driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Sonny Rao <sonnyrao@us.ibm.com>");

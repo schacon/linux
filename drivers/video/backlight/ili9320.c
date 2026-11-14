@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* drivers/video/backlight/ili9320.c
  *
  * ILI9320 LCD controller driver core.
@@ -5,15 +6,10 @@
  * Copyright 2007 Simtec Electronics
  *	http://armlinux.simtec.co.uk/
  *	Ben Dooks <ben@simtec.co.uk>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
 */
 
 #include <linux/delay.h>
 #include <linux/err.h>
-#include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/lcd.h>
 #include <linux/module.h>
@@ -34,7 +30,7 @@ static inline int ili9320_write_spi(struct ili9320 *ili,
 	unsigned char *addr = spi->buffer_addr;
 	unsigned char *data = spi->buffer_data;
 
-	/* spi message consits of:
+	/* spi message consists of:
 	 * first byte: ID and operation
 	 */
 
@@ -124,7 +120,7 @@ static inline int ili9320_power_off(struct ili9320 *lcd)
 	return 0;
 }
 
-#define POWER_IS_ON(pwr)	((pwr) <= FB_BLANK_NORMAL)
+#define POWER_IS_ON(pwr)	((pwr) <= LCD_POWER_REDUCED)
 
 static int ili9320_power(struct ili9320 *lcd, int power)
 {
@@ -164,7 +160,7 @@ static int ili9320_get_power(struct lcd_device *ld)
 	return lcd->power;
 }
 
-static struct lcd_ops ili9320_ops = {
+static const struct lcd_ops ili9320_ops = {
 	.get_power	= ili9320_get_power,
 	.set_power	= ili9320_set_power,
 };
@@ -198,7 +194,7 @@ static void ili9320_setup_spi(struct ili9320 *ili,
 int ili9320_probe_spi(struct spi_device *spi,
 				struct ili9320_client *client)
 {
-	struct ili9320_platdata *cfg = spi->dev.platform_data;
+	struct ili9320_platdata *cfg = dev_get_platdata(&spi->dev);
 	struct device *dev = &spi->dev;
 	struct ili9320 *ili;
 	struct lcd_device *lcd;
@@ -218,24 +214,23 @@ int ili9320_probe_spi(struct spi_device *spi,
 
 	/* allocate and initialse our state */
 
-	ili = devm_kzalloc(&spi->dev, sizeof(struct ili9320), GFP_KERNEL);
-	if (ili == NULL) {
-		dev_err(dev, "no memory for device\n");
+	ili = devm_kzalloc_obj(&spi->dev, struct ili9320);
+	if (ili == NULL)
 		return -ENOMEM;
-	}
 
 	ili->access.spi.id = ILI9320_SPI_IDCODE | ILI9320_SPI_ID(1);
 
 	ili->dev = dev;
 	ili->client = client;
-	ili->power = FB_BLANK_POWERDOWN;
+	ili->power = LCD_POWER_OFF;
 	ili->platdata = cfg;
 
 	spi_set_drvdata(spi, ili);
 
 	ili9320_setup_spi(ili, spi);
 
-	lcd = lcd_device_register("ili9320", dev, ili, &ili9320_ops);
+	lcd = devm_lcd_device_register(&spi->dev, "ili9320", dev, ili,
+					&ili9320_ops);
 	if (IS_ERR(lcd)) {
 		dev_err(dev, "failed to register lcd device\n");
 		return PTR_ERR(lcd);
@@ -245,28 +240,19 @@ int ili9320_probe_spi(struct spi_device *spi,
 
 	dev_info(dev, "initialising %s\n", client->name);
 
-	ret = ili9320_power(ili, FB_BLANK_UNBLANK);
+	ret = ili9320_power(ili, LCD_POWER_ON);
 	if (ret != 0) {
 		dev_err(dev, "failed to set lcd power state\n");
-		goto err_unregister;
+		return ret;
 	}
 
 	return 0;
-
- err_unregister:
-	lcd_device_unregister(lcd);
-
-	return ret;
 }
 EXPORT_SYMBOL_GPL(ili9320_probe_spi);
 
-int ili9320_remove(struct ili9320 *ili)
+void ili9320_remove(struct ili9320 *ili)
 {
-	ili9320_power(ili, FB_BLANK_POWERDOWN);
-
-	lcd_device_unregister(ili->lcd);
-
-	return 0;
+	ili9320_power(ili, LCD_POWER_OFF);
 }
 EXPORT_SYMBOL_GPL(ili9320_remove);
 
@@ -275,7 +261,7 @@ int ili9320_suspend(struct ili9320 *lcd)
 {
 	int ret;
 
-	ret = ili9320_power(lcd, FB_BLANK_POWERDOWN);
+	ret = ili9320_power(lcd, LCD_POWER_OFF);
 
 	if (lcd->platdata->suspend == ILI9320_SUSPEND_DEEP) {
 		ili9320_write(lcd, ILI9320_POWER1, lcd->power1 |
@@ -295,7 +281,7 @@ int ili9320_resume(struct ili9320 *lcd)
 	if (lcd->platdata->suspend == ILI9320_SUSPEND_DEEP)
 		ili9320_write(lcd, ILI9320_POWER1, 0x00);
 
-	return ili9320_power(lcd, FB_BLANK_UNBLANK);
+	return ili9320_power(lcd, LCD_POWER_ON);
 }
 EXPORT_SYMBOL_GPL(ili9320_resume);
 #endif
@@ -303,7 +289,7 @@ EXPORT_SYMBOL_GPL(ili9320_resume);
 /* Power down all displays on reboot, poweroff or halt */
 void ili9320_shutdown(struct ili9320 *lcd)
 {
-	ili9320_power(lcd, FB_BLANK_POWERDOWN);
+	ili9320_power(lcd, LCD_POWER_OFF);
 }
 EXPORT_SYMBOL_GPL(ili9320_shutdown);
 

@@ -1,18 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* include/linux/dm9000.h
  *
  * Copyright (c) 2004 Simtec Electronics
  *   Ben Dooks <ben@simtec.co.uk>
  *
  * Header file for dm9000 platform data
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
 */
 
 #ifndef __DM9000_PLATFORM_DATA
 #define __DM9000_PLATFORM_DATA __FILE__
+
+#include <linux/if_ether.h>
 
 /* IO control flags */
 
@@ -27,7 +25,7 @@
 
 struct dm9000_plat_data {
 	unsigned int	flags;
-	unsigned char	dev_addr[6];
+	unsigned char	dev_addr[ETH_ALEN];
 
 	/* allow replacement IO routines */
 

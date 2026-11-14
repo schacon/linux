@@ -1,16 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Renesas R0P7757LC0012RL Support.
  *
  * Copyright (C) 2009 - 2010  Renesas Solutions Corp.
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 
 #include <linux/init.h>
 #include <linux/platform_device.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 #include <linux/irq.h>
 #include <linux/regulator/fixed.h>
 #include <linux/regulator/machine.h>
@@ -18,8 +15,8 @@
 #include <linux/spi/flash.h>
 #include <linux/io.h>
 #include <linux/mmc/host.h>
-#include <linux/mmc/sh_mmcif.h>
-#include <linux/mmc/sh_mobile_sdhi.h>
+#include <linux/platform_data/sh_mmcif.h>
+#include <linux/platform_data/tmio.h>
 #include <linux/sh_eth.h>
 #include <linux/sh_intc.h>
 #include <linux/usb/renesas_usbhs.h>
@@ -76,13 +73,11 @@ static struct resource sh_eth0_resources[] = {
 
 static struct sh_eth_plat_data sh7757_eth0_pdata = {
 	.phy = 1,
-	.edmac_endian = EDMAC_LITTLE_ENDIAN,
-	.register_type = SH_ETH_REG_FAST_SH4,
 	.set_mdio_gate = sh7757_eth_set_mdio_gate,
 };
 
 static struct platform_device sh7757_eth0_device = {
-	.name		= "sh-eth",
+	.name		= "sh7757-ether",
 	.resource	= sh_eth0_resources,
 	.id		= 0,
 	.num_resources	= ARRAY_SIZE(sh_eth0_resources),
@@ -105,13 +100,11 @@ static struct resource sh_eth1_resources[] = {
 
 static struct sh_eth_plat_data sh7757_eth1_pdata = {
 	.phy = 1,
-	.edmac_endian = EDMAC_LITTLE_ENDIAN,
-	.register_type = SH_ETH_REG_FAST_SH4,
 	.set_mdio_gate = sh7757_eth_set_mdio_gate,
 };
 
 static struct platform_device sh7757_eth1_device = {
-	.name		= "sh-eth",
+	.name		= "sh7757-ether",
 	.resource	= sh_eth1_resources,
 	.id		= 1,
 	.num_resources	= ARRAY_SIZE(sh_eth1_resources),
@@ -150,14 +143,12 @@ static struct resource sh_eth_giga0_resources[] = {
 
 static struct sh_eth_plat_data sh7757_eth_giga0_pdata = {
 	.phy = 18,
-	.edmac_endian = EDMAC_LITTLE_ENDIAN,
-	.register_type = SH_ETH_REG_GIGABIT,
 	.set_mdio_gate = sh7757_eth_giga_set_mdio_gate,
 	.phy_interface = PHY_INTERFACE_MODE_RGMII_ID,
 };
 
 static struct platform_device sh7757_eth_giga0_device = {
-	.name		= "sh-eth",
+	.name		= "sh7757-gether",
 	.resource	= sh_eth_giga0_resources,
 	.id		= 2,
 	.num_resources	= ARRAY_SIZE(sh_eth_giga0_resources),
@@ -185,14 +176,12 @@ static struct resource sh_eth_giga1_resources[] = {
 
 static struct sh_eth_plat_data sh7757_eth_giga1_pdata = {
 	.phy = 19,
-	.edmac_endian = EDMAC_LITTLE_ENDIAN,
-	.register_type = SH_ETH_REG_GIGABIT,
 	.set_mdio_gate = sh7757_eth_giga_set_mdio_gate,
 	.phy_interface = PHY_INTERFACE_MODE_RGMII_ID,
 };
 
 static struct platform_device sh7757_eth_giga1_device = {
-	.name		= "sh-eth",
+	.name		= "sh7757-gether",
 	.resource	= sh_eth_giga1_resources,
 	.id		= 3,
 	.num_resources	= ARRAY_SIZE(sh_eth_giga1_resources),
@@ -247,16 +236,16 @@ static struct platform_device sh_mmcif_device = {
 };
 
 /* SDHI0 */
-static struct sh_mobile_sdhi_info sdhi_info = {
-	.dma_slave_tx	= SHDMA_SLAVE_SDHI_TX,
-	.dma_slave_rx	= SHDMA_SLAVE_SDHI_RX,
-	.tmio_caps	= MMC_CAP_SD_HIGHSPEED,
+static struct tmio_mmc_data sdhi_info = {
+	.chan_priv_tx	= (void *)SHDMA_SLAVE_SDHI_TX,
+	.chan_priv_rx	= (void *)SHDMA_SLAVE_SDHI_RX,
+	.capabilities	= MMC_CAP_SD_HIGHSPEED,
 };
 
 static struct resource sdhi_resources[] = {
 	[0] = {
 		.start  = 0xffe50000,
-		.end    = 0xffe501ff,
+		.end    = 0xffe500ff,
 		.flags  = IORESOURCE_MEM,
 	},
 	[1] = {
@@ -580,7 +569,7 @@ static int __init sh7757lcr_devices_setup(void)
 arch_initcall(sh7757lcr_devices_setup);
 
 /* Initialize IRQ setting */
-void __init init_sh7757lcr_IRQ(void)
+static void __init init_sh7757lcr_IRQ(void)
 {
 	plat_irq_setup_pins(IRQ_MODE_IRQ7654);
 	plat_irq_setup_pins(IRQ_MODE_IRQ3210);

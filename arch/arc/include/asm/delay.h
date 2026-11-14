@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Delay routines using pre computed loops_per_jiffy value.
  *
@@ -17,16 +14,21 @@
 #ifndef __ASM_ARC_UDELAY_H
 #define __ASM_ARC_UDELAY_H
 
+#include <asm-generic/types.h>
 #include <asm/param.h>		/* HZ */
+
+extern unsigned long loops_per_jiffy;
 
 static inline void __delay(unsigned long loops)
 {
 	__asm__ __volatile__(
-	"1:	sub.f %0, %0, 1	\n"
-	"	jpnz 1b		\n"
-	: "+r"(loops)
+	"	mov lp_count, %0	\n"
+	"	lp  1f			\n"
+	"	nop			\n"
+	"1:				\n"
 	:
-	: "cc");
+        : "r"(loops)
+        : "lp_count");
 }
 
 extern void __bad_udelay(void);
@@ -53,11 +55,10 @@ static inline void __udelay(unsigned long usecs)
 {
 	unsigned long loops;
 
-	/* (long long) cast ensures 64 bit MPY - real or emulated
+	/* (u64) cast ensures 64 bit MPY - real or emulated
 	 * HZ * 4295 is pre-evaluated by gcc - hence only 2 mpy ops
 	 */
-	loops = ((long long)(usecs * 4295 * HZ) *
-		 (long long)(loops_per_jiffy)) >> 32;
+	loops = ((u64) usecs * 4295 * HZ * loops_per_jiffy) >> 32;
 
 	__delay(loops);
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
 **  linux/amiga/chipram.c
 **
@@ -46,7 +47,7 @@ void *amiga_chip_alloc(unsigned long size, const char *name)
 	struct resource *res;
 	void *p;
 
-	res = kzalloc(sizeof(struct resource), GFP_KERNEL);
+	res = kzalloc_obj(struct resource);
 	if (!res)
 		return NULL;
 
@@ -87,7 +88,7 @@ void *amiga_chip_alloc_res(unsigned long size, struct resource *res)
 
 	atomic_sub(size, &chipavail);
 	pr_debug("amiga_chip_alloc_res: returning %pR\n", res);
-	return (void *)ZTWO_VADDR(res->start);
+	return ZTWO_VADDR(res->start);
 }
 
 void amiga_chip_free(void *ptr)

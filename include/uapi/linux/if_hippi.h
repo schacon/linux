@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0+ WITH Linux-syscall-note */
 /*
  * INET		An implementation of the TCP/IP protocol suite for the LINUX
  *		operating system.  INET is implemented using the  BSD Socket
@@ -19,8 +20,8 @@
  *		2 of the License, or (at your option) any later version.
  */
  
-#ifndef _LINUX_IF_HIPPI_H
-#define _LINUX_IF_HIPPI_H
+#ifndef _UAPI_LINUX_IF_HIPPI_H
+#define _UAPI_LINUX_IF_HIPPI_H
 
 #include <linux/types.h>
 #include <asm/byteorder.h>
@@ -150,4 +151,4 @@ struct hippi_hdr {
 	struct hippi_snap_hdr	snap;
 } __attribute__((packed));
 
-#endif	/* _LINUX_IF_HIPPI_H */
+#endif	/* _UAPI_LINUX_IF_HIPPI_H */

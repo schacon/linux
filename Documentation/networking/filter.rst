@@ -1,0 +1,472 @@
+.. SPDX-License-Identifier: GPL-2.0
+
+.. _networking-filter:
+
+=======================================================
+Linux Socket Filtering aka Berkeley Packet Filter (BPF)
+=======================================================
+
+Notice
+------
+
+This file used to document the eBPF format and mechanisms even when not
+related to socket filtering.  The ../bpf/index.rst has more details
+on eBPF.
+
+Introduction
+------------
+
+Linux Socket Filtering (LSF) is derived from the Berkeley Packet Filter.
+Though there are some distinct differences between the BSD and Linux
+Kernel filtering, but when we speak of BPF or LSF in Linux context, we
+mean the very same mechanism of filtering in the Linux kernel.
+
+BPF allows a user-space program to attach a filter onto any socket and
+allow or disallow certain types of data to come through the socket. LSF
+follows exactly the same filter code structure as BSD's BPF, so referring
+to the BSD bpf.4 manpage is very helpful in creating filters.
+
+On Linux, BPF is much simpler than on BSD. One does not have to worry
+about devices or anything like that. You simply create your filter code,
+send it to the kernel via the SO_ATTACH_FILTER option and if your filter
+code passes the kernel check on it, you then immediately begin filtering
+data on that socket.
+
+You can also detach filters from your socket via the SO_DETACH_FILTER
+option. This will probably not be used much since when you close a socket
+that has a filter on it the filter is automagically removed. The other
+less common case may be adding a different filter on the same socket where
+you had another filter that is still running: the kernel takes care of
+removing the old one and placing your new one in its place, assuming your
+filter has passed the checks, otherwise if it fails the old filter will
+remain on that socket.
+
+SO_LOCK_FILTER option allows to lock the filter attached to a socket. Once
+set, a filter cannot be removed or changed. This allows one process to
+setup a socket, attach a filter, lock it then drop privileges and be
+assured that the filter will be kept until the socket is closed.
+
+The biggest user of this construct might be libpcap. Issuing a high-level
+filter command like `tcpdump -i em1 port 22` passes through the libpcap
+internal compiler that generates a structure that can eventually be loaded
+via SO_ATTACH_FILTER to the kernel. `tcpdump -i em1 port 22 -ddd`
+displays what is being placed into this structure.
+
+Although we were only speaking about sockets here, BPF in Linux is used
+in many more places. There's xt_bpf for netfilter, cls_bpf in the kernel
+qdisc layer, SECCOMP-BPF (SECure COMPuting [1]_), and lots of other places
+such as team driver, PTP code, etc where BPF is being used.
+
+.. [1] Documentation/userspace-api/seccomp_filter.rst
+
+Original BPF paper:
+
+Steven McCanne and Van Jacobson. 1993. The BSD packet filter: a new
+architecture for user-level packet capture. In Proceedings of the
+USENIX Winter 1993 Conference Proceedings on USENIX Winter 1993
+Conference Proceedings (USENIX'93). USENIX Association, Berkeley,
+CA, USA, 2-2. [http://www.tcpdump.org/papers/bpf-usenix93.pdf]
+
+Structure
+---------
+
+User space applications include <linux/filter.h> which contains the
+following relevant structures::
+
+	struct sock_filter {	/* Filter block */
+		__u16	code;   /* Actual filter code */
+		__u8	jt;	/* Jump true */
+		__u8	jf;	/* Jump false */
+		__u32	k;      /* Generic multiuse field */
+	};
+
+Such a structure is assembled as an array of 4-tuples, that contains
+a code, jt, jf and k value. jt and jf are jump offsets and k a generic
+value to be used for a provided code::
+
+	struct sock_fprog {			/* Required for SO_ATTACH_FILTER. */
+		unsigned short		   len;	/* Number of filter blocks */
+		struct sock_filter __user *filter;
+	};
+
+For socket filtering, a pointer to this structure (as shown in
+follow-up example) is being passed to the kernel through setsockopt(2).
+
+Example
+-------
+
+::
+
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <arpa/inet.h>
+    #include <linux/if_ether.h>
+    /* ... */
+
+    /* From the example above: tcpdump -i em1 port 22 -dd */
+    struct sock_filter code[] = {
+	    { 0x28,  0,  0, 0x0000000c },
+	    { 0x15,  0,  8, 0x000086dd },
+	    { 0x30,  0,  0, 0x00000014 },
+	    { 0x15,  2,  0, 0x00000084 },
+	    { 0x15,  1,  0, 0x00000006 },
+	    { 0x15,  0, 17, 0x00000011 },
+	    { 0x28,  0,  0, 0x00000036 },
+	    { 0x15, 14,  0, 0x00000016 },
+	    { 0x28,  0,  0, 0x00000038 },
+	    { 0x15, 12, 13, 0x00000016 },
+	    { 0x15,  0, 12, 0x00000800 },
+	    { 0x30,  0,  0, 0x00000017 },
+	    { 0x15,  2,  0, 0x00000084 },
+	    { 0x15,  1,  0, 0x00000006 },
+	    { 0x15,  0,  8, 0x00000011 },
+	    { 0x28,  0,  0, 0x00000014 },
+	    { 0x45,  6,  0, 0x00001fff },
+	    { 0xb1,  0,  0, 0x0000000e },
+	    { 0x48,  0,  0, 0x0000000e },
+	    { 0x15,  2,  0, 0x00000016 },
+	    { 0x48,  0,  0, 0x00000010 },
+	    { 0x15,  0,  1, 0x00000016 },
+	    { 0x06,  0,  0, 0x0000ffff },
+	    { 0x06,  0,  0, 0x00000000 },
+    };
+
+    struct sock_fprog bpf = {
+	    .len = ARRAY_SIZE(code),
+	    .filter = code,
+    };
+
+    sock = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    if (sock < 0)
+	    /* ... bail out ... */
+
+    ret = setsockopt(sock, SOL_SOCKET, SO_ATTACH_FILTER, &bpf, sizeof(bpf));
+    if (ret < 0)
+	    /* ... bail out ... */
+
+    /* ... */
+    close(sock);
+
+The above example code attaches a socket filter for a PF_PACKET socket
+in order to let all IPv4/IPv6 packets with port 22 pass. The rest will
+be dropped for this socket.
+
+The setsockopt(2) call to SO_DETACH_FILTER doesn't need any arguments
+and SO_LOCK_FILTER for preventing the filter to be detached, takes an
+integer value with 0 or 1.
+
+Note that socket filters are not restricted to PF_PACKET sockets only,
+but can also be used on other socket families.
+
+Summary of system calls:
+
+ * setsockopt(sockfd, SOL_SOCKET, SO_ATTACH_FILTER, &val, sizeof(val));
+ * setsockopt(sockfd, SOL_SOCKET, SO_DETACH_FILTER, &val, sizeof(val));
+ * setsockopt(sockfd, SOL_SOCKET, SO_LOCK_FILTER,   &val, sizeof(val));
+
+Normally, most use cases for socket filtering on packet sockets will be
+covered by libpcap in high-level syntax, so as an application developer
+you should stick to that. libpcap wraps its own layer around all that.
+
+Unless i) using/linking to libpcap is not an option, ii) the required BPF
+filters use Linux extensions that are not supported by libpcap's compiler,
+iii) a filter might be more complex and not cleanly implementable with
+libpcap's compiler, or iv) particular filter codes should be optimized
+differently than libpcap's internal compiler does; then in such cases
+writing such a filter "by hand" can be of an alternative. For example,
+xt_bpf and cls_bpf users might have requirements that could result in
+more complex filter code, or one that cannot be expressed with libpcap
+(e.g. different return codes for various code paths). Moreover, BPF JIT
+implementors may wish to manually write test cases and thus need low-level
+access to BPF code as well.
+
+BPF engine and instruction set
+------------------------------
+
+The examples below use an assembly notation instead of less readable
+opcodes. The notation is closely modelled after Steven McCanne's and
+Van Jacobson's BPF paper.
+
+The BPF architecture consists of the following basic elements:
+
+  =======          ====================================================
+  Element          Description
+  =======          ====================================================
+  A                32 bit wide accumulator
+  X                32 bit wide X register
+  M[]              16 x 32 bit wide misc registers aka "scratch memory
+		   store", addressable from 0 to 15
+  =======          ====================================================
+
+A BPF program is an array of instructions with the following elements
+(as already mentioned)::
+
+  op:16, jt:8, jf:8, k:32
+
+The element op is a 16 bit wide opcode that has a particular instruction
+encoded. jt and jf are two 8 bit wide jump targets, one for condition
+"jump if true", the other one "jump if false". Eventually, element k
+contains a miscellaneous argument that can be interpreted in different
+ways depending on the given instruction in op.
+
+The instruction set consists of load, store, branch, alu, miscellaneous
+and return instructions. This table lists the assembly notation and what
+the corresponding opcodes defined in linux/filter.h do:
+
+  ===========      ===================  =====================
+  Instruction      Addressing mode      Description
+  ===========      ===================  =====================
+  ld               1, 2, 3, 4, 12       Load word into A
+  ldi              4                    Load word into A
+  ldh              1, 2                 Load half-word into A
+  ldb              1, 2                 Load byte into A
+  ldx              3, 4, 5, 12          Load word into X
+  ldxi             4                    Load word into X
+  ldxb             5                    Load byte into X
+
+  st               3                    Store A into M[]
+  stx              3                    Store X into M[]
+
+  jmp              6                    Jump to label
+  ja               6                    Jump to label
+  jeq              7, 8, 9, 10          Jump on A == <x>
+  jneq             9, 10                Jump on A != <x>
+  jne              9, 10                Jump on A != <x>
+  jlt              9, 10                Jump on A <  <x>
+  jle              9, 10                Jump on A <= <x>
+  jgt              7, 8, 9, 10          Jump on A >  <x>
+  jge              7, 8, 9, 10          Jump on A >= <x>
+  jset             7, 8, 9, 10          Jump on A &  <x>
+
+  add              0, 4                 A + <x>
+  sub              0, 4                 A - <x>
+  mul              0, 4                 A * <x>
+  div              0, 4                 A / <x>
+  mod              0, 4                 A % <x>
+  neg                                   !A
+  and              0, 4                 A & <x>
+  or               0, 4                 A | <x>
+  xor              0, 4                 A ^ <x>
+  lsh              0, 4                 A << <x>
+  rsh              0, 4                 A >> <x>
+
+  tax                                   Copy A into X
+  txa                                   Copy X into A
+
+  ret              4, 11                Return
+  ===========      ===================  =====================
+
+The next table shows addressing formats from the 2nd column:
+
+  ===============  ===================  ===============================================
+  Addressing mode  Syntax               Description
+  ===============  ===================  ===============================================
+   0               x/%x                 Register X
+   1               [k]                  BHW at byte offset k in the packet
+   2               [x + k]              BHW at the offset X + k in the packet
+   3               M[k]                 Word at offset k in M[]
+   4               #k                   Literal value stored in k
+   5               4*([k]&0xf)          Lower nibble * 4 at byte offset k in the packet
+   6               L                    Jump label L
+   7               #k,Lt,Lf             Jump to Lt if true, otherwise jump to Lf
+   8               x/%x,Lt,Lf           Jump to Lt if true, otherwise jump to Lf
+   9               #k,Lt                Jump to Lt if predicate is true
+  10               x/%x,Lt              Jump to Lt if predicate is true
+  11               a/%a                 Accumulator A
+  12               extension            BPF extension
+  ===============  ===================  ===============================================
+
+The Linux kernel also has a couple of BPF extensions that are used along
+with the class of load instructions by "overloading" the k argument with
+a negative offset + a particular extension offset. The result of such BPF
+extensions are loaded into A.
+
+Possible BPF extensions are shown in the following table:
+
+  ===================================   =================================================
+  Extension                             Description
+  ===================================   =================================================
+  len                                   skb->len
+  proto                                 skb->protocol
+  type                                  skb->pkt_type
+  poff                                  Payload start offset
+  ifidx                                 skb->dev->ifindex
+  nla                                   Netlink attribute of type X with offset A
+  nlan                                  Nested Netlink attribute of type X with offset A
+  mark                                  skb->mark
+  queue                                 skb->queue_mapping
+  hatype                                skb->dev->type
+  rxhash                                skb->hash
+  cpu                                   raw_smp_processor_id()
+  vlan_tci                              skb_vlan_tag_get(skb)
+  vlan_avail                            skb_vlan_tag_present(skb)
+  vlan_tpid                             skb->vlan_proto
+  rand                                  get_random_u32()
+  ===================================   =================================================
+
+These extensions can also be prefixed with '#'.
+Examples for low-level BPF:
+
+**ARP packets**::
+
+  ldh [12]
+  jne #0x806, drop
+  ret #-1
+  drop: ret #0
+
+**IPv4 TCP packets**::
+
+  ldh [12]
+  jne #0x800, drop
+  ldb [23]
+  jneq #6, drop
+  ret #-1
+  drop: ret #0
+
+**icmp random packet sampling, 1 in 4**::
+
+  ldh [12]
+  jne #0x800, drop
+  ldb [23]
+  jneq #1, drop
+  # get a random uint32 number
+  ld rand
+  mod #4
+  jneq #1, drop
+  ret #-1
+  drop: ret #0
+
+**SECCOMP filter example**::
+
+  ld [4]                  /* offsetof(struct seccomp_data, arch) */
+  jne #0xc000003e, bad    /* AUDIT_ARCH_X86_64 */
+  ld [0]                  /* offsetof(struct seccomp_data, nr) */
+  jeq #15, good           /* __NR_rt_sigreturn */
+  jeq #231, good          /* __NR_exit_group */
+  jeq #60, good           /* __NR_exit */
+  jeq #0, good            /* __NR_read */
+  jeq #1, good            /* __NR_write */
+  jeq #5, good            /* __NR_fstat */
+  jeq #9, good            /* __NR_mmap */
+  jeq #14, good           /* __NR_rt_sigprocmask */
+  jeq #13, good           /* __NR_rt_sigaction */
+  jeq #35, good           /* __NR_nanosleep */
+  bad: ret #0             /* SECCOMP_RET_KILL_THREAD */
+  good: ret #0x7fff0000   /* SECCOMP_RET_ALLOW */
+
+Examples for low-level BPF extension:
+
+**Packet for interface index 13**::
+
+  ld ifidx
+  jneq #13, drop
+  ret #-1
+  drop: ret #0
+
+**(Accelerated) VLAN w/ id 10**::
+
+  ld vlan_tci
+  jneq #10, drop
+  ret #-1
+  drop: ret #0
+
+The ARP filter shown above corresponds to the following sock_filter
+entries::
+
+    { 0x28,  0,  0, 0x0000000c },
+    { 0x15,  0,  1, 0x00000806 },
+    { 0x06,  0,  0, 0xffffffff },
+    { 0x06,  0,  0, 0000000000 },
+
+JIT compiler
+------------
+
+The Linux kernel has a built-in BPF JIT compiler for x86_64, SPARC,
+PowerPC, ARM, ARM64, MIPS, RISC-V, s390, and ARC and can be enabled through
+CONFIG_BPF_JIT. The JIT compiler is transparently invoked for each
+attached filter from user space or for internal kernel users if it has
+been previously enabled by root::
+
+  echo 1 > /proc/sys/net/core/bpf_jit_enable
+
+For JIT developers, doing audits etc, each compile run can output the generated
+opcode image into the kernel log via::
+
+  echo 2 > /proc/sys/net/core/bpf_jit_enable
+
+Example output from dmesg::
+
+    [ 3389.935842] flen=6 proglen=70 pass=3 image=ffffffffa0069c8f
+    [ 3389.935847] JIT code: 00000000: 55 48 89 e5 48 83 ec 60 48 89 5d f8 44 8b 4f 68
+    [ 3389.935849] JIT code: 00000010: 44 2b 4f 6c 4c 8b 87 d8 00 00 00 be 0c 00 00 00
+    [ 3389.935850] JIT code: 00000020: e8 1d 94 ff e0 3d 00 08 00 00 75 16 be 17 00 00
+    [ 3389.935851] JIT code: 00000030: 00 e8 28 94 ff e0 83 f8 01 75 07 b8 ff ff 00 00
+    [ 3389.935852] JIT code: 00000040: eb 02 31 c0 c9 c3
+
+When CONFIG_BPF_JIT_ALWAYS_ON is enabled, bpf_jit_enable is permanently set to 1 and
+setting any other value than that will return in failure. This is even the case for
+setting bpf_jit_enable to 2, since dumping the final JIT image into the kernel log
+is discouraged and introspection through bpftool (under tools/bpf/bpftool/) is the
+generally recommended approach instead.
+
+BPF kernel internals
+--------------------
+Internally, for the kernel interpreter, a different instruction set
+format with similar underlying principles from BPF described in previous
+paragraphs is being used. However, the instruction set format is modelled
+closer to the underlying architecture to mimic native instruction sets, so
+that a better performance can be achieved (more details later). This new
+ISA is called eBPF.  See the ../bpf/index.rst for details.  (Note: eBPF which
+originates from [e]xtended BPF is not the same as BPF extensions! While
+eBPF is an ISA, BPF extensions date back to classic BPF's 'overloading'
+of BPF_LD | BPF_{B,H,W} | BPF_ABS instruction.)
+
+The new instruction set was originally designed with the possible goal in
+mind to write programs in "restricted C" and compile into eBPF with a optional
+GCC/LLVM backend, so that it can just-in-time map to modern 64-bit CPUs with
+minimal performance overhead over two steps, that is, C -> eBPF -> native code.
+
+Currently, the new format is being used for running user BPF programs, which
+includes seccomp BPF, classic socket filters, cls_bpf traffic classifier,
+team driver's classifier for its load-balancing mode, netfilter's xt_bpf
+extension, PTP dissector/classifier, and much more. They are all internally
+converted by the kernel into the new instruction set representation and run
+in the eBPF interpreter. For in-kernel handlers, this all works transparently
+by using bpf_prog_create() for setting up the filter, resp.
+bpf_prog_destroy() for destroying it. The function
+bpf_prog_run(filter, ctx) transparently invokes eBPF interpreter or JITed
+code to run the filter. 'filter' is a pointer to struct bpf_prog that we
+got from bpf_prog_create(), and 'ctx' the given context (e.g.
+skb pointer). All constraints and restrictions from bpf_check_classic() apply
+before a conversion to the new layout is being done behind the scenes!
+
+Currently, the classic BPF format is being used for JITing on most
+32-bit architectures, whereas x86-64, aarch64, s390x, powerpc64,
+sparc64, arm32, riscv64, riscv32, loongarch64, arc perform JIT compilation
+from eBPF instruction set.
+
+Testing
+-------
+
+The BPF selftests under tools/testing/selftests/bpf ship instruction
+tests in test_progs, see jit_insns, which runs the eBPF
+instructions over a range of operand magnitudes and signs, register
+combinations, memory offsets and jump offsets against the BPF interpreter
+or the JIT compiler, depending on the net.core.bpf_jit_enable setting.
+
+Misc
+----
+
+Also trinity, the Linux syscall fuzzer, has built-in support for BPF and
+SECCOMP-BPF kernel fuzzing.
+
+Written by
+----------
+
+The document was written in the hope that it is found useful and in order
+to give potential BPF hackers or security auditors a better overview of
+the underlying architecture.
+
+- Jay Schulist <jschlst@samba.org>
+- Daniel Borkmann <daniel@iogearbox.net>
+- Alexei Starovoitov <ast@kernel.org>

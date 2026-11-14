@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * MAX8997-haptic controller driver
  *
@@ -5,25 +6,9 @@
  * Donggeun Kim <dg77.kim@samsung.com>
  *
  * This program is not provided / owned by Maxim Integrated Products.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
  */
 
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/platform_device.h>
 #include <linux/err.h>
@@ -68,45 +53,30 @@ struct max8997_haptic {
 	unsigned int pattern_signal_period;
 };
 
-static int max8997_haptic_set_duty_cycle(struct max8997_haptic *chip)
+static void max8997_haptic_set_internal_duty_cycle(struct max8997_haptic *chip)
 {
-	int ret = 0;
+	u8 duty_index = DIV_ROUND_UP(chip->level * 64, 100);
 
-	if (chip->mode == MAX8997_EXTERNAL_MODE) {
-		unsigned int duty = chip->pwm_period * chip->level / 100;
-		ret = pwm_config(chip->pwm, duty, chip->pwm_period);
-	} else {
-		int i;
-		u8 duty_index = 0;
-
-		for (i = 0; i <= 64; i++) {
-			if (chip->level <= i * 100 / 64) {
-				duty_index = i;
-				break;
-			}
-		}
-		switch (chip->internal_mode_pattern) {
-		case 0:
-			max8997_write_reg(chip->client,
-				MAX8997_HAPTIC_REG_SIGPWMDC1, duty_index);
-			break;
-		case 1:
-			max8997_write_reg(chip->client,
-				MAX8997_HAPTIC_REG_SIGPWMDC2, duty_index);
-			break;
-		case 2:
-			max8997_write_reg(chip->client,
-				MAX8997_HAPTIC_REG_SIGPWMDC3, duty_index);
-			break;
-		case 3:
-			max8997_write_reg(chip->client,
-				MAX8997_HAPTIC_REG_SIGPWMDC4, duty_index);
-			break;
-		default:
-			break;
-		}
+	switch (chip->internal_mode_pattern) {
+	case 0:
+		max8997_write_reg(chip->client,
+				  MAX8997_HAPTIC_REG_SIGPWMDC1, duty_index);
+		break;
+	case 1:
+		max8997_write_reg(chip->client,
+				  MAX8997_HAPTIC_REG_SIGPWMDC2, duty_index);
+		break;
+	case 2:
+		max8997_write_reg(chip->client,
+				  MAX8997_HAPTIC_REG_SIGPWMDC3, duty_index);
+		break;
+	case 3:
+		max8997_write_reg(chip->client,
+				  MAX8997_HAPTIC_REG_SIGPWMDC4, duty_index);
+		break;
+	default:
+		break;
 	}
-	return ret;
 }
 
 static void max8997_haptic_configure(struct max8997_haptic *chip)
@@ -173,29 +143,49 @@ static void max8997_haptic_enable(struct max8997_haptic *chip)
 {
 	int error;
 
-	mutex_lock(&chip->mutex);
+	guard(mutex)(&chip->mutex);
 
-	error = max8997_haptic_set_duty_cycle(chip);
-	if (error) {
-		dev_err(chip->dev, "set_pwm_cycle failed, error: %d\n", error);
-		goto out;
-	}
+	if (chip->mode != MAX8997_EXTERNAL_MODE)
+		max8997_haptic_set_internal_duty_cycle(chip);
 
 	if (!chip->enabled) {
-		chip->enabled = true;
-		regulator_enable(chip->regulator);
+		error = regulator_enable(chip->regulator);
+		if (error) {
+			dev_err(chip->dev, "Failed to enable regulator\n");
+			return;
+		}
 		max8997_haptic_configure(chip);
-		if (chip->mode == MAX8997_EXTERNAL_MODE)
-			pwm_enable(chip->pwm);
 	}
 
-out:
-	mutex_unlock(&chip->mutex);
+	/*
+	 * It would be more straight forward to configure the external PWM
+	 * earlier i.e. when the internal duty_cycle is setup in internal mode.
+	 * But historically this is done only after the regulator was enabled
+	 * and max8997_haptic_configure() set the enable bit in
+	 * MAX8997_HAPTIC_REG_CONF2. So better keep it this way.
+	 */
+	if (chip->mode == MAX8997_EXTERNAL_MODE) {
+		struct pwm_state state;
+
+		pwm_init_state(chip->pwm, &state);
+		state.period = chip->pwm_period;
+		state.duty_cycle = chip->pwm_period * chip->level / 100;
+		state.enabled = true;
+
+		error = pwm_apply_might_sleep(chip->pwm, &state);
+		if (error) {
+			dev_err(chip->dev, "Failed to enable PWM\n");
+			regulator_disable(chip->regulator);
+			return;
+		}
+	}
+
+	chip->enabled = true;
 }
 
 static void max8997_haptic_disable(struct max8997_haptic *chip)
 {
-	mutex_lock(&chip->mutex);
+	guard(mutex)(&chip->mutex);
 
 	if (chip->enabled) {
 		chip->enabled = false;
@@ -204,8 +194,6 @@ static void max8997_haptic_disable(struct max8997_haptic *chip)
 			pwm_disable(chip->pwm);
 		regulator_disable(chip->regulator);
 	}
-
-	mutex_unlock(&chip->mutex);
 }
 
 static void max8997_haptic_play_effect_work(struct work_struct *work)
@@ -246,18 +234,20 @@ static int max8997_haptic_probe(struct platform_device *pdev)
 	struct max8997_dev *iodev = dev_get_drvdata(pdev->dev.parent);
 	const struct max8997_platform_data *pdata =
 					dev_get_platdata(iodev->dev);
-	const struct max8997_haptic_platform_data *haptic_pdata =
-					pdata->haptic_pdata;
+	const struct max8997_haptic_platform_data *haptic_pdata = NULL;
 	struct max8997_haptic *chip;
 	struct input_dev *input_dev;
 	int error;
+
+	if (pdata)
+		haptic_pdata = pdata->haptic_pdata;
 
 	if (!haptic_pdata) {
 		dev_err(&pdev->dev, "no haptic platform data\n");
 		return -EINVAL;
 	}
 
-	chip = kzalloc(sizeof(struct max8997_haptic), GFP_KERNEL);
+	chip = kzalloc_obj(*chip);
 	input_dev = input_allocate_device();
 	if (!chip || !input_dev) {
 		dev_err(&pdev->dev, "unable to allocate memory\n");
@@ -286,8 +276,7 @@ static int max8997_haptic_probe(struct platform_device *pdev)
 		break;
 
 	case MAX8997_EXTERNAL_MODE:
-		chip->pwm = pwm_request(haptic_pdata->pwm_channel_id,
-					"max8997-haptic");
+		chip->pwm = pwm_get(&pdev->dev, NULL);
 		if (IS_ERR(chip->pwm)) {
 			error = PTR_ERR(chip->pwm);
 			dev_err(&pdev->dev,
@@ -295,6 +284,7 @@ static int max8997_haptic_probe(struct platform_device *pdev)
 				error);
 			goto err_free_mem;
 		}
+
 		break;
 
 	default:
@@ -346,7 +336,7 @@ err_put_regulator:
 	regulator_put(chip->regulator);
 err_free_pwm:
 	if (chip->mode == MAX8997_EXTERNAL_MODE)
-		pwm_free(chip->pwm);
+		pwm_put(chip->pwm);
 err_free_mem:
 	input_free_device(input_dev);
 	kfree(chip);
@@ -354,7 +344,7 @@ err_free_mem:
 	return error;
 }
 
-static int max8997_haptic_remove(struct platform_device *pdev)
+static void max8997_haptic_remove(struct platform_device *pdev)
 {
 	struct max8997_haptic *chip = platform_get_drvdata(pdev);
 
@@ -362,14 +352,11 @@ static int max8997_haptic_remove(struct platform_device *pdev)
 	regulator_put(chip->regulator);
 
 	if (chip->mode == MAX8997_EXTERNAL_MODE)
-		pwm_free(chip->pwm);
+		pwm_put(chip->pwm);
 
 	kfree(chip);
-
-	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int max8997_haptic_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
@@ -379,21 +366,20 @@ static int max8997_haptic_suspend(struct device *dev)
 
 	return 0;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(max8997_haptic_pm_ops, max8997_haptic_suspend, NULL);
+static DEFINE_SIMPLE_DEV_PM_OPS(max8997_haptic_pm_ops,
+				max8997_haptic_suspend, NULL);
 
 static const struct platform_device_id max8997_haptic_id[] = {
 	{ "max8997-haptic", 0 },
 	{ },
 };
-MODULE_DEVICE_TABLE(i2c, max8997_haptic_id);
+MODULE_DEVICE_TABLE(platform, max8997_haptic_id);
 
 static struct platform_driver max8997_haptic_driver = {
 	.driver	= {
 		.name	= "max8997-haptic",
-		.owner	= THIS_MODULE,
-		.pm	= &max8997_haptic_pm_ops,
+		.pm	= pm_sleep_ptr(&max8997_haptic_pm_ops),
 	},
 	.probe		= max8997_haptic_probe,
 	.remove		= max8997_haptic_remove,
@@ -401,7 +387,6 @@ static struct platform_driver max8997_haptic_driver = {
 };
 module_platform_driver(max8997_haptic_driver);
 
-MODULE_ALIAS("platform:max8997-haptic");
 MODULE_AUTHOR("Donggeun Kim <dg77.kim@samsung.com>");
 MODULE_DESCRIPTION("max8997_haptic driver");
 MODULE_LICENSE("GPL");

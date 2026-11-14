@@ -8,14 +8,17 @@
 
 OUTPUT_ARCH(mips)
 ENTRY(start)
+PHDRS {
+	text PT_LOAD FLAGS(7); /* RWX */
+}
 SECTIONS
 {
 	/* Text and read-only data */
 	/* . = VMLINUZ_LOAD_ADDRESS; */
 	.text : {
 		*(.text)
-		*(.rodata)
-	}
+		*(.rodata .rodata.*)
+	}: text
 	/* End of text section */
 
 	/* Writable data */
@@ -26,8 +29,15 @@ SECTIONS
 		*(.image)
 		__image_end = .;
 		CONSTRUCTORS
+		. = ALIGN(16);
 	}
-	. = ALIGN(16);
+
+	.appended_dtb : {
+		__appended_dtb = .;
+		/* leave space for appended DTB */
+		. += 0x100000;
+	}
+
 	_edata = .;
 	/* End of data section */
 
@@ -40,7 +50,9 @@ SECTIONS
 
 	/* Sections to be discarded */
 	/DISCARD/ : {
+		*(.MIPS.abiflags)
 		*(.MIPS.options)
+		*(.gnu.attributes)
 		*(.options)
 		*(.pdr)
 		*(.reginfo)

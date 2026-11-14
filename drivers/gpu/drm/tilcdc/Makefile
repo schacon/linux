@@ -1,13 +1,14 @@
-ccflags-y := -Iinclude/drm
-ifeq (, $(findstring -W,$(EXTRA_CFLAGS)))
+# SPDX-License-Identifier: GPL-2.0
+ifeq (, $(findstring -W,$(KCFLAGS)))
 	ccflags-y += -Werror
 endif
 
 tilcdc-y := \
+	tilcdc_plane.o \
 	tilcdc_crtc.o \
-	tilcdc_tfp410.o \
-	tilcdc_slave.o \
-	tilcdc_panel.o \
+	tilcdc_encoder.o \
 	tilcdc_drv.o
 
 obj-$(CONFIG_DRM_TILCDC)	+= tilcdc.o
+obj-$(CONFIG_DRM_TILCDC_PANEL_LEGACY)	+= tilcdc_panel_legacy.o \
+					   tilcdc_panel_legacy.dtbo.o

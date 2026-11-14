@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Copyright (c) 2010-2011, The Linux Foundation. All rights reserved.
  *
@@ -16,14 +17,9 @@
  * 02110-1301, USA.
  */
 
-#ifndef _ASM_SETUP_H
-#define _ASM_SETUP_H
+#ifndef _UAPI_ASM_HEXAGON_SETUP_H
+#define _UAPI_ASM_HEXAGON_SETUP_H
 
-#include <linux/init.h>
 #include <asm-generic/setup.h>
-
-extern char external_cmdline_buffer;
-
-void __init setup_arch_memory(void);
 
 #endif

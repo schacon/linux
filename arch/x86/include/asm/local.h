@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_LOCAL_H
 #define _ASM_X86_LOCAL_H
 
@@ -31,14 +32,14 @@ static inline void local_add(long i, local_t *l)
 {
 	asm volatile(_ASM_ADD "%1,%0"
 		     : "+m" (l->a.counter)
-		     : "ir" (i));
+		     : "er" (i));
 }
 
 static inline void local_sub(long i, local_t *l)
 {
 	asm volatile(_ASM_SUB "%1,%0"
 		     : "+m" (l->a.counter)
-		     : "ir" (i));
+		     : "er" (i));
 }
 
 /**
@@ -50,14 +51,9 @@ static inline void local_sub(long i, local_t *l)
  * true if the result is zero, or false for all
  * other cases.
  */
-static inline int local_sub_and_test(long i, local_t *l)
+static inline bool local_sub_and_test(long i, local_t *l)
 {
-	unsigned char c;
-
-	asm volatile(_ASM_SUB "%2,%0; sete %1"
-		     : "+m" (l->a.counter), "=qm" (c)
-		     : "ir" (i) : "memory");
-	return c;
+	return GEN_BINARY_RMWcc(_ASM_SUB, l->a.counter, e, "er", i);
 }
 
 /**
@@ -68,14 +64,9 @@ static inline int local_sub_and_test(long i, local_t *l)
  * returns true if the result is 0, or false for all other
  * cases.
  */
-static inline int local_dec_and_test(local_t *l)
+static inline bool local_dec_and_test(local_t *l)
 {
-	unsigned char c;
-
-	asm volatile(_ASM_DEC "%0; sete %1"
-		     : "+m" (l->a.counter), "=qm" (c)
-		     : : "memory");
-	return c != 0;
+	return GEN_UNARY_RMWcc(_ASM_DEC, l->a.counter, e);
 }
 
 /**
@@ -86,14 +77,9 @@ static inline int local_dec_and_test(local_t *l)
  * and returns true if the result is zero, or false for all
  * other cases.
  */
-static inline int local_inc_and_test(local_t *l)
+static inline bool local_inc_and_test(local_t *l)
 {
-	unsigned char c;
-
-	asm volatile(_ASM_INC "%0; sete %1"
-		     : "+m" (l->a.counter), "=qm" (c)
-		     : : "memory");
-	return c != 0;
+	return GEN_UNARY_RMWcc(_ASM_INC, l->a.counter, e);
 }
 
 /**
@@ -105,14 +91,9 @@ static inline int local_inc_and_test(local_t *l)
  * if the result is negative, or false when
  * result is greater than or equal to zero.
  */
-static inline int local_add_negative(long i, local_t *l)
+static inline bool local_add_negative(long i, local_t *l)
 {
-	unsigned char c;
-
-	asm volatile(_ASM_ADD "%2,%0; sets %1"
-		     : "+m" (l->a.counter), "=qm" (c)
-		     : "ir" (i) : "memory");
-	return c;
+	return GEN_BINARY_RMWcc(_ASM_ADD, l->a.counter, s, "er", i);
 }
 
 /**
@@ -125,7 +106,7 @@ static inline int local_add_negative(long i, local_t *l)
 static inline long local_add_return(long i, local_t *l)
 {
 	long __i = i;
-	asm volatile(_ASM_XADD "%0, %1;"
+	asm volatile(_ASM_XADD "%0, %1"
 		     : "+r" (i), "+m" (l->a.counter)
 		     : : "memory");
 	return i + __i;
@@ -139,34 +120,54 @@ static inline long local_sub_return(long i, local_t *l)
 #define local_inc_return(l)  (local_add_return(1, l))
 #define local_dec_return(l)  (local_sub_return(1, l))
 
-#define local_cmpxchg(l, o, n) \
-	(cmpxchg_local(&((l)->a.counter), (o), (n)))
-/* Always has a lock prefix */
-#define local_xchg(l, n) (xchg(&((l)->a.counter), (n)))
+static inline long local_cmpxchg(local_t *l, long old, long new)
+{
+	return cmpxchg_local(&l->a.counter, old, new);
+}
+
+static inline bool local_try_cmpxchg(local_t *l, long *old, long new)
+{
+	return try_cmpxchg_local(&l->a.counter,
+				 (typeof(l->a.counter) *) old, new);
+}
+
+/*
+ * Implement local_xchg using CMPXCHG instruction without the LOCK prefix.
+ * XCHG is expensive due to the implied LOCK prefix.  The processor
+ * cannot prefetch cachelines if XCHG is used.
+ */
+static __always_inline long
+local_xchg(local_t *l, long n)
+{
+	long c = local_read(l);
+
+	do { } while (!local_try_cmpxchg(l, &c, n));
+
+	return c;
+}
 
 /**
- * local_add_unless - add unless the number is a given value
+ * local_add_unless - add unless the number is already a given value
  * @l: pointer of type local_t
  * @a: the amount to add to l...
  * @u: ...unless l is equal to u.
  *
- * Atomically adds @a to @l, so long as it was not @u.
- * Returns non-zero if @l was not @u, and zero otherwise.
+ * Atomically adds @a to @l, if @v was not already @u.
+ * Returns true if the addition was done.
  */
-#define local_add_unless(l, a, u)				\
-({								\
-	long c, old;						\
-	c = local_read((l));					\
-	for (;;) {						\
-		if (unlikely(c == (u)))				\
-			break;					\
-		old = local_cmpxchg((l), c, c + (a));		\
-		if (likely(old == c))				\
-			break;					\
-		c = old;					\
-	}							\
-	c != (u);						\
-})
+static __always_inline bool
+local_add_unless(local_t *l, long a, long u)
+{
+	long c = local_read(l);
+
+	do {
+		if (unlikely(c == u))
+			return false;
+	} while (!local_try_cmpxchg(l, &c, c + a));
+
+	return true;
+}
+
 #define local_inc_not_zero(l) local_add_unless((l), 1, 0)
 
 /* On x86_32, these are no better than the atomic variants.

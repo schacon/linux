@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  arch/arm/include/asm/map.h
  *
  *  Copyright (C) 1999-2000 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  Page table mapping constructs and function prototypes
  */
@@ -22,23 +19,29 @@ struct map_desc {
 };
 
 /* types 0-3 are defined in asm/io.h */
-#define MT_UNCACHED		4
-#define MT_CACHECLEAN		5
-#define MT_MINICLEAN		6
-#define MT_LOW_VECTORS		7
-#define MT_HIGH_VECTORS		8
-#define MT_MEMORY		9
-#define MT_ROM			10
-#define MT_MEMORY_NONCACHED	11
-#define MT_MEMORY_DTCM		12
-#define MT_MEMORY_ITCM		13
-#define MT_MEMORY_SO		14
-#define MT_MEMORY_DMA_READY	15
+enum {
+	MT_UNCACHED = 4,
+	MT_CACHECLEAN,
+	MT_MINICLEAN,
+	MT_LOW_VECTORS,
+	MT_HIGH_VECTORS,
+	MT_MEMORY_RWX,
+	MT_MEMORY_RW,
+	MT_MEMORY_RO,
+	MT_ROM,
+	MT_MEMORY_RWX_NONCACHED,
+	MT_MEMORY_RW_DTCM,
+	MT_MEMORY_RWX_ITCM,
+	MT_MEMORY_RW_SO,
+	MT_MEMORY_DMA_READY,
+};
 
 #ifdef CONFIG_MMU
 extern void iotable_init(struct map_desc *, int);
 extern void vm_reserve_area_early(unsigned long addr, unsigned long size,
 				  void *caller);
+extern void create_mapping_late(struct mm_struct *mm, struct map_desc *md,
+				bool ng);
 
 #ifdef CONFIG_DEBUG_LL
 extern void debug_ll_addr(unsigned long *paddr, unsigned long *vaddr);

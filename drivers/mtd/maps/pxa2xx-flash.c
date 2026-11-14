@@ -1,27 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Map driver for Intel XScale PXA2xx platforms.
  *
  * Author:	Nicolas Pitre
  * Copyright:	(C) 2001 MontaVista Software Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
 
 #include <asm/io.h>
-#include <mach/hardware.h>
-
 #include <asm/mach/flash.h>
 
 #define CACHELINESIZE	32
@@ -49,7 +43,7 @@ static const char * const probes[] = { "RedBoot", "cmdlinepart", NULL };
 
 static int pxa2xx_flash_probe(struct platform_device *pdev)
 {
-	struct flash_platform_data *flash = pdev->dev.platform_data;
+	struct flash_platform_data *flash = dev_get_platdata(&pdev->dev);
 	struct pxa2xx_flash_info *info;
 	struct resource *res;
 
@@ -57,11 +51,11 @@ static int pxa2xx_flash_probe(struct platform_device *pdev)
 	if (!res)
 		return -ENODEV;
 
-	info = kzalloc(sizeof(struct pxa2xx_flash_info), GFP_KERNEL);
+	info = kzalloc_obj(struct pxa2xx_flash_info);
 	if (!info)
 		return -ENOMEM;
 
-	info->map.name = (char *) flash->name;
+	info->map.name = flash->name;
 	info->map.bankwidth = flash->width;
 	info->map.phys = res->start;
 	info->map.size = resource_size(res);
@@ -70,10 +64,10 @@ static int pxa2xx_flash_probe(struct platform_device *pdev)
 	if (!info->map.virt) {
 		printk(KERN_WARNING "Failed to ioremap %s\n",
 		       info->map.name);
+		kfree(info);
 		return -ENOMEM;
 	}
-	info->map.cached =
-		ioremap_cached(info->map.phys, info->map.size);
+	info->map.cached = ioremap_cache(info->map.phys, info->map.size);
 	if (!info->map.cached)
 		printk(KERN_WARNING "Failed to ioremap cached %s\n",
 		       info->map.name);
@@ -92,9 +86,10 @@ static int pxa2xx_flash_probe(struct platform_device *pdev)
 		iounmap((void *)info->map.virt);
 		if (info->map.cached)
 			iounmap(info->map.cached);
+		kfree(info);
 		return -EIO;
 	}
-	info->mtd->owner = THIS_MODULE;
+	info->mtd->dev.parent = &pdev->dev;
 
 	mtd_device_parse_register(info->mtd, probes, NULL, flash->parts,
 				  flash->nr_parts);
@@ -103,11 +98,9 @@ static int pxa2xx_flash_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int pxa2xx_flash_remove(struct platform_device *dev)
+static void pxa2xx_flash_remove(struct platform_device *dev)
 {
 	struct pxa2xx_flash_info *info = platform_get_drvdata(dev);
-
-	platform_set_drvdata(dev, NULL);
 
 	mtd_device_unregister(info->mtd);
 
@@ -116,7 +109,6 @@ static int pxa2xx_flash_remove(struct platform_device *dev)
 	if (info->map.cached)
 		iounmap(info->map.cached);
 	kfree(info);
-	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -134,7 +126,6 @@ static void pxa2xx_flash_shutdown(struct platform_device *dev)
 static struct platform_driver pxa2xx_flash_driver = {
 	.driver = {
 		.name		= "pxa2xx-flash",
-		.owner		= THIS_MODULE,
 	},
 	.probe		= pxa2xx_flash_probe,
 	.remove		= pxa2xx_flash_remove,

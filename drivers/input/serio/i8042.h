@@ -1,13 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef _I8042_H
 #define _I8042_H
 
 
 /*
  *  Copyright (c) 1999-2002 Vojtech Pavlik
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 /*
@@ -20,14 +17,10 @@
 #include "i8042-ip22io.h"
 #elif defined(CONFIG_SNI_RM)
 #include "i8042-snirm.h"
-#elif defined(CONFIG_PPC)
-#include "i8042-ppcio.h"
 #elif defined(CONFIG_SPARC)
 #include "i8042-sparcio.h"
-#elif defined(CONFIG_X86) || defined(CONFIG_IA64)
-#include "i8042-x86ia64io.h"
-#elif defined(CONFIG_UNICORE32)
-#include "i8042-unicore32io.h"
+#elif defined(CONFIG_X86) || defined(CONFIG_LOONGARCH)
+#include "i8042-acpipnpio.h"
 #else
 #include "i8042-io.h"
 #endif
@@ -39,30 +32,6 @@
  */
 
 #define I8042_CTL_TIMEOUT	10000
-
-/*
- * Status register bits.
- */
-
-#define I8042_STR_PARITY	0x80
-#define I8042_STR_TIMEOUT	0x40
-#define I8042_STR_AUXDATA	0x20
-#define I8042_STR_KEYLOCK	0x10
-#define I8042_STR_CMDDAT	0x08
-#define I8042_STR_MUXERR	0x04
-#define I8042_STR_IBF		0x02
-#define	I8042_STR_OBF		0x01
-
-/*
- * Control register bits.
- */
-
-#define I8042_CTR_KBDINT	0x01
-#define I8042_CTR_AUXINT	0x02
-#define I8042_CTR_IGNKEYLOCK	0x08
-#define I8042_CTR_KBDDIS	0x10
-#define I8042_CTR_AUXDIS	0x20
-#define I8042_CTR_XLATE		0x40
 
 /*
  * Return codes.
@@ -97,6 +66,17 @@ static unsigned long i8042_start_time;
 			printk(KERN_DEBUG KBUILD_MODNAME ": [%d] " format,	\
 			       (int) (jiffies - i8042_start_time), ##arg);	\
 	} while (0)
+
+#define filter_dbg(filter, data, format, args...)		\
+	do {							\
+		if (!i8042_debug)				\
+			break;					\
+								\
+		if (!filter || i8042_unmask_kbd_data)		\
+			dbg("%02x " format, data, ##args);	\
+		else						\
+			dbg("** " format, ##args);		\
+	} while (0)
 #else
 #define dbg_init() do { } while (0)
 #define dbg(format, arg...)							\
@@ -104,6 +84,8 @@ static unsigned long i8042_start_time;
 		if (0)								\
 			printk(KERN_DEBUG pr_fmt(format), ##arg);		\
 	} while (0)
+
+#define filter_dbg(filter, data, format, args...) do { } while (0)
 #endif
 
 #endif /* _I8042_H */

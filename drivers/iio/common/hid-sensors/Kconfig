@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 #
 # Hid Sensor common modules
 #
@@ -16,22 +17,14 @@ config HID_SENSOR_IIO_COMMON
 
 config HID_SENSOR_IIO_TRIGGER
 	tristate "Common module (trigger) for all HID Sensor IIO drivers"
-	depends on HID_SENSOR_HUB && HID_SENSOR_IIO_COMMON
+	depends on HID_SENSOR_HUB && HID_SENSOR_IIO_COMMON && IIO_BUFFER
 	select IIO_TRIGGER
+	select IIO_TRIGGERED_BUFFER
 	help
 	  Say yes here to build trigger support for HID sensors.
 	  Triggers will be send if all requested attributes were read.
 
 	  If this driver is compiled as a module, it will be named
 	  hid-sensor-trigger.
-
-config HID_SENSOR_ENUM_BASE_QUIRKS
-	bool "ENUM base quirks for HID Sensor IIO drivers"
-	depends on HID_SENSOR_IIO_COMMON
-	help
-	  Say yes here to build support for sensor hub FW using
-	  enumeration, which is using 1 as base instead of 0.
-	  Since logical minimum is still set 0 instead of 1,
-	  there is no easy way to differentiate.
 
 endmenu

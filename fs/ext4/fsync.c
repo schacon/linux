@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/ext4/fsync.c
  *
@@ -26,8 +27,8 @@
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/writeback.h>
-#include <linux/jbd2.h>
 #include <linux/blkdev.h>
+#include <linux/buffer_head.h>
 
 #include "ext4.h"
 #include "ext4_jbd2.h"
@@ -44,59 +45,73 @@
  */
 static int ext4_sync_parent(struct inode *inode)
 {
-	struct dentry *dentry = NULL;
-	struct inode *next;
+	struct dentry *dentry, *next;
 	int ret = 0;
 
 	if (!ext4_test_inode_state(inode, EXT4_STATE_NEWENTRY))
 		return 0;
-	inode = igrab(inode);
+	dentry = d_find_any_alias(inode);
+	if (!dentry)
+		return 0;
 	while (ext4_test_inode_state(inode, EXT4_STATE_NEWENTRY)) {
 		ext4_clear_inode_state(inode, EXT4_STATE_NEWENTRY);
-		dentry = d_find_any_alias(inode);
-		if (!dentry)
-			break;
-		next = igrab(dentry->d_parent->d_inode);
+
+		next = dget_parent(dentry);
 		dput(dentry);
-		if (!next)
-			break;
-		iput(inode);
-		inode = next;
-		ret = sync_mapping_buffers(inode->i_mapping);
-		if (ret)
-			break;
+		dentry = next;
+		inode = dentry->d_inode;
+
+		/*
+		 * The directory inode may have gone through rmdir by now. But
+		 * the inode itself and its blocks are still allocated (we hold
+		 * a reference to the inode via its dentry), so it didn't go
+		 * through ext4_evict_inode()) and so we are safe to flush
+		 * metadata blocks and the inode.
+		 */
 		ret = sync_inode_metadata(inode, 1);
 		if (ret)
 			break;
 	}
-	iput(inode);
+	dput(dentry);
 	return ret;
 }
 
-/**
- * __sync_file - generic_file_fsync without the locking and filemap_write
- * @inode:	inode to sync
- * @datasync:	only sync essential metadata if true
- *
- * This is just generic_file_fsync without the locking.  This is needed for
- * nojournal mode to make sure this inodes data/metadata makes it to disk
- * properly.  The i_mutex should be held already.
- */
-static int __sync_inode(struct inode *inode, int datasync)
+static int ext4_fsync_nojournal(struct file *file, loff_t start, loff_t end,
+				int datasync, bool *needs_barrier)
 {
-	int err;
+	struct inode *inode = file->f_inode;
 	int ret;
 
-	ret = sync_mapping_buffers(inode->i_mapping);
-	if (!(inode->i_state & I_DIRTY))
+	ret = sync_inode_metadata(inode, 1);
+	if (ret)
 		return ret;
-	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
-		return ret;
+	ret = ext4_sync_parent(inode);
 
-	err = sync_inode_metadata(inode, 1);
-	if (ret == 0)
-		ret = err;
+	if (test_opt(inode->i_sb, BARRIER))
+		*needs_barrier = true;
+
 	return ret;
+}
+
+static int ext4_fsync_journal(struct inode *inode, bool datasync,
+			     bool *needs_barrier)
+{
+	struct ext4_inode_info *ei = EXT4_I(inode);
+	journal_t *journal = EXT4_SB(inode->i_sb)->s_journal;
+	tid_t commit_tid = datasync ? ei->i_datasync_tid : ei->i_sync_tid;
+
+	/*
+	 * Fastcommit does not really support fsync on directories or other
+	 * special files. Force a full commit.
+	 */
+	if (!S_ISREG(inode->i_mode))
+		return ext4_force_commit(inode->i_sb);
+
+	if (journal->j_flags & JBD2_BARRIER &&
+	    !jbd2_trans_will_send_data_barrier(journal, commit_tid))
+		*needs_barrier = true;
+
+	return ext4_fc_commit(journal, commit_tid);
 }
 
 /*
@@ -110,70 +125,52 @@ static int __sync_inode(struct inode *inode, int datasync)
  * What we do is just kick off a commit and wait on it.  This will snapshot the
  * inode to disk.
  */
-
 int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 {
-	struct inode *inode = file->f_mapping->host;
-	struct ext4_inode_info *ei = EXT4_I(inode);
-	journal_t *journal = EXT4_SB(inode->i_sb)->s_journal;
-	int ret, err;
-	tid_t commit_tid;
+	int ret = 0, err;
 	bool needs_barrier = false;
+	struct inode *inode = file->f_mapping->host;
 
-	J_ASSERT(ext4_journal_current_handle() == NULL);
+	ret = ext4_emergency_state(inode->i_sb);
+	if (unlikely(ret))
+		return ret;
+
+	ASSERT(ext4_journal_current_handle() == NULL);
 
 	trace_ext4_sync_file_enter(file, datasync);
 
-	ret = filemap_write_and_wait_range(inode->i_mapping, start, end);
+	if (sb_rdonly(inode->i_sb))
+		goto out;
+
+	ret = file_write_and_wait_range(file, start, end);
 	if (ret)
-		return ret;
-	mutex_lock(&inode->i_mutex);
-
-	if (inode->i_sb->s_flags & MS_RDONLY)
 		goto out;
 
-	ret = ext4_flush_unwritten_io(inode);
-	if (ret < 0)
-		goto out;
-
-	if (!journal) {
-		ret = __sync_inode(inode, datasync);
-		if (!ret && !hlist_empty(&inode->i_dentry))
-			ret = ext4_sync_parent(inode);
+	if (!EXT4_SB(inode->i_sb)->s_journal) {
+		ret = ext4_fsync_nojournal(file, start, end, datasync,
+					   &needs_barrier);
+		if (needs_barrier)
+			goto issue_flush;
 		goto out;
 	}
 
 	/*
-	 * data=writeback,ordered:
 	 *  The caller's filemap_fdatawrite()/wait will sync the data.
 	 *  Metadata is in the journal, we wait for proper transaction to
 	 *  commit here.
-	 *
-	 * data=journal:
-	 *  filemap_fdatawrite won't do anything (the buffers are clean).
-	 *  ext4_force_commit will write the file data into the journal and
-	 *  will wait on that.
-	 *  filemap_fdatawait() will encounter a ton of newly-dirtied pages
-	 *  (they were dirtied by commit).  But that's OK - the blocks are
-	 *  safe in-journal, which is all fsync() needs to ensure.
 	 */
-	if (ext4_should_journal_data(inode)) {
-		ret = ext4_force_commit(inode->i_sb);
-		goto out;
-	}
+	ret = ext4_fsync_journal(inode, datasync, &needs_barrier);
 
-	commit_tid = datasync ? ei->i_datasync_tid : ei->i_sync_tid;
-	if (journal->j_flags & JBD2_BARRIER &&
-	    !jbd2_trans_will_send_data_barrier(journal, commit_tid))
-		needs_barrier = true;
-	ret = jbd2_complete_transaction(journal, commit_tid);
+issue_flush:
 	if (needs_barrier) {
-		err = blkdev_issue_flush(inode->i_sb->s_bdev, GFP_KERNEL, NULL);
+		err = blkdev_issue_flush(inode->i_sb->s_bdev);
 		if (!ret)
 			ret = err;
 	}
- out:
-	mutex_unlock(&inode->i_mutex);
+out:
+	err = file_check_and_advance_wb_err(file);
+	if (ret == 0)
+		ret = err;
 	trace_ext4_sync_file_exit(inode, ret);
 	return ret;
 }

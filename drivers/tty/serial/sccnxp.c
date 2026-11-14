@@ -1,20 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  *  NXP (Philips) SCC+++(SCN+++) serial driver
  *
  *  Copyright (C) 2012 Alexander Shiyan <shc_work@mail.ru>
  *
  *  Based on sc26xx.c, by Thomas Bogendörfer (tsbogend@alpha.franken.de)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
-#if defined(CONFIG_SERIAL_SCCNXP_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
-#define SUPPORT_SYSRQ
-#endif
-
+#include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/module.h>
 #include <linux/device.h>
@@ -49,7 +43,6 @@
 #	define MR2_STOP1		(7 << 0)
 #	define MR2_STOP2		(0xf << 0)
 #define SCCNXP_SR_REG			(0x01)
-#define SCCNXP_CSR_REG			SCCNXP_SR_REG
 #	define SR_RXRDY			(1 << 0)
 #	define SR_FULL			(1 << 1)
 #	define SR_TXRDY			(1 << 2)
@@ -58,6 +51,8 @@
 #	define SR_PE			(1 << 5)
 #	define SR_FE			(1 << 6)
 #	define SR_BRK			(1 << 7)
+#define SCCNXP_CSR_REG			(SCCNXP_SR_REG)
+#	define CSR_TIMER_MODE		(0x0d)
 #define SCCNXP_CR_REG			(0x02)
 #	define CR_RX_ENABLE		(1 << 0)
 #	define CR_RX_DISABLE		(1 << 1)
@@ -84,9 +79,12 @@
 #	define IMR_RXRDY		(1 << 1)
 #	define ISR_TXRDY(x)		(1 << ((x * 4) + 0))
 #	define ISR_RXRDY(x)		(1 << ((x * 4) + 1))
+#define SCCNXP_CTPU_REG			(0x06)
+#define SCCNXP_CTPL_REG			(0x07)
 #define SCCNXP_IPR_REG			(0x0d)
 #define SCCNXP_OPCR_REG			SCCNXP_IPR_REG
 #define SCCNXP_SOP_REG			(0x0e)
+#define SCCNXP_START_COUNTER_REG	SCCNXP_SOP_REG
 #define SCCNXP_ROP_REG			(0x0f)
 
 /* Route helpers */
@@ -94,16 +92,19 @@
 #define MCTRL_IBIT(cfg, sig)		((((cfg) >> (sig)) & 0xf) - LINE_IP0)
 #define MCTRL_OBIT(cfg, sig)		((((cfg) >> (sig)) & 0xf) - LINE_OP0)
 
-/* Supported chip types */
-enum {
-	SCCNXP_TYPE_SC2681	= 2681,
-	SCCNXP_TYPE_SC2691	= 2691,
-	SCCNXP_TYPE_SC2692	= 2692,
-	SCCNXP_TYPE_SC2891	= 2891,
-	SCCNXP_TYPE_SC2892	= 2892,
-	SCCNXP_TYPE_SC28202	= 28202,
-	SCCNXP_TYPE_SC68681	= 68681,
-	SCCNXP_TYPE_SC68692	= 68692,
+#define SCCNXP_HAVE_IO		0x00000001
+#define SCCNXP_HAVE_MR0		0x00000002
+
+struct sccnxp_chip {
+	const char		*name;
+	unsigned int		nr;
+	unsigned long		freq_min;
+	unsigned long		freq_std;
+	unsigned long		freq_max;
+	unsigned int		flags;
+	unsigned int		fifosize;
+	/* Time between read/write cycles */
+	unsigned int		trwd;
 };
 
 struct sccnxp_port {
@@ -111,16 +112,10 @@ struct sccnxp_port {
 	struct uart_port	port[SCCNXP_MAX_UARTS];
 	bool			opened[SCCNXP_MAX_UARTS];
 
-	const char		*name;
 	int			irq;
-
 	u8			imr;
-	u8			addr_mask;
-	int			freq_std;
 
-	int			flags;
-#define SCCNXP_HAVE_IO		0x00000001
-#define SCCNXP_HAVE_MR0		0x00000002
+	struct sccnxp_chip	*chip;
 
 #ifdef CONFIG_SERIAL_SCCNXP_CONSOLE
 	struct console		console;
@@ -136,37 +131,121 @@ struct sccnxp_port {
 	struct regulator	*regulator;
 };
 
-static inline u8 sccnxp_raw_read(void __iomem *base, u8 reg, u8 shift)
+static const struct sccnxp_chip sc2681 = {
+	.name		= "SC2681",
+	.nr		= 2,
+	.freq_min	= 1000000,
+	.freq_std	= 3686400,
+	.freq_max	= 4000000,
+	.flags		= SCCNXP_HAVE_IO,
+	.fifosize	= 3,
+	.trwd		= 200,
+};
+
+static const struct sccnxp_chip sc2691 = {
+	.name		= "SC2691",
+	.nr		= 1,
+	.freq_min	= 1000000,
+	.freq_std	= 3686400,
+	.freq_max	= 4000000,
+	.flags		= 0,
+	.fifosize	= 3,
+	.trwd		= 150,
+};
+
+static const struct sccnxp_chip sc2692 = {
+	.name		= "SC2692",
+	.nr		= 2,
+	.freq_min	= 1000000,
+	.freq_std	= 3686400,
+	.freq_max	= 4000000,
+	.flags		= SCCNXP_HAVE_IO,
+	.fifosize	= 3,
+	.trwd		= 30,
+};
+
+static const struct sccnxp_chip sc2891 = {
+	.name		= "SC2891",
+	.nr		= 1,
+	.freq_min	= 100000,
+	.freq_std	= 3686400,
+	.freq_max	= 8000000,
+	.flags		= SCCNXP_HAVE_IO | SCCNXP_HAVE_MR0,
+	.fifosize	= 16,
+	.trwd		= 27,
+};
+
+static const struct sccnxp_chip sc2892 = {
+	.name		= "SC2892",
+	.nr		= 2,
+	.freq_min	= 100000,
+	.freq_std	= 3686400,
+	.freq_max	= 8000000,
+	.flags		= SCCNXP_HAVE_IO | SCCNXP_HAVE_MR0,
+	.fifosize	= 16,
+	.trwd		= 17,
+};
+
+static const struct sccnxp_chip sc28202 = {
+	.name		= "SC28202",
+	.nr		= 2,
+	.freq_min	= 1000000,
+	.freq_std	= 14745600,
+	.freq_max	= 50000000,
+	.flags		= SCCNXP_HAVE_IO | SCCNXP_HAVE_MR0,
+	.fifosize	= 256,
+	.trwd		= 10,
+};
+
+static const struct sccnxp_chip sc68681 = {
+	.name		= "SC68681",
+	.nr		= 2,
+	.freq_min	= 1000000,
+	.freq_std	= 3686400,
+	.freq_max	= 4000000,
+	.flags		= SCCNXP_HAVE_IO,
+	.fifosize	= 3,
+	.trwd		= 200,
+};
+
+static const struct sccnxp_chip sc68692 = {
+	.name		= "SC68692",
+	.nr		= 2,
+	.freq_min	= 1000000,
+	.freq_std	= 3686400,
+	.freq_max	= 4000000,
+	.flags		= SCCNXP_HAVE_IO,
+	.fifosize	= 3,
+	.trwd		= 200,
+};
+
+static u8 sccnxp_read(struct uart_port *port, u8 reg)
 {
-	return readb(base + (reg << shift));
+	struct sccnxp_port *s = dev_get_drvdata(port->dev);
+	u8 ret;
+
+	ret = readb(port->membase + (reg << port->regshift));
+
+	ndelay(s->chip->trwd);
+
+	return ret;
 }
 
-static inline void sccnxp_raw_write(void __iomem *base, u8 reg, u8 shift, u8 v)
-{
-	writeb(v, base + (reg << shift));
-}
-
-static inline u8 sccnxp_read(struct uart_port *port, u8 reg)
+static void sccnxp_write(struct uart_port *port, u8 reg, u8 v)
 {
 	struct sccnxp_port *s = dev_get_drvdata(port->dev);
 
-	return sccnxp_raw_read(port->membase, reg & s->addr_mask,
-			       port->regshift);
+	writeb(v, port->membase + (reg << port->regshift));
+
+	ndelay(s->chip->trwd);
 }
 
-static inline void sccnxp_write(struct uart_port *port, u8 reg, u8 v)
-{
-	struct sccnxp_port *s = dev_get_drvdata(port->dev);
-
-	sccnxp_raw_write(port->membase, reg & s->addr_mask, port->regshift, v);
-}
-
-static inline u8 sccnxp_port_read(struct uart_port *port, u8 reg)
+static u8 sccnxp_port_read(struct uart_port *port, u8 reg)
 {
 	return sccnxp_read(port, (port->line << 3) + reg);
 }
 
-static inline void sccnxp_port_write(struct uart_port *port, u8 reg, u8 v)
+static void sccnxp_port_write(struct uart_port *port, u8 reg, u8 v)
 {
 	sccnxp_write(port, (port->line << 3) + reg, v);
 }
@@ -175,7 +254,7 @@ static int sccnxp_update_best_err(int a, int b, int *besterr)
 {
 	int err = abs(a - b);
 
-	if ((*besterr < 0) || (*besterr > err)) {
+	if (*besterr > err) {
 		*besterr = err;
 		return 0;
 	}
@@ -223,14 +302,27 @@ static const struct {
 static int sccnxp_set_baud(struct uart_port *port, int baud)
 {
 	struct sccnxp_port *s = dev_get_drvdata(port->dev);
-	int div_std, tmp_baud, bestbaud = baud, besterr = -1;
+	int div_std, tmp_baud, bestbaud = INT_MAX, besterr = INT_MAX;
+	struct sccnxp_chip *chip = s->chip;
 	u8 i, acr = 0, csr = 0, mr0 = 0;
+
+	/* Find divisor to load to the timer preset registers */
+	div_std = DIV_ROUND_CLOSEST(port->uartclk, 2 * 16 * baud);
+	if ((div_std >= 2) && (div_std <= 0xffff)) {
+		bestbaud = DIV_ROUND_CLOSEST(port->uartclk, 2 * 16 * div_std);
+		sccnxp_update_best_err(baud, bestbaud, &besterr);
+		csr = CSR_TIMER_MODE;
+		sccnxp_port_write(port, SCCNXP_CTPU_REG, div_std >> 8);
+		sccnxp_port_write(port, SCCNXP_CTPL_REG, div_std);
+		/* Issue start timer/counter command */
+		sccnxp_port_read(port, SCCNXP_START_COUNTER_REG);
+	}
 
 	/* Find best baud from table */
 	for (i = 0; baud_std[i].baud && besterr; i++) {
-		if (baud_std[i].mr0 && !(s->flags & SCCNXP_HAVE_MR0))
+		if (baud_std[i].mr0 && !(chip->flags & SCCNXP_HAVE_MR0))
 			continue;
-		div_std = DIV_ROUND_CLOSEST(s->freq_std, baud_std[i].baud);
+		div_std = DIV_ROUND_CLOSEST(chip->freq_std, baud_std[i].baud);
 		tmp_baud = DIV_ROUND_CLOSEST(port->uartclk, div_std);
 		if (!sccnxp_update_best_err(baud, tmp_baud, &besterr)) {
 			acr = baud_std[i].acr;
@@ -240,7 +332,7 @@ static int sccnxp_set_baud(struct uart_port *port, int baud)
 		}
 	}
 
-	if (s->flags & SCCNXP_HAVE_MR0) {
+	if (chip->flags & SCCNXP_HAVE_MR0) {
 		/* Enable FIFO, set half level for TX */
 		mr0 |= MR0_FIFO | MR0_TXLVL;
 		/* Update MR0 */
@@ -290,8 +382,7 @@ static void sccnxp_set_bit(struct uart_port *port, int sig, int state)
 
 static void sccnxp_handle_rx(struct uart_port *port)
 {
-	u8 sr;
-	unsigned int ch, flag;
+	u8 sr, ch, flag;
 
 	for (;;) {
 		sr = sccnxp_port_read(port, SCCNXP_SR_REG);
@@ -347,7 +438,7 @@ static void sccnxp_handle_rx(struct uart_port *port)
 static void sccnxp_handle_tx(struct uart_port *port)
 {
 	u8 sr;
-	struct circ_buf *xmit = &port->state->xmit;
+	struct tty_port *tport = &port->state->port;
 	struct sccnxp_port *s = dev_get_drvdata(port->dev);
 
 	if (unlikely(port->x_char)) {
@@ -357,29 +448,32 @@ static void sccnxp_handle_tx(struct uart_port *port)
 		return;
 	}
 
-	if (uart_circ_empty(xmit) || uart_tx_stopped(port)) {
+	if (kfifo_is_empty(&tport->xmit_fifo) || uart_tx_stopped(port)) {
 		/* Disable TX if FIFO is empty */
 		if (sccnxp_port_read(port, SCCNXP_SR_REG) & SR_TXEMT) {
 			sccnxp_disable_irq(port, IMR_TXRDY);
 
 			/* Set direction to input */
-			if (s->flags & SCCNXP_HAVE_IO)
+			if (s->chip->flags & SCCNXP_HAVE_IO)
 				sccnxp_set_bit(port, DIR_OP, 0);
 		}
 		return;
 	}
 
-	while (!uart_circ_empty(xmit)) {
+	while (1) {
+		unsigned char ch;
+
 		sr = sccnxp_port_read(port, SCCNXP_SR_REG);
 		if (!(sr & SR_TXRDY))
 			break;
 
-		sccnxp_port_write(port, SCCNXP_THR_REG, xmit->buf[xmit->tail]);
-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		port->icount.tx++;
+		if (!uart_fifo_get(port, &ch))
+			break;
+
+		sccnxp_port_write(port, SCCNXP_THR_REG, ch);
 	}
 
-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
 		uart_write_wakeup(port);
 }
 
@@ -403,18 +497,16 @@ static void sccnxp_handle_events(struct sccnxp_port *s)
 	} while (1);
 }
 
-static void sccnxp_timer(unsigned long data)
+static void sccnxp_timer(struct timer_list *t)
 {
-	struct sccnxp_port *s = (struct sccnxp_port *)data;
+	struct sccnxp_port *s = timer_container_of(s, t, timer);
 	unsigned long flags;
 
 	spin_lock_irqsave(&s->lock, flags);
 	sccnxp_handle_events(s);
 	spin_unlock_irqrestore(&s->lock, flags);
 
-	if (!timer_pending(&s->timer))
-		mod_timer(&s->timer, jiffies +
-			  usecs_to_jiffies(s->pdata.poll_time_us));
+	mod_timer(&s->timer, jiffies + usecs_to_jiffies(s->pdata.poll_time_us));
 }
 
 static irqreturn_t sccnxp_ist(int irq, void *dev_id)
@@ -437,7 +529,7 @@ static void sccnxp_start_tx(struct uart_port *port)
 	spin_lock_irqsave(&s->lock, flags);
 
 	/* Set direction to output */
-	if (s->flags & SCCNXP_HAVE_IO)
+	if (s->chip->flags & SCCNXP_HAVE_IO)
 		sccnxp_set_bit(port, DIR_OP, 1);
 
 	sccnxp_enable_irq(port, IMR_TXRDY);
@@ -473,17 +565,12 @@ static unsigned int sccnxp_tx_empty(struct uart_port *port)
 	return (val & SR_TXEMT) ? TIOCSER_TEMT : 0;
 }
 
-static void sccnxp_enable_ms(struct uart_port *port)
-{
-	/* Do nothing */
-}
-
 static void sccnxp_set_mctrl(struct uart_port *port, unsigned int mctrl)
 {
 	struct sccnxp_port *s = dev_get_drvdata(port->dev);
 	unsigned long flags;
 
-	if (!(s->flags & SCCNXP_HAVE_IO))
+	if (!(s->chip->flags & SCCNXP_HAVE_IO))
 		return;
 
 	spin_lock_irqsave(&s->lock, flags);
@@ -501,7 +588,7 @@ static unsigned int sccnxp_get_mctrl(struct uart_port *port)
 	struct sccnxp_port *s = dev_get_drvdata(port->dev);
 	unsigned int mctrl = TIOCM_DSR | TIOCM_CTS | TIOCM_CAR;
 
-	if (!(s->flags & SCCNXP_HAVE_IO))
+	if (!(s->chip->flags & SCCNXP_HAVE_IO))
 		return mctrl;
 
 	spin_lock_irqsave(&s->lock, flags);
@@ -550,7 +637,8 @@ static void sccnxp_break_ctl(struct uart_port *port, int break_state)
 }
 
 static void sccnxp_set_termios(struct uart_port *port,
-			       struct ktermios *termios, struct ktermios *old)
+			       struct ktermios *termios,
+			       const struct ktermios *old)
 {
 	struct sccnxp_port *s = dev_get_drvdata(port->dev);
 	unsigned long flags;
@@ -605,19 +693,21 @@ static void sccnxp_set_termios(struct uart_port *port,
 	port->read_status_mask = SR_OVR;
 	if (termios->c_iflag & INPCK)
 		port->read_status_mask |= SR_PE | SR_FE;
-	if (termios->c_iflag & (BRKINT | PARMRK))
+	if (termios->c_iflag & (IGNBRK | BRKINT | PARMRK))
 		port->read_status_mask |= SR_BRK;
 
 	/* Set status ignore mask */
 	port->ignore_status_mask = 0;
 	if (termios->c_iflag & IGNBRK)
 		port->ignore_status_mask |= SR_BRK;
+	if (termios->c_iflag & IGNPAR)
+		port->ignore_status_mask |= SR_PE;
 	if (!(termios->c_cflag & CREAD))
 		port->ignore_status_mask |= SR_PE | SR_OVR | SR_FE | SR_BRK;
 
 	/* Setup baudrate */
 	baud = uart_get_baud_rate(port, termios, old, 50,
-				  (s->flags & SCCNXP_HAVE_MR0) ?
+				  (s->chip->flags & SCCNXP_HAVE_MR0) ?
 				  230400 : 38400);
 	baud = sccnxp_set_baud(port, baud);
 
@@ -641,7 +731,7 @@ static int sccnxp_startup(struct uart_port *port)
 
 	spin_lock_irqsave(&s->lock, flags);
 
-	if (s->flags & SCCNXP_HAVE_IO) {
+	if (s->chip->flags & SCCNXP_HAVE_IO) {
 		/* Outputs are controlled manually */
 		sccnxp_write(port, SCCNXP_OPCR_REG, 0);
 	}
@@ -681,7 +771,7 @@ static void sccnxp_shutdown(struct uart_port *port)
 	sccnxp_port_write(port, SCCNXP_CR_REG, CR_RX_DISABLE | CR_TX_DISABLE);
 
 	/* Leave direction to input */
-	if (s->flags & SCCNXP_HAVE_IO)
+	if (s->chip->flags & SCCNXP_HAVE_IO)
 		sccnxp_set_bit(port, DIR_OP, 0);
 
 	spin_unlock_irqrestore(&s->lock, flags);
@@ -691,7 +781,7 @@ static const char *sccnxp_type(struct uart_port *port)
 {
 	struct sccnxp_port *s = dev_get_drvdata(port->dev);
 
-	return (port->type == PORT_SC26XX) ? s->name : NULL;
+	return (port->type == PORT_SC26XX) ? s->chip->name : NULL;
 }
 
 static void sccnxp_release_port(struct uart_port *port)
@@ -728,7 +818,6 @@ static const struct uart_ops sccnxp_ops = {
 	.stop_tx	= sccnxp_stop_tx,
 	.start_tx	= sccnxp_start_tx,
 	.stop_rx	= sccnxp_stop_rx,
-	.enable_ms	= sccnxp_enable_ms,
 	.break_ctl	= sccnxp_break_ctl,
 	.startup	= sccnxp_startup,
 	.shutdown	= sccnxp_shutdown,
@@ -741,7 +830,7 @@ static const struct uart_ops sccnxp_ops = {
 };
 
 #ifdef CONFIG_SERIAL_SCCNXP_CONSOLE
-static void sccnxp_console_putchar(struct uart_port *port, int c)
+static void sccnxp_console_putchar(struct uart_port *port, unsigned char c)
 {
 	int tryes = 100000;
 
@@ -778,21 +867,33 @@ static int sccnxp_console_setup(struct console *co, char *options)
 }
 #endif
 
+static const struct platform_device_id sccnxp_id_table[] = {
+	{ .name = "sc2681",	.driver_data = (kernel_ulong_t)&sc2681, },
+	{ .name = "sc2691",	.driver_data = (kernel_ulong_t)&sc2691, },
+	{ .name = "sc2692",	.driver_data = (kernel_ulong_t)&sc2692, },
+	{ .name = "sc2891",	.driver_data = (kernel_ulong_t)&sc2891, },
+	{ .name = "sc2892",	.driver_data = (kernel_ulong_t)&sc2892, },
+	{ .name = "sc28202",	.driver_data = (kernel_ulong_t)&sc28202, },
+	{ .name = "sc68681",	.driver_data = (kernel_ulong_t)&sc68681, },
+	{ .name = "sc68692",	.driver_data = (kernel_ulong_t)&sc68692, },
+	{ }
+};
+MODULE_DEVICE_TABLE(platform, sccnxp_id_table);
+
 static int sccnxp_probe(struct platform_device *pdev)
 {
-	struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	int chiptype = pdev->id_entry->driver_data;
 	struct sccnxp_pdata *pdata = dev_get_platdata(&pdev->dev);
-	int i, ret, fifosize, freq_min, freq_max;
+	struct resource *res;
+	int i, ret, uartclk;
 	struct sccnxp_port *s;
 	void __iomem *membase;
+	struct clk *clk;
 
-	if (!res) {
-		dev_err(&pdev->dev, "Missing memory resource data\n");
-		return -EADDRNOTAVAIL;
-	}
+	membase = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	if (IS_ERR(membase))
+		return PTR_ERR(membase);
 
-	s = devm_kzalloc(&pdev->dev, sizeof(struct sccnxp_port), GFP_KERNEL);
+	s = devm_kzalloc_obj(&pdev->dev, struct sccnxp_port);
 	if (!s) {
 		dev_err(&pdev->dev, "Error allocating port structure\n");
 		return -ENOMEM;
@@ -801,99 +902,42 @@ static int sccnxp_probe(struct platform_device *pdev)
 
 	spin_lock_init(&s->lock);
 
-	/* Individual chip settings */
-	switch (chiptype) {
-	case SCCNXP_TYPE_SC2681:
-		s->name		= "SC2681";
-		s->uart.nr	= 2;
-		s->freq_std	= 3686400;
-		s->addr_mask	= 0x0f;
-		s->flags	= SCCNXP_HAVE_IO;
-		fifosize	= 3;
-		freq_min	= 1000000;
-		freq_max	= 4000000;
-		break;
-	case SCCNXP_TYPE_SC2691:
-		s->name		= "SC2691";
-		s->uart.nr	= 1;
-		s->freq_std	= 3686400;
-		s->addr_mask	= 0x07;
-		s->flags	= 0;
-		fifosize	= 3;
-		freq_min	= 1000000;
-		freq_max	= 4000000;
-		break;
-	case SCCNXP_TYPE_SC2692:
-		s->name		= "SC2692";
-		s->uart.nr	= 2;
-		s->freq_std	= 3686400;
-		s->addr_mask	= 0x0f;
-		s->flags	= SCCNXP_HAVE_IO;
-		fifosize	= 3;
-		freq_min	= 1000000;
-		freq_max	= 4000000;
-		break;
-	case SCCNXP_TYPE_SC2891:
-		s->name		= "SC2891";
-		s->uart.nr	= 1;
-		s->freq_std	= 3686400;
-		s->addr_mask	= 0x0f;
-		s->flags	= SCCNXP_HAVE_IO | SCCNXP_HAVE_MR0;
-		fifosize	= 16;
-		freq_min	= 100000;
-		freq_max	= 8000000;
-		break;
-	case SCCNXP_TYPE_SC2892:
-		s->name		= "SC2892";
-		s->uart.nr	= 2;
-		s->freq_std	= 3686400;
-		s->addr_mask	= 0x0f;
-		s->flags	= SCCNXP_HAVE_IO | SCCNXP_HAVE_MR0;
-		fifosize	= 16;
-		freq_min	= 100000;
-		freq_max	= 8000000;
-		break;
-	case SCCNXP_TYPE_SC28202:
-		s->name		= "SC28202";
-		s->uart.nr	= 2;
-		s->freq_std	= 14745600;
-		s->addr_mask	= 0x7f;
-		s->flags	= SCCNXP_HAVE_IO | SCCNXP_HAVE_MR0;
-		fifosize	= 256;
-		freq_min	= 1000000;
-		freq_max	= 50000000;
-		break;
-	case SCCNXP_TYPE_SC68681:
-		s->name		= "SC68681";
-		s->uart.nr	= 2;
-		s->freq_std	= 3686400;
-		s->addr_mask	= 0x0f;
-		s->flags	= SCCNXP_HAVE_IO;
-		fifosize	= 3;
-		freq_min	= 1000000;
-		freq_max	= 4000000;
-		break;
-	case SCCNXP_TYPE_SC68692:
-		s->name		= "SC68692";
-		s->uart.nr	= 2;
-		s->freq_std	= 3686400;
-		s->addr_mask	= 0x0f;
-		s->flags	= SCCNXP_HAVE_IO;
-		fifosize	= 3;
-		freq_min	= 1000000;
-		freq_max	= 4000000;
-		break;
-	default:
-		dev_err(&pdev->dev, "Unsupported chip type %i\n", chiptype);
-		ret = -ENOTSUPP;
+	s->chip = (struct sccnxp_chip *)pdev->id_entry->driver_data;
+
+	s->regulator = devm_regulator_get(&pdev->dev, "vcc");
+	if (!IS_ERR(s->regulator)) {
+		ret = regulator_enable(s->regulator);
+		if (ret) {
+			dev_err(&pdev->dev,
+				"Failed to enable regulator: %i\n", ret);
+			return ret;
+		}
+	} else if (PTR_ERR(s->regulator) == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
+
+	clk = devm_clk_get_enabled(&pdev->dev, NULL);
+	if (IS_ERR(clk)) {
+		ret = PTR_ERR(clk);
+		if (ret == -EPROBE_DEFER)
+			goto err_out;
+		uartclk = 0;
+	} else {
+		uartclk = clk_get_rate(clk);
+	}
+
+	if (!uartclk) {
+		dev_notice(&pdev->dev, "Using default clock frequency\n");
+		uartclk = s->chip->freq_std;
+	}
+
+	/* Check input frequency */
+	if ((uartclk < s->chip->freq_min) || (uartclk > s->chip->freq_max)) {
+		dev_err(&pdev->dev, "Frequency out of bounds\n");
+		ret = -EINVAL;
 		goto err_out;
 	}
 
-	if (!pdata) {
-		dev_warn(&pdev->dev,
-			 "No platform data supplied, using defaults\n");
-		s->pdata.frequency = s->freq_std;
-	} else
+	if (pdata)
 		memcpy(&s->pdata, pdata, sizeof(struct sccnxp_pdata));
 
 	if (s->pdata.poll_time_us) {
@@ -905,40 +949,16 @@ static int sccnxp_probe(struct platform_device *pdev)
 	if (!s->poll) {
 		s->irq = platform_get_irq(pdev, 0);
 		if (s->irq < 0) {
-			dev_err(&pdev->dev, "Missing irq resource data\n");
 			ret = -ENXIO;
 			goto err_out;
 		}
-	}
-
-	/* Check input frequency */
-	if ((s->pdata.frequency < freq_min) ||
-	    (s->pdata.frequency > freq_max)) {
-		dev_err(&pdev->dev, "Frequency out of bounds\n");
-		ret = -EINVAL;
-		goto err_out;
-	}
-
-	s->regulator = devm_regulator_get(&pdev->dev, "VCC");
-	if (!IS_ERR(s->regulator)) {
-		ret = regulator_enable(s->regulator);
-		if (ret) {
-			dev_err(&pdev->dev,
-				"Failed to enable regulator: %i\n", ret);
-			return ret;
-		}
-	}
-
-	membase = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(membase)) {
-		ret = PTR_ERR(membase);
-		goto err_out;
 	}
 
 	s->uart.owner		= THIS_MODULE;
 	s->uart.dev_name	= "ttySC";
 	s->uart.major		= SCCNXP_MAJOR;
 	s->uart.minor		= SCCNXP_MINOR;
+	s->uart.nr		= s->chip->nr;
 #ifdef CONFIG_SERIAL_SCCNXP_CONSOLE
 	s->uart.cons		= &s->console;
 	s->uart.cons->device	= uart_console_device;
@@ -960,17 +980,18 @@ static int sccnxp_probe(struct platform_device *pdev)
 		s->port[i].dev		= &pdev->dev;
 		s->port[i].irq		= s->irq;
 		s->port[i].type		= PORT_SC26XX;
-		s->port[i].fifosize	= fifosize;
+		s->port[i].fifosize	= s->chip->fifosize;
 		s->port[i].flags	= UPF_SKIP_TEST | UPF_FIXED_TYPE;
 		s->port[i].iotype	= UPIO_MEM;
 		s->port[i].mapbase	= res->start;
 		s->port[i].membase	= membase;
 		s->port[i].regshift	= s->pdata.reg_shift;
-		s->port[i].uartclk	= s->pdata.frequency;
+		s->port[i].uartclk	= uartclk;
 		s->port[i].ops		= &sccnxp_ops;
+		s->port[i].has_sysrq = IS_ENABLED(CONFIG_SERIAL_SCCNXP_CONSOLE);
 		uart_add_one_port(&s->uart, &s->port[i]);
 		/* Set direction to input */
-		if (s->flags & SCCNXP_HAVE_IO)
+		if (s->chip->flags & SCCNXP_HAVE_IO)
 			sccnxp_set_bit(&s->port[i], DIR_OP, 0);
 	}
 
@@ -989,20 +1010,21 @@ static int sccnxp_probe(struct platform_device *pdev)
 
 		dev_err(&pdev->dev, "Unable to reguest IRQ %i\n", s->irq);
 	} else {
-		init_timer(&s->timer);
-		setup_timer(&s->timer, sccnxp_timer, (unsigned long)s);
+		timer_setup(&s->timer, sccnxp_timer, 0);
 		mod_timer(&s->timer, jiffies +
 			  usecs_to_jiffies(s->pdata.poll_time_us));
 		return 0;
 	}
 
+	uart_unregister_driver(&s->uart);
 err_out:
-	platform_set_drvdata(pdev, NULL);
+	if (!IS_ERR(s->regulator))
+		regulator_disable(s->regulator);
 
 	return ret;
 }
 
-static int sccnxp_remove(struct platform_device *pdev)
+static void sccnxp_remove(struct platform_device *pdev)
 {
 	int i;
 	struct sccnxp_port *s = platform_get_drvdata(pdev);
@@ -1010,37 +1032,23 @@ static int sccnxp_remove(struct platform_device *pdev)
 	if (!s->poll)
 		devm_free_irq(&pdev->dev, s->irq, s);
 	else
-		del_timer_sync(&s->timer);
+		timer_delete_sync(&s->timer);
 
 	for (i = 0; i < s->uart.nr; i++)
 		uart_remove_one_port(&s->uart, &s->port[i]);
 
 	uart_unregister_driver(&s->uart);
-	platform_set_drvdata(pdev, NULL);
 
-	if (!IS_ERR(s->regulator))
-		return regulator_disable(s->regulator);
-
-	return 0;
+	if (!IS_ERR(s->regulator)) {
+		int ret = regulator_disable(s->regulator);
+		if (ret)
+			dev_err(&pdev->dev, "Failed to disable regulator\n");
+	}
 }
-
-static const struct platform_device_id sccnxp_id_table[] = {
-	{ "sc2681",	SCCNXP_TYPE_SC2681 },
-	{ "sc2691",	SCCNXP_TYPE_SC2691 },
-	{ "sc2692",	SCCNXP_TYPE_SC2692 },
-	{ "sc2891",	SCCNXP_TYPE_SC2891 },
-	{ "sc2892",	SCCNXP_TYPE_SC2892 },
-	{ "sc28202",	SCCNXP_TYPE_SC28202 },
-	{ "sc68681",	SCCNXP_TYPE_SC68681 },
-	{ "sc68692",	SCCNXP_TYPE_SC68692 },
-	{ },
-};
-MODULE_DEVICE_TABLE(platform, sccnxp_id_table);
 
 static struct platform_driver sccnxp_uart_driver = {
 	.driver = {
 		.name	= SCCNXP_NAME,
-		.owner	= THIS_MODULE,
 	},
 	.probe		= sccnxp_probe,
 	.remove		= sccnxp_remove,

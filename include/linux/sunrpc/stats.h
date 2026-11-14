@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/include/linux/sunrpc/stats.h
  *
@@ -36,12 +37,27 @@ struct svc_stat {
 				rpcbadfmt,
 				rpcbadauth,
 				rpcbadclnt;
+
+	/* Per-version per-procedure call counts (per-cpu, per-netns) */
+	unsigned long __percpu	**vs_count;
 };
 
 struct net;
+int			svc_stat_alloc_counts(struct svc_stat *statp);
+void			svc_stat_free_counts(struct svc_stat *statp);
+
 #ifdef CONFIG_PROC_FS
 int			rpc_proc_init(struct net *);
 void			rpc_proc_exit(struct net *);
+struct proc_dir_entry *	rpc_proc_register(struct net *,struct rpc_stat *);
+void			rpc_proc_unregister(struct net *,const char *);
+void			rpc_proc_zero(const struct rpc_program *);
+struct proc_dir_entry *	svc_proc_register(struct net *, struct svc_stat *,
+					  const struct proc_ops *);
+void			svc_proc_unregister(struct net *, const char *);
+
+void			svc_seq_show(struct seq_file *,
+				     const struct svc_stat *);
 #else
 static inline int rpc_proc_init(struct net *net)
 {
@@ -51,30 +67,12 @@ static inline int rpc_proc_init(struct net *net)
 static inline void rpc_proc_exit(struct net *net)
 {
 }
-#endif
-
-#ifdef MODULE
-void			rpc_modcount(struct inode *, int);
-#endif
-
-#ifdef CONFIG_PROC_FS
-struct proc_dir_entry *	rpc_proc_register(struct net *,struct rpc_stat *);
-void			rpc_proc_unregister(struct net *,const char *);
-void			rpc_proc_zero(const struct rpc_program *);
-struct proc_dir_entry *	svc_proc_register(struct net *, struct svc_stat *,
-					  const struct file_operations *);
-void			svc_proc_unregister(struct net *, const char *);
-
-void			svc_seq_show(struct seq_file *,
-				     const struct svc_stat *);
-#else
-
 static inline struct proc_dir_entry *rpc_proc_register(struct net *net, struct rpc_stat *s) { return NULL; }
 static inline void rpc_proc_unregister(struct net *net, const char *p) {}
 static inline void rpc_proc_zero(const struct rpc_program *p) {}
 
 static inline struct proc_dir_entry *svc_proc_register(struct net *net, struct svc_stat *s,
-						       const struct file_operations *f) { return NULL; }
+						       const struct proc_ops *proc_ops) { return NULL; }
 static inline void svc_proc_unregister(struct net *net, const char *p) {}
 
 static inline void svc_seq_show(struct seq_file *seq,

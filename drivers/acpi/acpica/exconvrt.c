@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: exconvrt - Object conversion routines
  *
+ * Copyright (C) 2000 - 2026, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2013, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -51,16 +17,17 @@ ACPI_MODULE_NAME("exconvrt")
 
 /* Local prototypes */
 static u32
-acpi_ex_convert_to_ascii(u64 integer, u16 base, u8 *string, u8 max_length);
+acpi_ex_convert_to_ascii(u64 integer,
+			 u16 base, u8 *string, u8 max_length, u8 leading_zeros);
 
 /*******************************************************************************
  *
  * FUNCTION:    acpi_ex_convert_to_integer
  *
- * PARAMETERS:  obj_desc        - Object to be converted. Must be an
- *                                Integer, Buffer, or String
- *              result_desc     - Where the new Integer object is returned
- *              flags           - Used for string conversion
+ * PARAMETERS:  obj_desc            - Object to be converted. Must be an
+ *                                    Integer, Buffer, or String
+ *              result_desc         - Where the new Integer object is returned
+ *              implicit_conversion - Used for string conversion
  *
  * RETURN:      Status
  *
@@ -70,14 +37,14 @@ acpi_ex_convert_to_ascii(u64 integer, u16 base, u8 *string, u8 max_length);
 
 acpi_status
 acpi_ex_convert_to_integer(union acpi_operand_object *obj_desc,
-			   union acpi_operand_object **result_desc, u32 flags)
+			   union acpi_operand_object **result_desc,
+			   u32 implicit_conversion)
 {
 	union acpi_operand_object *return_desc;
 	u8 *pointer;
 	u64 result;
 	u32 i;
 	u32 count;
-	acpi_status status;
 
 	ACPI_FUNCTION_TRACE_PTR(ex_convert_to_integer, obj_desc);
 
@@ -99,6 +66,7 @@ acpi_ex_convert_to_integer(union acpi_operand_object *obj_desc,
 		break;
 
 	default:
+
 		return_ACPI_STATUS(AE_TYPE);
 	}
 
@@ -117,16 +85,23 @@ acpi_ex_convert_to_integer(union acpi_operand_object *obj_desc,
 
 	switch (obj_desc->common.type) {
 	case ACPI_TYPE_STRING:
-
 		/*
 		 * Convert string to an integer - for most cases, the string must be
 		 * hexadecimal as per the ACPI specification. The only exception (as
 		 * of ACPI 3.0) is that the to_integer() operator allows both decimal
 		 * and hexadecimal strings (hex prefixed with "0x").
+		 *
+		 * Explicit conversion is used only by to_integer.
+		 * All other string-to-integer conversions are implicit conversions.
 		 */
-		status = acpi_ut_strtoul64((char *)pointer, flags, &result);
-		if (ACPI_FAILURE(status)) {
-			return_ACPI_STATUS(status);
+		if (implicit_conversion) {
+			result =
+			    acpi_ut_implicit_strtoul64(ACPI_CAST_PTR
+						       (char, pointer));
+		} else {
+			result =
+			    acpi_ut_explicit_strtoul64(ACPI_CAST_PTR
+						       (char, pointer));
 		}
 		break;
 
@@ -161,6 +136,7 @@ acpi_ex_convert_to_integer(union acpi_operand_object *obj_desc,
 	default:
 
 		/* No other types can get here */
+
 		break;
 	}
 
@@ -213,7 +189,6 @@ acpi_ex_convert_to_buffer(union acpi_operand_object *obj_desc,
 		return_ACPI_STATUS(AE_OK);
 
 	case ACPI_TYPE_INTEGER:
-
 		/*
 		 * Create a new Buffer object.
 		 * Need enough space for one integer
@@ -227,13 +202,11 @@ acpi_ex_convert_to_buffer(union acpi_operand_object *obj_desc,
 		/* Copy the integer to the buffer, LSB first */
 
 		new_buf = return_desc->buffer.pointer;
-		ACPI_MEMCPY(new_buf,
-			    &obj_desc->integer.value,
-			    acpi_gbl_integer_byte_width);
+		memcpy(new_buf, &obj_desc->integer.value,
+		       acpi_gbl_integer_byte_width);
 		break;
 
 	case ACPI_TYPE_STRING:
-
 		/*
 		 * Create a new Buffer object
 		 * Size will be the string length
@@ -253,11 +226,12 @@ acpi_ex_convert_to_buffer(union acpi_operand_object *obj_desc,
 		/* Copy the string to the buffer */
 
 		new_buf = return_desc->buffer.pointer;
-		ACPI_STRNCPY((char *)new_buf, (char *)obj_desc->string.pointer,
-			     obj_desc->string.length);
+		memcpy((char *)new_buf, (char *)obj_desc->string.pointer,
+		       obj_desc->string.length);
 		break;
 
 	default:
+
 		return_ACPI_STATUS(AE_TYPE);
 	}
 
@@ -276,6 +250,7 @@ acpi_ex_convert_to_buffer(union acpi_operand_object *obj_desc,
  *              base            - ACPI_STRING_DECIMAL or ACPI_STRING_HEX
  *              string          - Where the string is returned
  *              data_width      - Size of data item to be converted, in bytes
+ *              leading_zeros   - Allow leading zeros
  *
  * RETURN:      Actual string length
  *
@@ -284,7 +259,8 @@ acpi_ex_convert_to_buffer(union acpi_operand_object *obj_desc,
  ******************************************************************************/
 
 static u32
-acpi_ex_convert_to_ascii(u64 integer, u16 base, u8 *string, u8 data_width)
+acpi_ex_convert_to_ascii(u64 integer,
+			 u16 base, u8 *string, u8 data_width, u8 leading_zeros)
 {
 	u64 digit;
 	u32 i;
@@ -293,7 +269,8 @@ acpi_ex_convert_to_ascii(u64 integer, u16 base, u8 *string, u8 data_width)
 	u32 hex_length;
 	u32 decimal_length;
 	u32 remainder;
-	u8 supress_zeros;
+	u8 supress_zeros = !leading_zeros;
+	u8 hex_char;
 
 	ACPI_FUNCTION_ENTRY();
 
@@ -304,20 +281,22 @@ acpi_ex_convert_to_ascii(u64 integer, u16 base, u8 *string, u8 data_width)
 
 		switch (data_width) {
 		case 1:
+
 			decimal_length = ACPI_MAX8_DECIMAL_DIGITS;
 			break;
 
 		case 4:
+
 			decimal_length = ACPI_MAX32_DECIMAL_DIGITS;
 			break;
 
 		case 8:
 		default:
+
 			decimal_length = ACPI_MAX64_DECIMAL_DIGITS;
 			break;
 		}
 
-		supress_zeros = TRUE;	/* No leading zeros */
 		remainder = 0;
 
 		for (i = decimal_length; i > 0; i--) {
@@ -347,14 +326,22 @@ acpi_ex_convert_to_ascii(u64 integer, u16 base, u8 *string, u8 data_width)
 
 		/* hex_length: 2 ascii hex chars per data byte */
 
-		hex_length = ACPI_MUL_2(data_width);
+		hex_length = (data_width * 2);
 		for (i = 0, j = (hex_length - 1); i < hex_length; i++, j--) {
 
 			/* Get one hex digit, most significant digits first */
 
-			string[k] =
-			    (u8) acpi_ut_hex_to_ascii_char(integer,
-							   ACPI_MUL_4(j));
+			hex_char = (u8)
+			    acpi_ut_hex_to_ascii_char(integer, ACPI_MUL_4(j));
+
+			/* Supress leading zeros until the first non-zero character */
+
+			if (hex_char == ACPI_ASCII_ZERO && supress_zeros) {
+				continue;
+			}
+
+			supress_zeros = FALSE;
+			string[k] = hex_char;
 			k++;
 		}
 		break;
@@ -389,7 +376,8 @@ acpi_ex_convert_to_ascii(u64 integer, u16 base, u8 *string, u8 data_width)
  *
  * RETURN:      Status
  *
- * DESCRIPTION: Convert an ACPI Object to a string
+ * DESCRIPTION: Convert an ACPI Object to a string. Supports both implicit
+ *              and explicit conversions and related rules.
  *
  ******************************************************************************/
 
@@ -403,6 +391,7 @@ acpi_ex_convert_to_string(union acpi_operand_object * obj_desc,
 	u32 string_length = 0;
 	u16 base = 16;
 	u8 separator = ',';
+	u8 leading_zeros;
 
 	ACPI_FUNCTION_TRACE_PTR(ex_convert_to_string, obj_desc);
 
@@ -418,18 +407,32 @@ acpi_ex_convert_to_string(union acpi_operand_object * obj_desc,
 
 		switch (type) {
 		case ACPI_EXPLICIT_CONVERT_DECIMAL:
-
-			/* Make room for maximum decimal number */
-
+			/*
+			 * From to_decimal_string, integer source.
+			 *
+			 * Make room for the maximum decimal number size
+			 */
 			string_length = ACPI_MAX_DECIMAL_DIGITS;
+			leading_zeros = FALSE;
 			base = 10;
 			break;
 
+		case ACPI_EXPLICIT_CONVERT_HEX:
+			/*
+			 * From to_hex_string.
+			 *
+			 * Supress leading zeros and append "0x"
+			 */
+			string_length =
+			    ACPI_MUL_2(acpi_gbl_integer_byte_width) + 2;
+			leading_zeros = FALSE;
+			break;
 		default:
 
 			/* Two hex string characters for each integer byte */
 
 			string_length = ACPI_MUL_2(acpi_gbl_integer_byte_width);
+			leading_zeros = TRUE;
 			break;
 		}
 
@@ -438,23 +441,38 @@ acpi_ex_convert_to_string(union acpi_operand_object * obj_desc,
 		 * Need enough space for one ASCII integer (plus null terminator)
 		 */
 		return_desc =
-		    acpi_ut_create_string_object((acpi_size) string_length);
+		    acpi_ut_create_string_object((acpi_size)string_length);
 		if (!return_desc) {
 			return_ACPI_STATUS(AE_NO_MEMORY);
 		}
 
 		new_buf = return_desc->buffer.pointer;
+		if (type == ACPI_EXPLICIT_CONVERT_HEX) {
+
+			/* Append "0x" prefix for explicit hex conversion */
+
+			*new_buf++ = '0';
+			*new_buf++ = 'x';
+		}
 
 		/* Convert integer to string */
 
 		string_length =
 		    acpi_ex_convert_to_ascii(obj_desc->integer.value, base,
 					     new_buf,
-					     acpi_gbl_integer_byte_width);
+					     acpi_gbl_integer_byte_width,
+					     leading_zeros);
 
 		/* Null terminate at the correct place */
 
 		return_desc->string.length = string_length;
+		if (type == ACPI_EXPLICIT_CONVERT_HEX) {
+
+			/* Take "0x" prefix into account */
+
+			return_desc->string.length += 2;
+		}
+
 		new_buf[string_length] = 0;
 		break;
 
@@ -465,9 +483,12 @@ acpi_ex_convert_to_string(union acpi_operand_object * obj_desc,
 		switch (type) {
 		case ACPI_EXPLICIT_CONVERT_DECIMAL:	/* Used by to_decimal_string */
 			/*
-			 * From ACPI: "If Data is a buffer, it is converted to a string of
-			 * decimal values separated by commas."
+			 * Explicit conversion from the to_decimal_string ASL operator.
+			 *
+			 * From ACPI: "If the input is a buffer, it is converted to a
+			 * a string of decimal values separated by commas."
 			 */
+			leading_zeros = FALSE;
 			base = 10;
 
 			/*
@@ -487,20 +508,31 @@ acpi_ex_convert_to_string(union acpi_operand_object * obj_desc,
 
 		case ACPI_IMPLICIT_CONVERT_HEX:
 			/*
+			 * Implicit buffer-to-string conversion
+			 *
 			 * From the ACPI spec:
-			 *"The entire contents of the buffer are converted to a string of
+			 * "The entire contents of the buffer are converted to a string of
 			 * two-character hexadecimal numbers, each separated by a space."
+			 *
+			 * Each hex number is prefixed with 0x (11/2018)
 			 */
+			leading_zeros = TRUE;
 			separator = ' ';
-			string_length = (obj_desc->buffer.length * 3);
+			string_length = (obj_desc->buffer.length * 5);
 			break;
 
-		case ACPI_EXPLICIT_CONVERT_HEX:	/* Used by to_hex_string */
+		case ACPI_EXPLICIT_CONVERT_HEX:
 			/*
+			 * Explicit conversion from the to_hex_string ASL operator.
+			 *
 			 * From ACPI: "If Data is a buffer, it is converted to a string of
 			 * hexadecimal values separated by commas."
+			 *
+			 * Each hex number is prefixed with 0x (11/2018)
 			 */
-			string_length = (obj_desc->buffer.length * 3);
+			leading_zeros = TRUE;
+			separator = ',';
+			string_length = (obj_desc->buffer.length * 5);
 			break;
 
 		default:
@@ -517,7 +549,7 @@ acpi_ex_convert_to_string(union acpi_operand_object * obj_desc,
 		}
 
 		return_desc =
-		    acpi_ut_create_string_object((acpi_size) string_length);
+		    acpi_ut_create_string_object((acpi_size)string_length);
 		if (!return_desc) {
 			return_ACPI_STATUS(AE_NO_MEMORY);
 		}
@@ -529,10 +561,22 @@ acpi_ex_convert_to_string(union acpi_operand_object * obj_desc,
 		 * (separated by commas or spaces)
 		 */
 		for (i = 0; i < obj_desc->buffer.length; i++) {
+			if (base == 16) {
+
+				/* Emit 0x prefix for explicit/implicit hex conversion */
+
+				*new_buf++ = '0';
+				*new_buf++ = 'x';
+			}
+
 			new_buf += acpi_ex_convert_to_ascii((u64) obj_desc->
 							    buffer.pointer[i],
-							    base, new_buf, 1);
-			*new_buf++ = separator;	/* each separated by a comma or space */
+							    base, new_buf, 1,
+							    leading_zeros);
+
+			/* Each digit is separated by either a comma or space */
+
+			*new_buf++ = separator;
 		}
 
 		/*
@@ -546,6 +590,7 @@ acpi_ex_convert_to_string(union acpi_operand_object * obj_desc,
 		break;
 
 	default:
+
 		return_ACPI_STATUS(AE_TYPE);
 	}
 
@@ -599,6 +644,7 @@ acpi_ex_convert_to_target_type(acpi_object_type destination_type,
 			break;
 
 		default:
+
 			/* No conversion allowed for these types */
 
 			if (destination_type != source_desc->common.type) {
@@ -614,6 +660,7 @@ acpi_ex_convert_to_target_type(acpi_object_type destination_type,
 		break;
 
 	case ARGI_TARGETREF:
+	case ARGI_STORE_TARGET:
 
 		switch (destination_type) {
 		case ACPI_TYPE_INTEGER:
@@ -626,7 +673,7 @@ acpi_ex_convert_to_target_type(acpi_object_type destination_type,
 			 */
 			status =
 			    acpi_ex_convert_to_integer(source_desc, result_desc,
-						       16);
+						       ACPI_IMPLICIT_CONVERSION);
 			break;
 
 		case ACPI_TYPE_STRING:
@@ -649,6 +696,7 @@ acpi_ex_convert_to_target_type(acpi_object_type destination_type,
 			break;
 
 		default:
+
 			ACPI_ERROR((AE_INFO,
 				    "Bad destination type during conversion: 0x%X",
 				    destination_type));
@@ -664,6 +712,7 @@ acpi_ex_convert_to_target_type(acpi_object_type destination_type,
 		break;
 
 	default:
+
 		ACPI_ERROR((AE_INFO,
 			    "Unknown Target type ID 0x%X AmlOpcode 0x%X DestType %s",
 			    GET_CURRENT_ARG_TYPE(walk_state->op_info->

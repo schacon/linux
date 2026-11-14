@@ -1,15 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * arch/arm/mach-mv78xx0/common.h
  *
  * Core functions for Marvell MV78xx0 SoCs
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2.  This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #ifndef __ARCH_MV78XX0_COMMON_H
 #define __ARCH_MV78XX0_COMMON_H
+
+#include <linux/reboot.h>
 
 struct mv643xx_eth_platform_data;
 struct mv_sata_platform_data;
@@ -44,8 +43,10 @@ void mv78xx0_uart0_init(void);
 void mv78xx0_uart1_init(void);
 void mv78xx0_uart2_init(void);
 void mv78xx0_uart3_init(void);
+void mv78xx0_xor_init(void);
+void mv78xx0_crypto_init(void);
 void mv78xx0_i2c_init(void);
-void mv78xx0_restart(char, const char *);
+void mv78xx0_restart(enum reboot_mode, const char *);
 
 extern void mv78xx0_timer_init(void);
 

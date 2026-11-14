@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/arm/mach-mv78xx0/pcie.c
  *
  * PCIe functions for Marvell MV78xx0 SoCs
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2.  This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/kernel.h>
@@ -15,8 +12,13 @@
 #include <asm/irq.h>
 #include <asm/mach/pci.h>
 #include <plat/pcie.h>
-#include <mach/mv78xx0.h>
+#include "mv78xx0.h"
 #include "common.h"
+
+#define MV78XX0_MBUS_PCIE_MEM_TARGET(port, lane) ((port) ? 8 : 4)
+#define MV78XX0_MBUS_PCIE_MEM_ATTR(port, lane)   (0xf8 & ~(0x10 << (lane)))
+#define MV78XX0_MBUS_PCIE_IO_TARGET(port, lane)  ((port) ? 8 : 4)
+#define MV78XX0_MBUS_PCIE_IO_ATTR(port, lane)    (0xf0 & ~(0x10 << (lane)))
 
 struct pcie_port {
 	u8			maj;
@@ -24,7 +26,7 @@ struct pcie_port {
 	u8			root_bus_nr;
 	void __iomem		*base;
 	spinlock_t		conf_lock;
-	char			mem_space_name[16];
+	char			mem_space_name[20];
 	struct resource		res;
 };
 
@@ -40,7 +42,7 @@ void __init mv78xx0_pcie_id(u32 *dev, u32 *rev)
 
 u32 pcie_port_size[8] = {
 	0,
-	0x30000000,
+	0x20000000,
 	0x10000000,
 	0x10000000,
 	0x08000000,
@@ -71,7 +73,6 @@ static void __init mv78xx0_pcie_preinit(void)
 	start = MV78XX0_PCIE_MEM_PHYS_BASE;
 	for (i = 0; i < num_pcie_ports; i++) {
 		struct pcie_port *pp = pcie_port + i;
-		char winname[MVEBU_MBUS_MAX_WINNAME_SZ];
 
 		snprintf(pp->mem_space_name, sizeof(pp->mem_space_name),
 			"PCIe %d.%d MEM", pp->maj, pp->min);
@@ -85,23 +86,19 @@ static void __init mv78xx0_pcie_preinit(void)
 		if (request_resource(&iomem_resource, &pp->res))
 			panic("can't allocate PCIe MEM sub-space");
 
-		snprintf(winname, sizeof(winname), "pcie%d.%d",
-			 pp->maj, pp->min);
-
-		mvebu_mbus_add_window_remap_flags(winname,
-						  pp->res.start,
-						  resource_size(&pp->res),
-						  MVEBU_MBUS_NO_REMAP,
-						  MVEBU_MBUS_PCI_MEM);
-		mvebu_mbus_add_window_remap_flags(winname,
-						  i * SZ_64K, SZ_64K,
-						  0, MVEBU_MBUS_PCI_IO);
+		mvebu_mbus_add_window_by_id(MV78XX0_MBUS_PCIE_MEM_TARGET(pp->maj, pp->min),
+					    MV78XX0_MBUS_PCIE_MEM_ATTR(pp->maj, pp->min),
+					    pp->res.start, resource_size(&pp->res));
+		mvebu_mbus_add_window_remap_by_id(MV78XX0_MBUS_PCIE_IO_TARGET(pp->maj, pp->min),
+						  MV78XX0_MBUS_PCIE_IO_ATTR(pp->maj, pp->min),
+						  i * SZ_64K, SZ_64K, 0);
 	}
 }
 
 static int __init mv78xx0_pcie_setup(int nr, struct pci_sys_data *sys)
 {
 	struct pcie_port *pp;
+	struct resource realio;
 
 	if (nr >= num_pcie_ports)
 		return 0;
@@ -116,7 +113,9 @@ static int __init mv78xx0_pcie_setup(int nr, struct pci_sys_data *sys)
 	orion_pcie_set_local_bus_nr(pp->base, sys->busnr);
 	orion_pcie_setup(pp->base);
 
-	pci_ioremap_io(nr * SZ_64K, MV78XX0_PCIE_IO_PHYS_BASE(nr));
+	realio.start = nr * SZ_64K;
+	realio.end = realio.start + SZ_64K - 1;
+	pci_remap_iospace(&realio, MV78XX0_PCIE_IO_PHYS_BASE(nr));
 
 	pci_add_resource_offset(&sys->resources, &pp->res, sys->mem_offset);
 
@@ -178,37 +177,44 @@ static struct pci_ops pcie_ops = {
 	.write = pcie_wr_conf,
 };
 
+/*
+ * The root complex has a hardwired class of PCI_CLASS_MEMORY_OTHER, when it
+ * is operating as a root complex this needs to be switched to
+ * PCI_CLASS_BRIDGE_HOST or Linux will errantly try to process the BAR's on
+ * the device. Decoding setup is handled by the orion code.
+ */
 static void rc_pci_fixup(struct pci_dev *dev)
 {
-	/*
-	 * Prevent enumeration of root complex.
-	 */
 	if (dev->bus->parent == NULL && dev->devfn == 0) {
-		int i;
+		struct resource *r;
 
-		for (i = 0; i < DEVICE_COUNT_RESOURCE; i++) {
-			dev->resource[i].start = 0;
-			dev->resource[i].end   = 0;
-			dev->resource[i].flags = 0;
+		dev->class &= 0xff;
+		dev->class |= PCI_CLASS_BRIDGE_HOST << 8;
+		pci_dev_for_each_resource(dev, r) {
+			r->start = 0;
+			r->end   = 0;
+			r->flags = 0;
 		}
 	}
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL, PCI_ANY_ID, rc_pci_fixup);
 
-static struct pci_bus __init *
-mv78xx0_pcie_scan_bus(int nr, struct pci_sys_data *sys)
+static int __init mv78xx0_pcie_scan_bus(int nr, struct pci_host_bridge *bridge)
 {
-	struct pci_bus *bus;
+	struct pci_sys_data *sys = pci_host_bridge_priv(bridge);
 
-	if (nr < num_pcie_ports) {
-		bus = pci_scan_root_bus(NULL, sys->busnr, &pcie_ops, sys,
-					&sys->resources);
-	} else {
-		bus = NULL;
+	if (nr >= num_pcie_ports) {
 		BUG();
+		return -EINVAL;
 	}
 
-	return bus;
+	list_splice_init(&sys->resources, &bridge->windows);
+	bridge->dev.parent = NULL;
+	bridge->sysdata = sys;
+	bridge->busnr = sys->busnr;
+	bridge->ops = &pcie_ops;
+
+	return pci_scan_root_bus_bridge(bridge);
 }
 
 static int __init mv78xx0_pcie_map_irq(const struct pci_dev *dev, u8 slot,

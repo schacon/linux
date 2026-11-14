@@ -2,7 +2,7 @@
  * Driver for the ST Microelectronics SPEAr pinmux
  *
  * Copyright (C) 2012 ST Microelectronics
- * Viresh Kumar <viresh.linux@gmail.com>
+ * Viresh Kumar <vireshk@kernel.org>
  *
  * Inspired from:
  * - U300 Pinctl drivers
@@ -14,15 +14,17 @@
  */
 
 #include <linux/err.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_gpio.h>
+#include <linux/platform_device.h>
+#include <linux/seq_file.h>
+#include <linux/slab.h>
+
 #include <linux/pinctrl/machine.h>
 #include <linux/pinctrl/pinctrl.h>
 #include <linux/pinctrl/pinmux.h>
-#include <linux/platform_device.h>
-#include <linux/slab.h>
 
 #include "pinctrl-spear.h"
 
@@ -149,13 +151,12 @@ static int spear_pinctrl_dt_node_to_map(struct pinctrl_dev *pctldev,
 					unsigned *num_maps)
 {
 	struct spear_pmx *pmx = pinctrl_dev_get_drvdata(pctldev);
-	struct device_node *np;
 	struct property *prop;
 	const char *function, *group;
 	int ret, index = 0, count = 0;
 
 	/* calculate number of maps required */
-	for_each_child_of_node(np_config, np) {
+	for_each_child_of_node_scoped(np_config, np) {
 		ret = of_property_read_string(np, "st,function", &function);
 		if (ret < 0)
 			return ret;
@@ -172,11 +173,11 @@ static int spear_pinctrl_dt_node_to_map(struct pinctrl_dev *pctldev,
 		return -ENODEV;
 	}
 
-	*map = kzalloc(sizeof(**map) * count, GFP_KERNEL);
+	*map = kzalloc_objs(**map, count);
 	if (!*map)
 		return -ENOMEM;
 
-	for_each_child_of_node(np_config, np) {
+	for_each_child_of_node_scoped(np_config, np) {
 		of_property_read_string(np, "st,function", &function);
 		of_property_for_each_string(np, "st,pins", prop, group) {
 			(*map)[index].type = PIN_MAP_TYPE_MUX_GROUP;
@@ -268,16 +269,10 @@ static int spear_pinctrl_endisable(struct pinctrl_dev *pctldev,
 	return 0;
 }
 
-static int spear_pinctrl_enable(struct pinctrl_dev *pctldev, unsigned function,
+static int spear_pinctrl_set_mux(struct pinctrl_dev *pctldev, unsigned function,
 		unsigned group)
 {
 	return spear_pinctrl_endisable(pctldev, function, group, true);
-}
-
-static void spear_pinctrl_disable(struct pinctrl_dev *pctldev,
-		unsigned function, unsigned group)
-{
-	spear_pinctrl_endisable(pctldev, function, group, false);
 }
 
 /* gpio with pinmux */
@@ -344,8 +339,7 @@ static const struct pinmux_ops spear_pinmux_ops = {
 	.get_functions_count = spear_pinctrl_get_funcs_count,
 	.get_function_name = spear_pinctrl_get_func_name,
 	.get_function_groups = spear_pinctrl_get_func_groups,
-	.enable = spear_pinctrl_enable,
-	.disable = spear_pinctrl_disable,
+	.set_mux = spear_pinctrl_set_mux,
 	.gpio_request_enable = gpio_request_enable,
 	.gpio_disable_free = gpio_disable_free,
 };
@@ -361,26 +355,20 @@ int spear_pinctrl_probe(struct platform_device *pdev,
 			struct spear_pinctrl_machdata *machdata)
 {
 	struct device_node *np = pdev->dev.of_node;
-	struct resource *res;
 	struct spear_pmx *pmx;
 
 	if (!machdata)
 		return -ENODEV;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		return -EINVAL;
-
-	pmx = devm_kzalloc(&pdev->dev, sizeof(*pmx), GFP_KERNEL);
-	if (!pmx) {
-		dev_err(&pdev->dev, "Can't alloc spear_pmx\n");
+	pmx = devm_kzalloc_obj(&pdev->dev, *pmx);
+	if (!pmx)
 		return -ENOMEM;
-	}
 
-	pmx->vbase = devm_ioremap(&pdev->dev, res->start, resource_size(res));
-	if (!pmx->vbase) {
-		dev_err(&pdev->dev, "Couldn't ioremap at index 0\n");
-		return -ENODEV;
+	pmx->regmap = device_node_to_regmap(np);
+	if (IS_ERR(pmx->regmap)) {
+		dev_err(&pdev->dev, "Init regmap failed (%pe).\n",
+			pmx->regmap);
+		return PTR_ERR(pmx->regmap);
 	}
 
 	pmx->dev = &pdev->dev;
@@ -407,20 +395,11 @@ int spear_pinctrl_probe(struct platform_device *pdev,
 	spear_pinctrl_desc.pins = machdata->pins;
 	spear_pinctrl_desc.npins = machdata->npins;
 
-	pmx->pctl = pinctrl_register(&spear_pinctrl_desc, &pdev->dev, pmx);
-	if (!pmx->pctl) {
+	pmx->pctl = devm_pinctrl_register(&pdev->dev, &spear_pinctrl_desc, pmx);
+	if (IS_ERR(pmx->pctl)) {
 		dev_err(&pdev->dev, "Couldn't register pinctrl driver\n");
-		return -ENODEV;
+		return PTR_ERR(pmx->pctl);
 	}
-
-	return 0;
-}
-
-int spear_pinctrl_remove(struct platform_device *pdev)
-{
-	struct spear_pmx *pmx = platform_get_drvdata(pdev);
-
-	pinctrl_unregister(pmx->pctl);
 
 	return 0;
 }

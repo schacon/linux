@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Analog devices AD5764, AD5764R, AD5744, AD5744R quad-channel
  * Digital to Analog Converters driver
  *
  * Copyright 2011 Analog Devices Inc.
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/device.h>
@@ -34,9 +33,8 @@
  * struct ad5764_chip_info - chip specific information
  * @int_vref:	Value of the internal reference voltage in uV - 0 if external
  *		reference voltage is used
- * @channel	channel specification
+ * @channels:	channel specification
 */
-
 struct ad5764_chip_info {
 	unsigned long int_vref;
 	const struct iio_chan_spec *channels;
@@ -47,6 +45,7 @@ struct ad5764_chip_info {
  * @spi:		spi_device
  * @chip_info:		chip info
  * @vref_reg:		vref supply regulators
+ * @lock:		lock to protect the data buffer during SPI ops
  * @data:		spi transfer buffers
  */
 
@@ -54,15 +53,16 @@ struct ad5764_state {
 	struct spi_device		*spi;
 	const struct ad5764_chip_info	*chip_info;
 	struct regulator_bulk_data	vref_reg[2];
+	struct mutex			lock;
 
 	/*
-	 * DMA (thus cache coherency maintenance) requires the
+	 * DMA (thus cache coherency maintenance) may require the
 	 * transfer buffers to live in their own cache lines.
 	 */
 	union {
 		__be32 d32;
 		u8 d8[4];
-	} data[2] ____cacheline_aligned;
+	} data[2] __aligned(IIO_DMA_MINALIGN);
 };
 
 enum ad5764_type {
@@ -83,7 +83,12 @@ enum ad5764_type {
 		BIT(IIO_CHAN_INFO_CALIBSCALE) |			\
 		BIT(IIO_CHAN_INFO_CALIBBIAS),			\
 	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_OFFSET),	\
-	.scan_type = IIO_ST('u', (_bits), 16, 16 - (_bits))	\
+	.scan_type = {						\
+		.sign = 'u',					\
+		.realbits = (_bits),				\
+		.storagebits = 16,				\
+		.shift = 16 - (_bits),				\
+	},							\
 }
 
 #define DECLARE_AD5764_CHANNELS(_name, _bits) \
@@ -122,11 +127,11 @@ static int ad5764_write(struct iio_dev *indio_dev, unsigned int reg,
 	struct ad5764_state *st = iio_priv(indio_dev);
 	int ret;
 
-	mutex_lock(&indio_dev->mlock);
+	mutex_lock(&st->lock);
 	st->data[0].d32 = cpu_to_be32((reg << 16) | val);
 
 	ret = spi_write(st->spi, &st->data[0].d8[1], 3);
-	mutex_unlock(&indio_dev->mlock);
+	mutex_unlock(&st->lock);
 
 	return ret;
 }
@@ -147,7 +152,7 @@ static int ad5764_read(struct iio_dev *indio_dev, unsigned int reg,
 		},
 	};
 
-	mutex_lock(&indio_dev->mlock);
+	mutex_lock(&st->lock);
 
 	st->data[0].d32 = cpu_to_be32((1 << 23) | (reg << 16));
 
@@ -155,7 +160,7 @@ static int ad5764_read(struct iio_dev *indio_dev, unsigned int reg,
 	if (ret >= 0)
 		*val = be32_to_cpu(st->data[1].d32) & 0xffff;
 
-	mutex_unlock(&indio_dev->mlock);
+	mutex_unlock(&st->lock);
 
 	return ret;
 }
@@ -163,7 +168,7 @@ static int ad5764_read(struct iio_dev *indio_dev, unsigned int reg,
 static int ad5764_chan_info_to_reg(struct iio_chan_spec const *chan, long info)
 {
 	switch (info) {
-	case 0:
+	case IIO_CHAN_INFO_RAW:
 		return AD5764_REG_DATA(chan->address);
 	case IIO_CHAN_INFO_CALIBBIAS:
 		return AD5764_REG_OFFSET(chan->address);
@@ -217,7 +222,6 @@ static int ad5764_read_raw(struct iio_dev *indio_dev,
 	struct iio_chan_spec const *chan, int *val, int *val2, long info)
 {
 	struct ad5764_state *st = iio_priv(indio_dev);
-	unsigned long scale_uv;
 	unsigned int reg;
 	int vref;
 	int ret;
@@ -245,15 +249,14 @@ static int ad5764_read_raw(struct iio_dev *indio_dev,
 		*val = sign_extend32(*val, 5);
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
-		/* vout = 4 * vref + ((dac_code / 65535) - 0.5) */
+		/* vout = 4 * vref + ((dac_code / 65536) - 0.5) */
 		vref = ad5764_get_channel_vref(st, chan->channel);
 		if (vref < 0)
 			return vref;
 
-		scale_uv = (vref * 4 * 100) >> chan->scan_type.realbits;
-		*val = scale_uv / 100000;
-		*val2 = (scale_uv % 100000) * 10;
-		return IIO_VAL_INT_PLUS_MICRO;
+		*val = vref * 4 / 1000;
+		*val2 = chan->scan_type.realbits;
+		return IIO_VAL_FRACTIONAL_LOG2;
 	case IIO_CHAN_INFO_OFFSET:
 		*val = -(1 << chan->scan_type.realbits) / 2;
 		return IIO_VAL_INT;
@@ -265,7 +268,6 @@ static int ad5764_read_raw(struct iio_dev *indio_dev,
 static const struct iio_info ad5764_info = {
 	.read_raw = ad5764_read_raw,
 	.write_raw = ad5764_write_raw,
-	.driver_module = THIS_MODULE,
 };
 
 static int ad5764_probe(struct spi_device *spi)
@@ -275,11 +277,9 @@ static int ad5764_probe(struct spi_device *spi)
 	struct ad5764_state *st;
 	int ret;
 
-	indio_dev = iio_device_alloc(sizeof(*st));
-	if (indio_dev == NULL) {
-		dev_err(&spi->dev, "Failed to allocate iio device\n");
+	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	if (indio_dev == NULL)
 		return -ENOMEM;
-	}
 
 	st = iio_priv(indio_dev);
 	spi_set_drvdata(spi, indio_dev);
@@ -287,23 +287,24 @@ static int ad5764_probe(struct spi_device *spi)
 	st->spi = spi;
 	st->chip_info = &ad5764_chip_infos[type];
 
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->info = &ad5764_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->num_channels = AD5764_NUM_CHANNELS;
 	indio_dev->channels = st->chip_info->channels;
 
+	mutex_init(&st->lock);
+
 	if (st->chip_info->int_vref == 0) {
 		st->vref_reg[0].supply = "vrefAB";
 		st->vref_reg[1].supply = "vrefCD";
 
-		ret = regulator_bulk_get(&st->spi->dev,
+		ret = devm_regulator_bulk_get(&st->spi->dev,
 			ARRAY_SIZE(st->vref_reg), st->vref_reg);
 		if (ret) {
 			dev_err(&spi->dev, "Failed to request vref regulators: %d\n",
 				ret);
-			goto error_free;
+			return ret;
 		}
 
 		ret = regulator_bulk_enable(ARRAY_SIZE(st->vref_reg),
@@ -311,7 +312,7 @@ static int ad5764_probe(struct spi_device *spi)
 		if (ret) {
 			dev_err(&spi->dev, "Failed to enable vref regulators: %d\n",
 				ret);
-			goto error_free_reg;
+			return ret;
 		}
 	}
 
@@ -326,37 +327,25 @@ static int ad5764_probe(struct spi_device *spi)
 error_disable_reg:
 	if (st->chip_info->int_vref == 0)
 		regulator_bulk_disable(ARRAY_SIZE(st->vref_reg), st->vref_reg);
-error_free_reg:
-	if (st->chip_info->int_vref == 0)
-		regulator_bulk_free(ARRAY_SIZE(st->vref_reg), st->vref_reg);
-error_free:
-	iio_device_free(indio_dev);
-
 	return ret;
 }
 
-static int ad5764_remove(struct spi_device *spi)
+static void ad5764_remove(struct spi_device *spi)
 {
 	struct iio_dev *indio_dev = spi_get_drvdata(spi);
 	struct ad5764_state *st = iio_priv(indio_dev);
 
 	iio_device_unregister(indio_dev);
 
-	if (st->chip_info->int_vref == 0) {
+	if (st->chip_info->int_vref == 0)
 		regulator_bulk_disable(ARRAY_SIZE(st->vref_reg), st->vref_reg);
-		regulator_bulk_free(ARRAY_SIZE(st->vref_reg), st->vref_reg);
-	}
-
-	iio_device_free(indio_dev);
-
-	return 0;
 }
 
 static const struct spi_device_id ad5764_ids[] = {
-	{ "ad5744", ID_AD5744 },
-	{ "ad5744r", ID_AD5744R },
-	{ "ad5764", ID_AD5764 },
-	{ "ad5764r", ID_AD5764R },
+	{ .name = "ad5744", .driver_data = ID_AD5744 },
+	{ .name = "ad5744r", .driver_data = ID_AD5744R },
+	{ .name = "ad5764", .driver_data = ID_AD5764 },
+	{ .name = "ad5764r", .driver_data = ID_AD5764R },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad5764_ids);
@@ -364,7 +353,6 @@ MODULE_DEVICE_TABLE(spi, ad5764_ids);
 static struct spi_driver ad5764_driver = {
 	.driver = {
 		.name = "ad5764",
-		.owner = THIS_MODULE,
 	},
 	.probe = ad5764_probe,
 	.remove = ad5764_remove,

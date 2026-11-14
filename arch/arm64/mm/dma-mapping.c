@@ -1,77 +1,59 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * SWIOTLB-based DMA API implementation
- *
  * Copyright (C) 2012 ARM Ltd.
  * Author: Catalin Marinas <catalin.marinas@arm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/gfp.h>
-#include <linux/export.h>
-#include <linux/slab.h>
-#include <linux/dma-mapping.h>
-#include <linux/vmalloc.h>
-#include <linux/swiotlb.h>
+#include <linux/cache.h>
+#include <linux/dma-map-ops.h>
+#include <xen/xen.h>
 
 #include <asm/cacheflush.h>
+#include <asm/xen/xen-ops.h>
 
-struct dma_map_ops *dma_ops;
-EXPORT_SYMBOL(dma_ops);
-
-static void *arm64_swiotlb_alloc_coherent(struct device *dev, size_t size,
-					  dma_addr_t *dma_handle, gfp_t flags,
-					  struct dma_attrs *attrs)
+void arch_sync_dma_for_device(phys_addr_t paddr, size_t size,
+			      enum dma_data_direction dir)
 {
-	if (IS_ENABLED(CONFIG_ZONE_DMA32) &&
-	    dev->coherent_dma_mask <= DMA_BIT_MASK(32))
-		flags |= GFP_DMA32;
-	return swiotlb_alloc_coherent(dev, size, dma_handle, flags);
+	unsigned long start = (unsigned long)phys_to_virt(paddr);
+
+	dcache_clean_poc_nosync(start, start + size);
 }
 
-static void arm64_swiotlb_free_coherent(struct device *dev, size_t size,
-					void *vaddr, dma_addr_t dma_handle,
-					struct dma_attrs *attrs)
+void arch_sync_dma_for_cpu(phys_addr_t paddr, size_t size,
+			   enum dma_data_direction dir)
 {
-	swiotlb_free_coherent(dev, size, vaddr, dma_handle);
+	unsigned long start = (unsigned long)phys_to_virt(paddr);
+
+	if (dir == DMA_TO_DEVICE)
+		return;
+
+	dcache_inval_poc_nosync(start, start + size);
 }
 
-static struct dma_map_ops arm64_swiotlb_dma_ops = {
-	.alloc = arm64_swiotlb_alloc_coherent,
-	.free = arm64_swiotlb_free_coherent,
-	.map_page = swiotlb_map_page,
-	.unmap_page = swiotlb_unmap_page,
-	.map_sg = swiotlb_map_sg_attrs,
-	.unmap_sg = swiotlb_unmap_sg_attrs,
-	.sync_single_for_cpu = swiotlb_sync_single_for_cpu,
-	.sync_single_for_device = swiotlb_sync_single_for_device,
-	.sync_sg_for_cpu = swiotlb_sync_sg_for_cpu,
-	.sync_sg_for_device = swiotlb_sync_sg_for_device,
-	.dma_supported = swiotlb_dma_supported,
-	.mapping_error = swiotlb_dma_mapping_error,
-};
-
-void __init arm64_swiotlb_init(void)
+void arch_dma_prep_coherent(struct page *page, size_t size)
 {
-	dma_ops = &arm64_swiotlb_dma_ops;
-	swiotlb_init(1);
+	unsigned long start = (unsigned long)page_address(page);
+
+	dcache_clean_poc(start, start + size);
 }
 
-#define PREALLOC_DMA_DEBUG_ENTRIES	4096
-
-static int __init dma_debug_do_init(void)
+void arch_setup_dma_ops(struct device *dev, bool coherent)
 {
-	dma_debug_init(PREALLOC_DMA_DEBUG_ENTRIES);
-	return 0;
+	int cls = cache_line_size_of_cpu();
+
+	if (!coherent && !CLIDR_LOC(read_sysreg(clidr_el1))) {
+		dev_warn(dev, "CLIDR_EL1.LoC == 0, treating as coherent\n");
+		coherent = true;
+	}
+
+	WARN_TAINT(!coherent && cls > ARCH_DMA_MINALIGN,
+		   TAINT_CPU_OUT_OF_SPEC,
+		   "%s %s: ARCH_DMA_MINALIGN smaller than CTR_EL0.CWG (%d < %d)",
+		   dev_driver_string(dev), dev_name(dev),
+		   ARCH_DMA_MINALIGN, cls);
+
+	dev_assign_dma_coherent(dev, coherent);
+
+	xen_setup_dma_ops(dev);
 }
-fs_initcall(dma_debug_do_init);

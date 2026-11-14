@@ -27,10 +27,6 @@ static inline void CMOS_WRITE(unsigned char data, unsigned long addr)
 	outb_p(data, RTC_PORT(1));
 }
 
-#define RTC_ALWAYS_BCD	1
-
-#ifndef mc146818_decode_year
-#define mc146818_decode_year(year) ((year) < 70 ? (year) + 2000 : (year) + 1900)
-#endif
+#define RTC_ALWAYS_BCD	0
 
 #endif /* __ASM_MACH_GENERIC_MC146818RTC_H */

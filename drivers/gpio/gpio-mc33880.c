@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * MC33880 high-side/low-side switch GPIO driver
  * Copyright (c) 2009 Intel Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 /* Supports:
@@ -24,7 +12,7 @@
 #include <linux/mutex.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/mc33880.h>
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 
@@ -69,15 +57,18 @@ static int __mc33880_set(struct mc33880 *mc, unsigned offset, int value)
 }
 
 
-static void mc33880_set(struct gpio_chip *chip, unsigned offset, int value)
+static int mc33880_set(struct gpio_chip *chip, unsigned int offset, int value)
 {
-	struct mc33880 *mc = container_of(chip, struct mc33880, chip);
+	struct mc33880 *mc = gpiochip_get_data(chip);
+	int ret;
 
 	mutex_lock(&mc->lock);
 
-	__mc33880_set(mc, offset, value);
+	ret = __mc33880_set(mc, offset, value);
 
 	mutex_unlock(&mc->lock);
+
+	return ret;
 }
 
 static int mc33880_probe(struct spi_device *spi)
@@ -86,7 +77,7 @@ static int mc33880_probe(struct spi_device *spi)
 	struct mc33880_platform_data *pdata;
 	int ret;
 
-	pdata = spi->dev.platform_data;
+	pdata = dev_get_platdata(&spi->dev);
 	if (!pdata || !pdata->base) {
 		dev_dbg(&spi->dev, "incorrect or missing platform data\n");
 		return -EINVAL;
@@ -101,7 +92,7 @@ static int mc33880_probe(struct spi_device *spi)
 	if (ret < 0)
 		return ret;
 
-	mc = devm_kzalloc(&spi->dev, sizeof(struct mc33880), GFP_KERNEL);
+	mc = devm_kzalloc_obj(&spi->dev, struct mc33880);
 	if (!mc)
 		return -ENOMEM;
 
@@ -111,12 +102,12 @@ static int mc33880_probe(struct spi_device *spi)
 
 	mc->spi = spi;
 
-	mc->chip.label = DRIVER_NAME,
+	mc->chip.label = DRIVER_NAME;
 	mc->chip.set = mc33880_set;
 	mc->chip.base = pdata->base;
 	mc->chip.ngpio = PIN_NUMBER;
-	mc->chip.can_sleep = 1;
-	mc->chip.dev = &spi->dev;
+	mc->chip.can_sleep = true;
+	mc->chip.parent = &spi->dev;
 	mc->chip.owner = THIS_MODULE;
 
 	mc->port_config = 0x00;
@@ -135,43 +126,30 @@ static int mc33880_probe(struct spi_device *spi)
 		goto exit_destroy;
 	}
 
-	ret = gpiochip_add(&mc->chip);
+	ret = gpiochip_add_data(&mc->chip, mc);
 	if (ret)
 		goto exit_destroy;
 
 	return ret;
 
 exit_destroy:
-	spi_set_drvdata(spi, NULL);
 	mutex_destroy(&mc->lock);
 	return ret;
 }
 
-static int mc33880_remove(struct spi_device *spi)
+static void mc33880_remove(struct spi_device *spi)
 {
 	struct mc33880 *mc;
-	int ret;
 
 	mc = spi_get_drvdata(spi);
-	if (mc == NULL)
-		return -ENODEV;
 
-	spi_set_drvdata(spi, NULL);
-
-	ret = gpiochip_remove(&mc->chip);
-	if (!ret)
-		mutex_destroy(&mc->lock);
-	else
-		dev_err(&spi->dev, "Failed to remove the GPIO controller: %d\n",
-			ret);
-
-	return ret;
+	gpiochip_remove(&mc->chip);
+	mutex_destroy(&mc->lock);
 }
 
 static struct spi_driver mc33880_driver = {
 	.driver = {
 		.name		= DRIVER_NAME,
-		.owner		= THIS_MODULE,
 	},
 	.probe		= mc33880_probe,
 	.remove		= mc33880_remove,
@@ -193,5 +171,6 @@ static void __exit mc33880_exit(void)
 module_exit(mc33880_exit);
 
 MODULE_AUTHOR("Mocean Laboratories <info@mocean-labs.com>");
+MODULE_DESCRIPTION("MC33880 high-side/low-side switch GPIO driver");
 MODULE_LICENSE("GPL v2");
 

@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	Sonix sn9c201 sn9c202 library
  *
  * Copyright (C) 2012 Jean-Francois Moine <http://moinejf.free.fr>
  *	Copyright (C) 2008-2009 microdia project <microdia@googlegroups.com>
  *	Copyright (C) 2009 Brian Johnson <brijohn@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -27,11 +14,9 @@
 #include "gspca.h"
 #include "jpeg.h"
 
-#include <media/v4l2-chip-ident.h>
 #include <linux/dmi.h>
 
-MODULE_AUTHOR("Brian Johnson <brijohn@gmail.com>, "
-		"microdia project <microdia@googlegroups.com>");
+MODULE_AUTHOR("Brian Johnson <brijohn@gmail.com>, microdia project <microdia@googlegroups.com>");
 MODULE_DESCRIPTION("GSPCA/SN9C20X USB Camera Driver");
 MODULE_LICENSE("GPL");
 
@@ -65,6 +50,7 @@ MODULE_LICENSE("GPL");
 #define HAS_NO_BUTTON	0x1
 #define LED_REVERSE	0x2 /* some cameras unset gpio to turn on leds */
 #define FLIP_DETECT	0x4
+#define HAS_LED_TORCH	0x8
 
 /* specific webcam descriptor */
 struct sd {
@@ -92,8 +78,9 @@ struct sd {
 	};
 	struct v4l2_ctrl *jpegqual;
 
+	struct v4l2_ctrl *led_mode;
+
 	struct work_struct work;
-	struct workqueue_struct *work_thread;
 
 	u32 pktsz;			/* (used by pkt_scan) */
 	u16 npkt;
@@ -137,6 +124,13 @@ static const struct dmi_system_id flip_dmi_table[] = {
 			DMI_MATCH(DMI_SYS_VENDOR, "MICRO-STAR INT'L CO.,LTD."),
 			DMI_MATCH(DMI_PRODUCT_NAME, "MS-1034"),
 			DMI_MATCH(DMI_PRODUCT_VERSION, "0341")
+		}
+	},
+	{
+		.ident = "MSI MS-1039",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "MICRO-STAR INT'L CO.,LTD."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "MS-1039"),
 		}
 	},
 	{
@@ -582,22 +576,6 @@ static const s16 hsv_blue_y[] = {
 	4,   2,   0,  -1,  -3,  -5,  -7,  -9, -11
 };
 
-static const u16 i2c_ident[] = {
-	V4L2_IDENT_OV9650,
-	V4L2_IDENT_OV9655,
-	V4L2_IDENT_SOI968,
-	V4L2_IDENT_OV7660,
-	V4L2_IDENT_OV7670,
-	V4L2_IDENT_MT9V011,
-	V4L2_IDENT_MT9V111,
-	V4L2_IDENT_MT9V112,
-	V4L2_IDENT_MT9M001C12ST,
-	V4L2_IDENT_MT9M111,
-	V4L2_IDENT_MT9M112,
-	V4L2_IDENT_HV7131R,
-[SENSOR_MT9VPRB] = V4L2_IDENT_UNKNOWN,
-};
-
 static const u16 bridge_init[][2] = {
 	{0x1000, 0x78}, {0x1001, 0x40}, {0x1002, 0x1c},
 	{0x1020, 0x80}, {0x1061, 0x01}, {0x1067, 0x40},
@@ -941,6 +919,11 @@ static void reg_r(struct gspca_dev *gspca_dev, u16 reg, u16 length)
 	if (unlikely(result < 0 || result != length)) {
 		pr_err("Read register %02x failed %d\n", reg, result);
 		gspca_dev->usb_err = result;
+		/*
+		 * Make sure the buffer is zeroed to avoid uninitialized
+		 * values.
+		 */
+		memset(gspca_dev->usb_buf, 0, USB_BUF_SZ);
 	}
 }
 
@@ -1314,7 +1297,7 @@ static void set_cmatrix(struct gspca_dev *gspca_dev,
 	s32 hue_coord, hue_index = 180 + hue;
 	u8 cmatrix[21];
 
-	memset(cmatrix, 0, sizeof cmatrix);
+	memset(cmatrix, 0, sizeof(cmatrix));
 	cmatrix[2] = (contrast * 0x25 / 0x100) + 0x26;
 	cmatrix[0] = 0x13 + (cmatrix[2] - 0x26) * 0x13 / 0x25;
 	cmatrix[4] = 0x07 + (cmatrix[2] - 0x26) * 0x07 / 0x25;
@@ -1553,6 +1536,12 @@ static void set_gain(struct gspca_dev *gspca_dev, s32 g)
 	i2c_w(gspca_dev, gain);
 }
 
+static void set_led_mode(struct gspca_dev *gspca_dev, s32 val)
+{
+	reg_w1(gspca_dev, 0x1007, 0x60);
+	reg_w1(gspca_dev, 0x1006, val ? 0x40 : 0x00);
+}
+
 static void set_quality(struct gspca_dev *gspca_dev, s32 val)
 {
 	struct sd *sd = (struct sd *) gspca_dev;
@@ -1574,21 +1563,19 @@ static int sd_dbg_g_register(struct gspca_dev *gspca_dev,
 {
 	struct sd *sd = (struct sd *) gspca_dev;
 
-	switch (reg->match.type) {
-	case V4L2_CHIP_MATCH_HOST:
-		if (reg->match.addr != 0)
-			return -EINVAL;
+	reg->size = 1;
+	switch (reg->match.addr) {
+	case 0:
 		if (reg->reg < 0x1000 || reg->reg > 0x11ff)
 			return -EINVAL;
 		reg_r(gspca_dev, reg->reg, 1);
 		reg->val = gspca_dev->usb_buf[0];
 		return gspca_dev->usb_err;
-	case V4L2_CHIP_MATCH_I2C_ADDR:
-		if (reg->match.addr != sd->i2c_addr)
-			return -EINVAL;
+	case 1:
 		if (sd->sensor >= SENSOR_MT9V011 &&
 		    sd->sensor <= SENSOR_MT9M112) {
 			i2c_r2(gspca_dev, reg->reg, (u16 *) &reg->val);
+			reg->size = 2;
 		} else {
 			i2c_r1(gspca_dev, reg->reg, (u8 *) &reg->val);
 		}
@@ -1602,17 +1589,13 @@ static int sd_dbg_s_register(struct gspca_dev *gspca_dev,
 {
 	struct sd *sd = (struct sd *) gspca_dev;
 
-	switch (reg->match.type) {
-	case V4L2_CHIP_MATCH_HOST:
-		if (reg->match.addr != 0)
-			return -EINVAL;
+	switch (reg->match.addr) {
+	case 0:
 		if (reg->reg < 0x1000 || reg->reg > 0x11ff)
 			return -EINVAL;
 		reg_w1(gspca_dev, reg->reg, reg->val);
 		return gspca_dev->usb_err;
-	case V4L2_CHIP_MATCH_I2C_ADDR:
-		if (reg->match.addr != sd->i2c_addr)
-			return -EINVAL;
+	case 1:
 		if (sd->sensor >= SENSOR_MT9V011 &&
 		    sd->sensor <= SENSOR_MT9M112) {
 			i2c_w2(gspca_dev, reg->reg, reg->val);
@@ -1623,29 +1606,17 @@ static int sd_dbg_s_register(struct gspca_dev *gspca_dev,
 	}
 	return -EINVAL;
 }
-#endif
 
-static int sd_chip_ident(struct gspca_dev *gspca_dev,
-			struct v4l2_dbg_chip_ident *chip)
+static int sd_chip_info(struct gspca_dev *gspca_dev,
+			struct v4l2_dbg_chip_info *chip)
 {
-	struct sd *sd = (struct sd *) gspca_dev;
-
-	switch (chip->match.type) {
-	case V4L2_CHIP_MATCH_HOST:
-		if (chip->match.addr != 0)
-			return -EINVAL;
-		chip->revision = 0;
-		chip->ident = V4L2_IDENT_SN9C20X;
-		return 0;
-	case V4L2_CHIP_MATCH_I2C_ADDR:
-		if (chip->match.addr != sd->i2c_addr)
-			return -EINVAL;
-		chip->revision = 0;
-		chip->ident = i2c_ident[sd->sensor];
-		return 0;
-	}
-	return -EINVAL;
+	if (chip->match.addr > 1)
+		return -EINVAL;
+	if (chip->match.addr == 1)
+		strscpy(chip->name, "sensor", sizeof(chip->name));
+	return 0;
 }
+#endif
 
 static int sd_config(struct gspca_dev *gspca_dev,
 			const struct usb_device_id *id)
@@ -1675,7 +1646,7 @@ static int sd_config(struct gspca_dev *gspca_dev,
 		break;
 	case SENSOR_HV7131R:
 		sd->i2c_intf = 0x81;			/* i2c 400 Kb/s */
-		/* fall thru */
+		fallthrough;
 	default:
 		cam->cam_mode = vga_mode;
 		cam->nmodes = ARRAY_SIZE(vga_mode);
@@ -1737,6 +1708,9 @@ static int sd_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_JPEG_COMPRESSION_QUALITY:
 		set_quality(gspca_dev, ctrl->val);
 		break;
+	case V4L2_CID_FLASH_LED_MODE:
+		set_led_mode(gspca_dev, ctrl->val);
+		break;
 	}
 	return gspca_dev->usb_err;
 }
@@ -1795,6 +1769,12 @@ static int sd_init_controls(struct gspca_dev *gspca_dev)
 
 	sd->jpegqual = v4l2_ctrl_new_std(hdl, &sd_ctrl_ops,
 			V4L2_CID_JPEG_COMPRESSION_QUALITY, 50, 90, 1, 80);
+
+	if (sd->flags & HAS_LED_TORCH)
+		sd->led_mode = v4l2_ctrl_new_std_menu(hdl, &sd_ctrl_ops,
+				V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_TORCH,
+				~0x5, V4L2_FLASH_LED_MODE_NONE);
+
 	if (hdl->error) {
 		pr_err("Could not initialize controls\n");
 		return hdl->error;
@@ -1822,8 +1802,9 @@ static int sd_init(struct gspca_dev *gspca_dev)
 	struct sd *sd = (struct sd *) gspca_dev;
 	int i;
 	u8 value;
-	u8 i2c_init[9] =
-		{0x80, sd->i2c_addr, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03};
+	u8 i2c_init[9] = {
+		0x80, sd->i2c_addr, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03
+	};
 
 	for (i = 0; i < ARRAY_SIZE(bridge_init); i++) {
 		value = bridge_init[i][1];
@@ -1983,14 +1964,13 @@ static int sd_isoc_init(struct gspca_dev *gspca_dev)
 		intf = usb_ifnum_to_if(gspca_dev->dev, gspca_dev->iface);
 
 		if (intf->num_altsetting != 9) {
-			pr_warn("sn9c20x camera with unknown number of alt "
-				"settings (%d), please report!\n",
+			pr_warn("sn9c20x camera with unknown number of alt settings (%d), please report!\n",
 				intf->num_altsetting);
 			gspca_dev->alt = intf->num_altsetting;
 			return 0;
 		}
 
-		switch (gspca_dev->width) {
+		switch (gspca_dev->pixfmt.width) {
 		case 160: /* 160x120 */
 			gspca_dev->alt = 2;
 			break;
@@ -2020,8 +2000,8 @@ static int sd_start(struct gspca_dev *gspca_dev)
 {
 	struct sd *sd = (struct sd *) gspca_dev;
 	int mode = gspca_dev->cam.cam_mode[(int) gspca_dev->curr_mode].priv;
-	int width = gspca_dev->width;
-	int height = gspca_dev->height;
+	int width = gspca_dev->pixfmt.width;
+	int height = gspca_dev->pixfmt.height;
 	u8 fmt, scale = 0;
 
 	jpeg_define(sd->jpeg_hdr, height, width,
@@ -2085,9 +2065,9 @@ static int sd_start(struct gspca_dev *gspca_dev)
 	if (mode & MODE_JPEG) {
 		sd->pktsz = sd->npkt = 0;
 		sd->nchg = 0;
-		sd->work_thread =
-			create_singlethread_workqueue(KBUILD_MODNAME);
 	}
+	if (sd->led_mode)
+		v4l2_ctrl_s_ctrl(sd->led_mode, 0);
 
 	return gspca_dev->usb_err;
 }
@@ -2104,12 +2084,9 @@ static void sd_stop0(struct gspca_dev *gspca_dev)
 {
 	struct sd *sd = (struct sd *) gspca_dev;
 
-	if (sd->work_thread != NULL) {
-		mutex_unlock(&gspca_dev->usb_lock);
-		destroy_workqueue(sd->work_thread);
-		mutex_lock(&gspca_dev->usb_lock);
-		sd->work_thread = NULL;
-	}
+	mutex_unlock(&gspca_dev->usb_lock);
+	flush_work(&sd->work);
+	mutex_lock(&gspca_dev->usb_lock);
 }
 
 static void do_autoexposure(struct gspca_dev *gspca_dev, u16 avg_lum)
@@ -2199,7 +2176,7 @@ static void qual_upd(struct work_struct *work)
 
 	/* To protect gspca_dev->usb_buf and gspca_dev->usb_err */
 	mutex_lock(&gspca_dev->usb_lock);
-	PDEBUG(D_STREAM, "qual_upd %d%%", qual);
+	gspca_dbg(gspca_dev, D_STREAM, "qual_upd %d%%\n", qual);
 	gspca_dev->usb_err = 0;
 	set_quality(gspca_dev, qual);
 	mutex_unlock(&gspca_dev->usb_lock);
@@ -2262,7 +2239,7 @@ static void transfer_check(struct gspca_dev *gspca_dev,
 				new_qual = sd->jpegqual->maximum;
 			if (new_qual != curqual) {
 				sd->jpegqual->cur.val = new_qual;
-				queue_work(sd->work_thread, &sd->work);
+				schedule_work(&sd->work);
 			}
 		}
 	} else {
@@ -2277,8 +2254,9 @@ static void sd_pkt_scan(struct gspca_dev *gspca_dev,
 {
 	struct sd *sd = (struct sd *) gspca_dev;
 	int avg_lum, is_jpeg;
-	static const u8 frame_header[] =
-		{0xff, 0xff, 0x00, 0xc4, 0xc4, 0x96};
+	static const u8 frame_header[] = {
+		0xff, 0xff, 0x00, 0xc4, 0xc4, 0x96
+	};
 
 	is_jpeg = (sd->fmt & 0x03) == 0;
 	if (len >= 64 && memcmp(data, frame_header, 6) == 0) {
@@ -2356,8 +2334,8 @@ static const struct sd_desc sd_desc = {
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 	.set_register = sd_dbg_s_register,
 	.get_register = sd_dbg_g_register,
+	.get_chip_info = sd_chip_info,
 #endif
-	.get_chip_ident = sd_chip_ident,
 };
 
 #define SN9C20X(sensor, i2c_addr, flags) \
@@ -2367,7 +2345,7 @@ static const struct sd_desc sd_desc = {
 
 static const struct usb_device_id device_table[] = {
 	{USB_DEVICE(0x0c45, 0x6240), SN9C20X(MT9M001, 0x5d, 0)},
-	{USB_DEVICE(0x0c45, 0x6242), SN9C20X(MT9M111, 0x5d, 0)},
+	{USB_DEVICE(0x0c45, 0x6242), SN9C20X(MT9M111, 0x5d, HAS_LED_TORCH)},
 	{USB_DEVICE(0x0c45, 0x6248), SN9C20X(OV9655, 0x30, 0)},
 	{USB_DEVICE(0x0c45, 0x624c), SN9C20X(MT9M112, 0x5d, 0)},
 	{USB_DEVICE(0x0c45, 0x624e), SN9C20X(SOI968, 0x30, LED_REVERSE)},
@@ -2394,6 +2372,7 @@ static const struct usb_device_id device_table[] = {
 	{USB_DEVICE(0x045e, 0x00f4), SN9C20X(OV9650, 0x30, 0)},
 	{USB_DEVICE(0x145f, 0x013d), SN9C20X(OV7660, 0x21, 0)},
 	{USB_DEVICE(0x0458, 0x7029), SN9C20X(HV7131R, 0x11, 0)},
+	{USB_DEVICE(0x0458, 0x7045), SN9C20X(MT9M112, 0x5d, LED_REVERSE)},
 	{USB_DEVICE(0x0458, 0x704a), SN9C20X(MT9M112, 0x5d, 0)},
 	{USB_DEVICE(0x0458, 0x704c), SN9C20X(MT9M112, 0x5d, 0)},
 	{USB_DEVICE(0xa168, 0x0610), SN9C20X(HV7131R, 0x11, 0)},

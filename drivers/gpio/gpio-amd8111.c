@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * GPIO driver for AMD 8111 south bridges
  *
@@ -20,14 +21,11 @@
  * Hardware driver for Intel i810 Random Number Generator (RNG)
  * Copyright 2000,2001 Jeff Garzik <jgarzik@pobox.com>
  * Copyright 2000,2001 Philipp Rumpf <prumpf@mandrakesoft.com>
- *
- * This file is licensed under  the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
+#include <linux/ioport.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
 
@@ -60,9 +58,9 @@
  * register a pci_driver, because someone else might one day
  * want to register another driver on the same PCI id.
  */
-static DEFINE_PCI_DEVICE_TABLE(pci_tbl) = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8111_SMBUS), 0 },
-	{ 0, },	/* terminate list */
+static const struct pci_device_id pci_tbl[] = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8111_SMBUS) },
+	{ },	/* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, pci_tbl);
 
@@ -75,11 +73,9 @@ struct amd_gpio {
 	u8			orig[32];
 };
 
-#define to_agp(chip)	container_of(chip, struct amd_gpio, chip)
-
 static int amd_gpio_request(struct gpio_chip *chip, unsigned offset)
 {
-	struct amd_gpio *agp = to_agp(chip);
+	struct amd_gpio *agp = gpiochip_get_data(chip);
 
 	agp->orig[offset] = ioread8(agp->pm + AMD_REG_GPIO(offset)) &
 		(AMD_GPIO_DEBOUNCE | AMD_GPIO_MODE_MASK | AMD_GPIO_X_MASK);
@@ -91,16 +87,16 @@ static int amd_gpio_request(struct gpio_chip *chip, unsigned offset)
 
 static void amd_gpio_free(struct gpio_chip *chip, unsigned offset)
 {
-	struct amd_gpio *agp = to_agp(chip);
+	struct amd_gpio *agp = gpiochip_get_data(chip);
 
 	dev_dbg(&agp->pdev->dev, "Freed gpio %d, data %x\n", offset, agp->orig[offset]);
 
 	iowrite8(agp->orig[offset], agp->pm + AMD_REG_GPIO(offset));
 }
 
-static void amd_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+static int amd_gpio_set(struct gpio_chip *chip, unsigned int offset, int value)
 {
-	struct amd_gpio *agp = to_agp(chip);
+	struct amd_gpio *agp = gpiochip_get_data(chip);
 	u8 temp;
 	unsigned long flags;
 
@@ -111,11 +107,13 @@ static void amd_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 	spin_unlock_irqrestore(&agp->lock, flags);
 
 	dev_dbg(&agp->pdev->dev, "Setting gpio %d, value %d, reg=%02x\n", offset, !!value, temp);
+
+	return 0;
 }
 
 static int amd_gpio_get(struct gpio_chip *chip, unsigned offset)
 {
-	struct amd_gpio *agp = to_agp(chip);
+	struct amd_gpio *agp = gpiochip_get_data(chip);
 	u8 temp;
 
 	temp = ioread8(agp->pm + AMD_REG_GPIO(offset));
@@ -127,7 +125,7 @@ static int amd_gpio_get(struct gpio_chip *chip, unsigned offset)
 
 static int amd_gpio_dirout(struct gpio_chip *chip, unsigned offset, int value)
 {
-	struct amd_gpio *agp = to_agp(chip);
+	struct amd_gpio *agp = gpiochip_get_data(chip);
 	u8 temp;
 	unsigned long flags;
 
@@ -144,7 +142,7 @@ static int amd_gpio_dirout(struct gpio_chip *chip, unsigned offset, int value)
 
 static int amd_gpio_dirin(struct gpio_chip *chip, unsigned offset)
 {
-	struct amd_gpio *agp = to_agp(chip);
+	struct amd_gpio *agp = gpiochip_get_data(chip);
 	u8 temp;
 	unsigned long flags;
 
@@ -180,7 +178,6 @@ static int __init amd_gpio_init(void)
 	struct pci_dev *pdev = NULL;
 	const struct pci_device_id *ent;
 
-
 	/* We look for our device - AMD South Bridge
 	 * I don't know about a system with two such bridges,
 	 * so we can assume that there is max. one device.
@@ -200,42 +197,51 @@ static int __init amd_gpio_init(void)
 
 found:
 	err = pci_read_config_dword(pdev, 0x58, &gp.pmbase);
-	if (err)
+	if (err) {
+		err = pcibios_err_to_errno(err);
 		goto out;
+	}
 	err = -EIO;
 	gp.pmbase &= 0x0000FF00;
 	if (gp.pmbase == 0)
 		goto out;
-	if (!request_region(gp.pmbase + PMBASE_OFFSET, PMBASE_SIZE, "AMD GPIO")) {
+	if (!devm_request_region(&pdev->dev, gp.pmbase + PMBASE_OFFSET,
+		PMBASE_SIZE, "AMD GPIO")) {
 		dev_err(&pdev->dev, "AMD GPIO region 0x%x already in use!\n",
 			gp.pmbase + PMBASE_OFFSET);
 		err = -EBUSY;
 		goto out;
 	}
 	gp.pm = ioport_map(gp.pmbase + PMBASE_OFFSET, PMBASE_SIZE);
+	if (!gp.pm) {
+		dev_err(&pdev->dev, "Couldn't map io port into io memory\n");
+		err = -ENOMEM;
+		goto out;
+	}
 	gp.pdev = pdev;
-	gp.chip.dev = &pdev->dev;
+	gp.chip.parent = &pdev->dev;
 
 	spin_lock_init(&gp.lock);
 
-	printk(KERN_INFO "AMD-8111 GPIO detected\n");
-	err = gpiochip_add(&gp.chip);
+	dev_info(&pdev->dev, "AMD-8111 GPIO detected\n");
+	err = gpiochip_add_data(&gp.chip, &gp);
 	if (err) {
-		printk(KERN_ERR "GPIO registering failed (%d)\n",
-		       err);
-		release_region(gp.pmbase + PMBASE_OFFSET, PMBASE_SIZE);
+		dev_err(&pdev->dev, "GPIO registering failed (%d)\n", err);
+		ioport_unmap(gp.pm);
 		goto out;
 	}
+	return 0;
+
 out:
+	pci_dev_put(pdev);
 	return err;
 }
 
 static void __exit amd_gpio_exit(void)
 {
-	int err = gpiochip_remove(&gp.chip);
-	WARN_ON(err);
+	gpiochip_remove(&gp.chip);
 	ioport_unmap(gp.pm);
-	release_region(gp.pmbase + PMBASE_OFFSET, PMBASE_SIZE);
+	pci_dev_put(gp.pdev);
 }
 
 module_init(amd_gpio_init);

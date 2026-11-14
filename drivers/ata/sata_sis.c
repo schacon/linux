@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  sata_sis.c - Silicon Integrated Systems SATA
  *
@@ -7,33 +8,15 @@
  *
  *  Copyright 2004 Uwe Koziolek
  *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2, or (at your option)
- *  any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; see the file COPYING.  If not, write to
- *  the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- *
  *  libata documentation is available via 'make {ps|pdf}docs',
- *  as Documentation/DocBook/libata.*
+ *  as Documentation/driver-api/libata.rst
  *
  *  Hardware documentation available under NDA.
- *
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -68,13 +51,31 @@ static int sis_scr_read(struct ata_link *link, unsigned int sc_reg, u32 *val);
 static int sis_scr_write(struct ata_link *link, unsigned int sc_reg, u32 val);
 
 static const struct pci_device_id sis_pci_tbl[] = {
-	{ PCI_VDEVICE(SI, 0x0180), sis_180 },	/* SiS 964/180 */
-	{ PCI_VDEVICE(SI, 0x0181), sis_180 },	/* SiS 964/180 */
-	{ PCI_VDEVICE(SI, 0x0182), sis_180 },	/* SiS 965/965L */
-	{ PCI_VDEVICE(SI, 0x0183), sis_180 },	/* SiS 965/965L */
-	{ PCI_VDEVICE(SI, 0x1182), sis_180 },	/* SiS 966/680 */
-	{ PCI_VDEVICE(SI, 0x1183), sis_180 },	/* SiS 966/966L/968/680 */
-
+	{
+		/* SiS 964/180 */
+		PCI_VDEVICE(SI, 0x0180),
+		.driver_data = sis_180,
+	}, {
+		/* SiS 964/180 */
+		PCI_VDEVICE(SI, 0x0181),
+		.driver_data = sis_180,
+	}, {
+		/* SiS 965/965L */
+		PCI_VDEVICE(SI, 0x0182),
+		.driver_data = sis_180,
+	}, {
+		/* SiS 965/965L */
+		PCI_VDEVICE(SI, 0x0183),
+		.driver_data = sis_180,
+	}, {
+		/* SiS 966/680 */
+		PCI_VDEVICE(SI, 0x1182),
+		.driver_data = sis_180,
+	}, {
+		/* SiS 966/966L/968/680 */
+		PCI_VDEVICE(SI, 0x1183),
+		.driver_data = sis_180,
+	},
 	{ }	/* terminate list */
 };
 
@@ -83,9 +84,13 @@ static struct pci_driver sis_pci_driver = {
 	.id_table		= sis_pci_tbl,
 	.probe			= sis_init_one,
 	.remove			= ata_pci_remove_one,
+#ifdef CONFIG_PM_SLEEP
+	.suspend		= ata_pci_device_suspend,
+	.resume			= ata_pci_device_resume,
+#endif
 };
 
-static struct scsi_host_template sis_sht = {
+static const struct scsi_host_template sis_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
 };
 
@@ -303,7 +308,7 @@ static int sis_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	pci_set_master(pdev);
-	pci_intx(pdev, 1);
+	pcim_intx(pdev, 1);
 	return ata_host_activate(host, pdev->irq, ata_bmdma_interrupt,
 				 IRQF_SHARED, &sis_sht);
 }

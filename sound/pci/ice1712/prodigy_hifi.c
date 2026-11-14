@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   ALSA driver for ICEnsemble VT1724 (Envy24HT)
  *
@@ -7,21 +8,6 @@
  *      Copyright (c) 2007 Julian Scheel <julian@jusst.de>
  *      Copyright (c) 2007 allank
  *      Copyright (c) 2004 Takashi Iwai <tiwai@suse.de>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
 
@@ -282,7 +268,7 @@ static int ak4396_dac_vol_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem
 	int i;
 	int change = 0;
 	
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	for (i = 0; i < 2; i++) {
 		if (ucontrol->value.integer.value[i] != spec->vol[i]) {
 			spec->vol[i] = ucontrol->value.integer.value[i];
@@ -291,14 +277,13 @@ static int ak4396_dac_vol_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem
 			change = 1;
 		}
 	}
-	mutex_unlock(&ice->gpio_mutex);
 	return change;
 }
 
 static const DECLARE_TLV_DB_SCALE(db_scale_wm_dac, -12700, 100, 1);
 static const DECLARE_TLV_DB_LINEAR(ak4396_db_scale, TLV_DB_GAIN_MUTE, 0);
 
-static struct snd_kcontrol_new prodigy_hd2_controls[] = {
+static const struct snd_kcontrol_new prodigy_hd2_controls[] = {
     {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.access = (SNDRV_CTL_ELEM_ACCESS_READWRITE |
@@ -314,26 +299,7 @@ static struct snd_kcontrol_new prodigy_hd2_controls[] = {
 
 /* --------------- */
 
-/*
- * Logarithmic volume values for WM87*6
- * Computed as 20 * Log10(255 / x)
- */
-static const unsigned char wm_vol[256] = {
-	127, 48, 42, 39, 36, 34, 33, 31, 30, 29, 28, 27, 27, 26, 25, 25, 24, 24, 23,
-	23, 22, 22, 21, 21, 21, 20, 20, 20, 19, 19, 19, 18, 18, 18, 18, 17, 17, 17,
-	17, 16, 16, 16, 16, 15, 15, 15, 15, 15, 15, 14, 14, 14, 14, 14, 13, 13, 13,
-	13, 13, 13, 13, 12, 12, 12, 12, 12, 12, 12, 11, 11, 11, 11, 11, 11, 11, 11,
-	11, 10, 10, 10, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 8, 8,
-	8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 6, 6, 6,
-	6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-	5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3,
-	3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-	2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0
-};
-
-#define WM_VOL_MAX	(sizeof(wm_vol) - 1)
+#define WM_VOL_MAX	255
 #define WM_VOL_MUTE	0x8000
 
 
@@ -409,7 +375,7 @@ static int wm_dac_vol_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_val
 	struct prodigy_hifi_spec *spec = ice->spec;
 	int i, idx, change = 0;
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	for (i = 0; i < 2; i++) {
 		if (ucontrol->value.integer.value[i] != spec->vol[2 + i]) {
 			idx = WM_DAC_ATTEN_L + i;
@@ -419,7 +385,6 @@ static int wm_dac_vol_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_val
 			change = 1;
 		}
 	}
-	mutex_unlock(&ice->gpio_mutex);
 	return change;
 }
 
@@ -461,7 +426,7 @@ static int wm8766_vol_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_val
 
 	voices = kcontrol->private_value >> 8;
 	ofs = kcontrol->private_value & 0xff;
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	for (i = 0; i < voices; i++) {
 		if (ucontrol->value.integer.value[i] != spec->vol[ofs + i]) {
 			idx = WM8766_LDA1 + ofs + i;
@@ -472,7 +437,6 @@ static int wm8766_vol_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_val
 			change = 1;
 		}
 	}
-	mutex_unlock(&ice->gpio_mutex);
 	return change;
 }
 
@@ -507,7 +471,7 @@ static int wm_master_vol_put(struct snd_kcontrol *kcontrol,
 	struct prodigy_hifi_spec *spec = ice->spec;
 	int ch, change = 0;
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	for (ch = 0; ch < 2; ch++) {
 		if (ucontrol->value.integer.value[ch] != spec->master[ch]) {
 			spec->master[ch] = ucontrol->value.integer.value[ch];
@@ -527,7 +491,6 @@ static int wm_master_vol_put(struct snd_kcontrol *kcontrol,
 			change = 1;
 		}
 	}
-	mutex_unlock(&ice->gpio_mutex);	
 	return change;
 }
 
@@ -537,7 +500,7 @@ static int wm_master_vol_put(struct snd_kcontrol *kcontrol,
 static int wm_adc_mux_enum_info(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_info *uinfo)
 {
-	static char* texts[32] = {
+	static const char * const texts[32] = {
 		"NULL", WM_AIN1, WM_AIN2, WM_AIN1 "+" WM_AIN2,
 		WM_AIN3, WM_AIN1 "+" WM_AIN3, WM_AIN2 "+" WM_AIN3,
 		WM_AIN1 "+" WM_AIN2 "+" WM_AIN3,
@@ -560,14 +523,7 @@ static int wm_adc_mux_enum_info(struct snd_kcontrol *kcontrol,
 		WM_AIN1 "+" WM_AIN2 "+" WM_AIN3 "+" WM_AIN4 "+" WM_AIN5
 	};
 
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
-	uinfo->count = 1;
-	uinfo->value.enumerated.items = 32;
-	if (uinfo->value.enumerated.item > 31)
-		uinfo->value.enumerated.item = 31;
-	strcpy(uinfo->value.enumerated.name,
-	       texts[uinfo->value.enumerated.item]);
-	return 0;
+	return snd_ctl_enum_info(uinfo, 1, 32, texts);
 }
 
 static int wm_adc_mux_enum_get(struct snd_kcontrol *kcontrol,
@@ -575,9 +531,8 @@ static int wm_adc_mux_enum_get(struct snd_kcontrol *kcontrol,
 {
 	struct snd_ice1712 *ice = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&ice->gpio_mutex);
-	ucontrol->value.integer.value[0] = wm_get(ice, WM_ADC_MUX) & 0x1f;
-	mutex_unlock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
+	ucontrol->value.enumerated.item[0] = wm_get(ice, WM_ADC_MUX) & 0x1f;
 	return 0;
 }
 
@@ -588,14 +543,13 @@ static int wm_adc_mux_enum_put(struct snd_kcontrol *kcontrol,
 	unsigned short oval, nval;
 	int change = 0;
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	oval = wm_get(ice, WM_ADC_MUX);
-	nval = (oval & 0xe0) | ucontrol->value.integer.value[0];
+	nval = (oval & 0xe0) | ucontrol->value.enumerated.item[0];
 	if (nval != oval) {
 		wm_put(ice, WM_ADC_MUX, nval);
 		change = 1;
 	}
-	mutex_unlock(&ice->gpio_mutex);
 	return change;
 }
 
@@ -626,13 +580,12 @@ static int wm_adc_vol_get(struct snd_kcontrol *kcontrol,
 	unsigned short val;
 	int i;
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	for (i = 0; i < 2; i++) {
 		val = wm_get(ice, WM_ADC_ATTEN_L + i) & 0xff;
 		val = val > ADC_MIN ? (val - ADC_MIN) : 0;
 		ucontrol->value.integer.value[i] = val;
 	}
-	mutex_unlock(&ice->gpio_mutex);
 	return 0;
 }
 
@@ -643,7 +596,7 @@ static int wm_adc_vol_put(struct snd_kcontrol *kcontrol,
 	unsigned short ovol, nvol;
 	int i, idx, change = 0;
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	for (i = 0; i < 2; i++) {
 		nvol = ucontrol->value.integer.value[i];
 		nvol = nvol ? (nvol + ADC_MIN) : 0;
@@ -654,7 +607,6 @@ static int wm_adc_vol_put(struct snd_kcontrol *kcontrol,
 			change = 1;
 		}
 	}
-	mutex_unlock(&ice->gpio_mutex);
 	return change;
 }
 
@@ -669,10 +621,9 @@ static int wm_adc_mux_get(struct snd_kcontrol *kcontrol,
 	struct snd_ice1712 *ice = snd_kcontrol_chip(kcontrol);
 	int bit = kcontrol->private_value;
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	ucontrol->value.integer.value[0] =
 		(wm_get(ice, WM_ADC_MUX) & (1 << bit)) ? 1 : 0;
-	mutex_unlock(&ice->gpio_mutex);
 	return 0;
 }
 
@@ -684,7 +635,7 @@ static int wm_adc_mux_put(struct snd_kcontrol *kcontrol,
 	unsigned short oval, nval;
 	int change;
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	nval = oval = wm_get(ice, WM_ADC_MUX);
 	if (ucontrol->value.integer.value[0])
 		nval |= (1 << bit);
@@ -694,7 +645,6 @@ static int wm_adc_mux_put(struct snd_kcontrol *kcontrol,
 	if (change) {
 		wm_put(ice, WM_ADC_MUX, nval);
 	}
-	mutex_unlock(&ice->gpio_mutex);
 	return 0;
 }
 
@@ -708,10 +658,9 @@ static int wm_bypass_get(struct snd_kcontrol *kcontrol,
 {
 	struct snd_ice1712 *ice = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	ucontrol->value.integer.value[0] =
 		(wm_get(ice, WM_OUT_MUX) & 0x04) ? 1 : 0;
-	mutex_unlock(&ice->gpio_mutex);
 	return 0;
 }
 
@@ -722,7 +671,7 @@ static int wm_bypass_put(struct snd_kcontrol *kcontrol,
 	unsigned short val, oval;
 	int change = 0;
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	val = oval = wm_get(ice, WM_OUT_MUX);
 	if (ucontrol->value.integer.value[0])
 		val |= 0x04;
@@ -732,7 +681,6 @@ static int wm_bypass_put(struct snd_kcontrol *kcontrol,
 		wm_put(ice, WM_OUT_MUX, val);
 		change = 1;
 	}
-	mutex_unlock(&ice->gpio_mutex);
 	return change;
 }
 
@@ -746,10 +694,9 @@ static int wm_chswap_get(struct snd_kcontrol *kcontrol,
 {
 	struct snd_ice1712 *ice = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	ucontrol->value.integer.value[0] =
 			(wm_get(ice, WM_DAC_CTRL1) & 0xf0) != 0x90;
-	mutex_unlock(&ice->gpio_mutex);
 	return 0;
 }
 
@@ -760,7 +707,7 @@ static int wm_chswap_put(struct snd_kcontrol *kcontrol,
 	unsigned short val, oval;
 	int change = 0;
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	oval = wm_get(ice, WM_DAC_CTRL1);
 	val = oval & 0x0f;
 	if (ucontrol->value.integer.value[0])
@@ -772,7 +719,6 @@ static int wm_chswap_put(struct snd_kcontrol *kcontrol,
 		wm_put_nocache(ice, WM_DAC_CTRL1, val);
 		change = 1;
 	}
-	mutex_unlock(&ice->gpio_mutex);
 	return change;
 }
 
@@ -781,7 +727,7 @@ static int wm_chswap_put(struct snd_kcontrol *kcontrol,
  * mixers
  */
 
-static struct snd_kcontrol_new prodigy_hifi_controls[] = {
+static const struct snd_kcontrol_new prodigy_hifi_controls[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.access = (SNDRV_CTL_ELEM_ACCESS_READWRITE |
@@ -904,14 +850,14 @@ static void wm_proc_regs_write(struct snd_info_entry *entry,
 	struct snd_ice1712 *ice = entry->private_data;
 	char line[64];
 	unsigned int reg, val;
-	mutex_lock(&ice->gpio_mutex);
+
+	guard(mutex)(&ice->gpio_mutex);
 	while (!snd_info_get_line(buffer, line, sizeof(line))) {
 		if (sscanf(line, "%x %x", &reg, &val) != 2)
 			continue;
 		if (reg <= 0x17 && val <= 0xffff)
 			wm_put(ice, reg, val);
 	}
-	mutex_unlock(&ice->gpio_mutex);
 }
 
 static void wm_proc_regs_read(struct snd_info_entry *entry,
@@ -920,22 +866,17 @@ static void wm_proc_regs_read(struct snd_info_entry *entry,
 	struct snd_ice1712 *ice = entry->private_data;
 	int reg, val;
 
-	mutex_lock(&ice->gpio_mutex);
+	guard(mutex)(&ice->gpio_mutex);
 	for (reg = 0; reg <= 0x17; reg++) {
 		val = wm_get(ice, reg);
 		snd_iprintf(buffer, "%02x = %04x\n", reg, val);
 	}
-	mutex_unlock(&ice->gpio_mutex);
 }
 
 static void wm_proc_init(struct snd_ice1712 *ice)
 {
-	struct snd_info_entry *entry;
-	if (!snd_card_proc_new(ice->card, "wm_codec", &entry)) {
-		snd_info_set_text_ops(entry, ice, wm_proc_regs_read);
-		entry->mode |= S_IWUSR;
-		entry->c.text.write = wm_proc_regs_write;
-	}
+	snd_card_rw_proc_new(ice->card, "wm_codec", ice, wm_proc_regs_read,
+			     wm_proc_regs_write);
 }
 
 static int prodigy_hifi_add_controls(struct snd_ice1712 *ice)
@@ -972,13 +913,32 @@ static int prodigy_hd2_add_controls(struct snd_ice1712 *ice)
 	return 0;
 }
 
-
-/*
- * initialize the chip
- */
-static int prodigy_hifi_init(struct snd_ice1712 *ice)
+static void wm8766_init(struct snd_ice1712 *ice)
 {
-	static unsigned short wm_inits[] = {
+	static const unsigned short wm8766_inits[] = {
+		WM8766_RESET,	   0x0000,
+		WM8766_DAC_CTRL,	0x0120,
+		WM8766_INT_CTRL,	0x0022, /* I2S Normal Mode, 24 bit */
+		WM8766_DAC_CTRL2,       0x0001,
+		WM8766_DAC_CTRL3,       0x0080,
+		WM8766_LDA1,	    0x0100,
+		WM8766_LDA2,	    0x0100,
+		WM8766_LDA3,	    0x0100,
+		WM8766_RDA1,	    0x0100,
+		WM8766_RDA2,	    0x0100,
+		WM8766_RDA3,	    0x0100,
+		WM8766_MUTE1,	   0x0000,
+		WM8766_MUTE2,	   0x0000,
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(wm8766_inits); i += 2)
+		wm8766_spi_write(ice, wm8766_inits[i], wm8766_inits[i + 1]);
+}
+
+static void wm8776_init(struct snd_ice1712 *ice)
+{
+	static const unsigned short wm8776_inits[] = {
 		/* These come first to reduce init pop noise */
 		WM_ADC_MUX,	0x0003,	/* ADC mute */
 		/* 0x00c0 replaced by 0x0003 */
@@ -989,7 +949,75 @@ static int prodigy_hifi_init(struct snd_ice1712 *ice)
 		WM_POWERDOWN,	0x0008,	/* All power-up except HP */
 		WM_RESET,	0x0000,	/* reset */
 	};
-	static unsigned short wm_inits2[] = {
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(wm8776_inits); i += 2)
+		wm_put(ice, wm8776_inits[i], wm8776_inits[i + 1]);
+}
+
+#ifdef CONFIG_PM_SLEEP
+static int prodigy_hifi_resume(struct snd_ice1712 *ice)
+{
+	static const unsigned short wm8776_reinit_registers[] = {
+		WM_MASTER_CTRL,
+		WM_DAC_INT,
+		WM_ADC_INT,
+		WM_OUT_MUX,
+		WM_HP_ATTEN_L,
+		WM_HP_ATTEN_R,
+		WM_PHASE_SWAP,
+		WM_DAC_CTRL2,
+		WM_ADC_ATTEN_L,
+		WM_ADC_ATTEN_R,
+		WM_ALC_CTRL1,
+		WM_ALC_CTRL2,
+		WM_ALC_CTRL3,
+		WM_NOISE_GATE,
+		WM_ADC_MUX,
+		/* no DAC attenuation here */
+	};
+	struct prodigy_hifi_spec *spec = ice->spec;
+	int i, ch;
+
+	guard(mutex)(&ice->gpio_mutex);
+
+	/* reinitialize WM8776 and re-apply old register values */
+	wm8776_init(ice);
+	schedule_timeout_uninterruptible(1);
+	for (i = 0; i < ARRAY_SIZE(wm8776_reinit_registers); i++)
+		wm_put(ice, wm8776_reinit_registers[i],
+		       wm_get(ice, wm8776_reinit_registers[i]));
+
+	/* reinitialize WM8766 and re-apply volumes for all DACs */
+	wm8766_init(ice);
+	for (ch = 0; ch < 2; ch++) {
+		wm_set_vol(ice, WM_DAC_ATTEN_L + ch,
+			   spec->vol[2 + ch], spec->master[ch]);
+
+		wm8766_set_vol(ice, WM8766_LDA1 + ch,
+			       spec->vol[0 + ch], spec->master[ch]);
+
+		wm8766_set_vol(ice, WM8766_LDA2 + ch,
+			       spec->vol[4 + ch], spec->master[ch]);
+
+		wm8766_set_vol(ice, WM8766_LDA3 + ch,
+			       spec->vol[6 + ch], spec->master[ch]);
+	}
+
+	/* unmute WM8776 DAC */
+	wm_put(ice, WM_DAC_MUTE, 0x00);
+	wm_put(ice, WM_DAC_CTRL1, 0x90);
+
+	return 0;
+}
+#endif
+
+/*
+ * initialize the chip
+ */
+static int prodigy_hifi_init(struct snd_ice1712 *ice)
+{
+	static const unsigned short wm8776_defaults[] = {
 		WM_MASTER_CTRL,  0x0022, /* 256fs, slave mode */
 		WM_DAC_INT,	0x0022,	/* I2S, normal polarity, 24bit */
 		WM_ADC_INT,	0x0022,	/* I2S, normal polarity, 24bit */
@@ -1017,22 +1045,6 @@ static int prodigy_hifi_init(struct snd_ice1712 *ice)
 		WM_DAC_MUTE,	0x0000,	/* DAC unmute */
 		WM_ADC_MUX,	0x0003,	/* ADC unmute, both CD/Line On */
 	};
-	static unsigned short wm8766_inits[] = {
-		WM8766_RESET,	   0x0000,
-		WM8766_DAC_CTRL,	0x0120,
-		WM8766_INT_CTRL,	0x0022, /* I2S Normal Mode, 24 bit */
-		WM8766_DAC_CTRL2,       0x0001,
-		WM8766_DAC_CTRL3,       0x0080,
-		WM8766_LDA1,	    0x0100,
-		WM8766_LDA2,	    0x0100,
-		WM8766_LDA3,	    0x0100,
-		WM8766_RDA1,	    0x0100,
-		WM8766_RDA2,	    0x0100,
-		WM8766_RDA3,	    0x0100,
-		WM8766_MUTE1,	   0x0000,
-		WM8766_MUTE2,	   0x0000,
-	};
-
 	struct prodigy_hifi_spec *spec;
 	unsigned int i;
 
@@ -1048,27 +1060,28 @@ static int prodigy_hifi_init(struct snd_ice1712 *ice)
 	ice->gpio.saved[0] = 0;
 	/* to remember the register values */
 
-	ice->akm = kzalloc(sizeof(struct snd_akm4xxx), GFP_KERNEL);
+	ice->akm = kzalloc_obj(struct snd_akm4xxx);
 	if (! ice->akm)
 		return -ENOMEM;
 	ice->akm_codecs = 1;
 
-	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kzalloc_obj(*spec);
 	if (!spec)
 		return -ENOMEM;
 	ice->spec = spec;
 
 	/* initialize WM8776 codec */
-	for (i = 0; i < ARRAY_SIZE(wm_inits); i += 2)
-		wm_put(ice, wm_inits[i], wm_inits[i+1]);
+	wm8776_init(ice);
 	schedule_timeout_uninterruptible(1);
-	for (i = 0; i < ARRAY_SIZE(wm_inits2); i += 2)
-		wm_put(ice, wm_inits2[i], wm_inits2[i+1]);
+	for (i = 0; i < ARRAY_SIZE(wm8776_defaults); i += 2)
+		wm_put(ice, wm8776_defaults[i], wm8776_defaults[i + 1]);
 
-	/* initialize WM8766 codec */
-	for (i = 0; i < ARRAY_SIZE(wm8766_inits); i += 2)
-		wm8766_spi_write(ice, wm8766_inits[i], wm8766_inits[i+1]);
+	wm8766_init(ice);
 
+#ifdef CONFIG_PM_SLEEP
+	ice->pm_resume = &prodigy_hifi_resume;
+	ice->pm_suspend_enabled = 1;
+#endif
 
 	return 0;
 }
@@ -1079,7 +1092,7 @@ static int prodigy_hifi_init(struct snd_ice1712 *ice)
  */
 static void ak4396_init(struct snd_ice1712 *ice)
 {
-	static unsigned short ak4396_inits[] = {
+	static const unsigned short ak4396_inits[] = {
 		AK4396_CTRL1,	   0x87,   /* I2S Normal Mode, 24 bit */
 		AK4396_CTRL2,	   0x02,
 		AK4396_CTRL3,	   0x00, 
@@ -1105,11 +1118,11 @@ static int prodigy_hd2_resume(struct snd_ice1712 *ice)
 	/* initialize ak4396 codec and restore previous mixer volumes */
 	struct prodigy_hifi_spec *spec = ice->spec;
 	int i;
-	mutex_lock(&ice->gpio_mutex);
+
+	guard(mutex)(&ice->gpio_mutex);
 	ak4396_init(ice);
 	for (i = 0; i < 2; i++)
 		ak4396_write(ice, AK4396_LCH_ATT + i, spec->vol[i] & 0xff);
-	mutex_unlock(&ice->gpio_mutex);
 	return 0;
 }
 #endif
@@ -1130,12 +1143,12 @@ static int prodigy_hd2_init(struct snd_ice1712 *ice)
 	ice->gpio.saved[0] = 0;
 	/* to remember the register values */
 
-	ice->akm = kzalloc(sizeof(struct snd_akm4xxx), GFP_KERNEL);
+	ice->akm = kzalloc_obj(struct snd_akm4xxx);
 	if (! ice->akm)
 		return -ENOMEM;
 	ice->akm_codecs = 1;
 
-	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
+	spec = kzalloc_obj(*spec);
 	if (!spec)
 		return -ENOMEM;
 	ice->spec = spec;
@@ -1151,7 +1164,7 @@ static int prodigy_hd2_init(struct snd_ice1712 *ice)
 }
 
 
-static unsigned char prodigy71hifi_eeprom[] = {
+static const unsigned char prodigy71hifi_eeprom[] = {
 	0x4b,   /* SYSCONF: clock 512, spdif-in/ADC, 4DACs */
 	0x80,   /* ACLINK: I2S */
 	0xfc,   /* I2S: vol, 96k, 24bit, 192k */
@@ -1167,7 +1180,7 @@ static unsigned char prodigy71hifi_eeprom[] = {
 	0x00,   /* GPIO_STATE2 */
 };
 
-static unsigned char prodigyhd2_eeprom[] = {
+static const unsigned char prodigyhd2_eeprom[] = {
 	0x4b,   /* SYSCONF: clock 512, spdif-in/ADC, 4DACs */
 	0x80,   /* ACLINK: I2S */
 	0xfc,   /* I2S: vol, 96k, 24bit, 192k */
@@ -1183,7 +1196,7 @@ static unsigned char prodigyhd2_eeprom[] = {
 	0x00,   /* GPIO_STATE2 */
 };
 
-static unsigned char fortissimo4_eeprom[] = {
+static const unsigned char fortissimo4_eeprom[] = {
 	0x43,   /* SYSCONF: clock 512, ADC, 4DACs */	
 	0x80,   /* ACLINK: I2S */
 	0xfc,   /* I2S: vol, 96k, 24bit, 192k */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Linker script for 64-bit vDSO.
  * We #include the file to define the layout details.
@@ -21,8 +22,6 @@ VERSION {
 		__vdso_clock_gettime;
 		gettimeofday;
 		__vdso_gettimeofday;
-		getcpu;
-		__vdso_getcpu;
 		time;
 		__vdso_time;
 	local: *;

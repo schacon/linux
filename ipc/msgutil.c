@@ -1,11 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * linux/ipc/msgutil.c
  * Copyright (C) 1999, 2004 Manfred Spraul
- *
- * This file is released under GNU General Public Licence version 2 or
- * (at your option) any later version.
- *
- * See the file COPYING for more details.
  */
 
 #include <linux/spinlock.h>
@@ -18,6 +14,8 @@
 #include <linux/utsname.h>
 #include <linux/proc_ns.h>
 #include <linux/uaccess.h>
+#include <linux/sched.h>
+#include <linux/nstree.h>
 
 #include "util.h"
 
@@ -29,30 +27,39 @@ DEFINE_SPINLOCK(mq_lock);
  * and not CONFIG_IPC_NS.
  */
 struct ipc_namespace init_ipc_ns = {
-	.count		= ATOMIC_INIT(1),
+	.ns = NS_COMMON_INIT(init_ipc_ns),
 	.user_ns = &init_user_ns,
-	.proc_inum = PROC_IPC_INIT_INO,
 };
-
-atomic_t nr_ipc_ns = ATOMIC_INIT(1);
 
 struct msg_msgseg {
 	struct msg_msgseg *next;
 	/* the next part of the message follows immediately */
 };
 
-#define DATALEN_MSG	(int)(PAGE_SIZE-sizeof(struct msg_msg))
-#define DATALEN_SEG	(int)(PAGE_SIZE-sizeof(struct msg_msgseg))
+#define DATALEN_MSG	((size_t)PAGE_SIZE-sizeof(struct msg_msg))
+#define DATALEN_SEG	((size_t)PAGE_SIZE-sizeof(struct msg_msgseg))
 
+static kmem_buckets *msg_buckets __ro_after_init;
 
-static struct msg_msg *alloc_msg(int len)
+static int __init init_msg_buckets(void)
+{
+	msg_buckets = kmem_buckets_create("msg_msg", SLAB_ACCOUNT,
+					  sizeof(struct msg_msg),
+					  DATALEN_MSG, NULL);
+
+	return 0;
+}
+subsys_initcall(init_msg_buckets);
+
+static struct msg_msg *alloc_msg(size_t len)
 {
 	struct msg_msg *msg;
 	struct msg_msgseg **pseg;
-	int alen;
+	size_t alen;
 
 	alen = min(len, DATALEN_MSG);
-	msg = kmalloc(sizeof(*msg) + alen, GFP_KERNEL);
+	msg = kmem_buckets_alloc(msg_buckets, sizeof(*msg) + alen,
+				 GFP_KERNEL_ACCOUNT);
 	if (msg == NULL)
 		return NULL;
 
@@ -63,8 +70,11 @@ static struct msg_msg *alloc_msg(int len)
 	pseg = &msg->next;
 	while (len > 0) {
 		struct msg_msgseg *seg;
+
+		cond_resched();
+
 		alen = min(len, DATALEN_SEG);
-		seg = kmalloc(sizeof(*seg) + alen, GFP_KERNEL);
+		seg = kmalloc(sizeof(*seg) + alen, GFP_KERNEL_ACCOUNT);
 		if (seg == NULL)
 			goto out_err;
 		*pseg = seg;
@@ -80,12 +90,12 @@ out_err:
 	return NULL;
 }
 
-struct msg_msg *load_msg(const void __user *src, int len)
+struct msg_msg *load_msg(const void __user *src, size_t len)
 {
 	struct msg_msg *msg;
 	struct msg_msgseg *seg;
 	int err = -EFAULT;
-	int alen;
+	size_t alen;
 
 	msg = alloc_msg(len);
 	if (msg == NULL)
@@ -117,10 +127,9 @@ out_err:
 struct msg_msg *copy_msg(struct msg_msg *src, struct msg_msg *dst)
 {
 	struct msg_msgseg *dst_pseg, *src_pseg;
-	int len = src->m_ts;
-	int alen;
+	size_t len = src->m_ts;
+	size_t alen;
 
-	BUG_ON(dst == NULL);
 	if (src->m_ts > dst->m_ts)
 		return ERR_PTR(-EINVAL);
 
@@ -147,9 +156,9 @@ struct msg_msg *copy_msg(struct msg_msg *src, struct msg_msg *dst)
 	return ERR_PTR(-ENOSYS);
 }
 #endif
-int store_msg(void __user *dest, struct msg_msg *msg, int len)
+int store_msg(void __user *dest, struct msg_msg *msg, size_t len)
 {
-	int alen;
+	size_t alen;
 	struct msg_msgseg *seg;
 
 	alen = min(len, DATALEN_MSG);
@@ -176,6 +185,8 @@ void free_msg(struct msg_msg *msg)
 	kfree(msg);
 	while (seg != NULL) {
 		struct msg_msgseg *tmp = seg->next;
+
+		cond_resched();
 		kfree(seg);
 		seg = tmp;
 	}

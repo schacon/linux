@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* Prom access routines for the sun3x */
 
 #include <linux/types.h>
@@ -9,13 +10,10 @@
 #include <linux/string.h>
 
 #include <asm/page.h>
-#include <asm/pgtable.h>
-#include <asm/bootinfo.h>
 #include <asm/setup.h>
 #include <asm/traps.h>
 #include <asm/sun3xprom.h>
 #include <asm/idprom.h>
-#include <asm/segment.h>
 #include <asm/sun3ints.h>
 #include <asm/openprom.h>
 #include <asm/machines.h>
@@ -32,7 +30,7 @@ struct linux_romvec *romvec;
 e_vector *sun3x_prom_vbr;
 
 /* Handle returning to the prom */
-void sun3x_halt(void)
+static void sun3x_halt(void)
 {
 	unsigned long flags;
 
@@ -107,9 +105,9 @@ void __init sun3x_prom_init(void)
 	idprom_init();
 
 	if (!((idprom->id_machtype & SM_ARCH_MASK) == SM_SUN3X)) {
-		printk("Warning: machine reports strange type %02x\n",
+		pr_warn("Machine reports strange type %02x\n",
 			idprom->id_machtype);
-		printk("Pretending it's a 3/80, but very afraid...\n");
+		pr_warn("Pretending it's a 3/80, but very afraid...\n");
 		idprom->id_machtype = SM_SUN3X | SM_3_80;
 	}
 

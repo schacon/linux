@@ -1,23 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of wl1251
  *
  * Copyright (c) 1998-2007 Texas Instruments Incorporated
  * Copyright (C) 2008 Nokia Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 
 #include <linux/kernel.h>
@@ -28,6 +14,7 @@
 #include "tx.h"
 #include "ps.h"
 #include "io.h"
+#include "event.h"
 
 static bool wl1251_tx_double_buffer_busy(struct wl1251 *wl, u32 data_out_count)
 {
@@ -89,8 +76,12 @@ static void wl1251_tx_control(struct tx_double_buffer_desc *tx_hdr,
 	/* 802.11 packets */
 	tx_hdr->control.packet_type = 0;
 
-	if (control->flags & IEEE80211_TX_CTL_NO_ACK)
+	/* Also disable retry and ACK policy for injected packets */
+	if ((control->flags & IEEE80211_TX_CTL_NO_ACK) ||
+	    (control->flags & IEEE80211_TX_CTL_INJECTED)) {
+		tx_hdr->control.rate_policy = 1;
 		tx_hdr->control.ack_policy = 1;
+	}
 
 	tx_hdr->control.tx_complete = 1;
 
@@ -156,8 +147,7 @@ static int wl1251_tx_fill_hdr(struct wl1251 *wl, struct sk_buff *skb,
 		return id;
 
 	fc = *(u16 *)skb->data;
-	tx_hdr = (struct tx_double_buffer_desc *) skb_push(skb,
-							   sizeof(*tx_hdr));
+	tx_hdr = skb_push(skb, sizeof(*tx_hdr));
 
 	tx_hdr->length = cpu_to_le16(skb->len - sizeof(*tx_hdr));
 	rate = ieee80211_get_tx_rate(wl->hw, control);
@@ -217,10 +207,8 @@ static int wl1251_tx_send_packet(struct wl1251 *wl, struct sk_buff *skb,
 			struct sk_buff *newskb = skb_copy_expand(skb, 0, 3,
 								 GFP_KERNEL);
 
-			if (unlikely(newskb == NULL)) {
-				wl1251_error("Can't allocate skb!");
+			if (unlikely(newskb == NULL))
 				return -EINVAL;
-			}
 
 			tx_hdr = (struct tx_double_buffer_desc *) newskb->data;
 
@@ -277,6 +265,26 @@ static void wl1251_tx_trigger(struct wl1251 *wl)
 		TX_STATUS_DATA_OUT_COUNT_MASK;
 }
 
+static void enable_tx_for_packet_injection(struct wl1251 *wl)
+{
+	int ret;
+
+	ret = wl1251_cmd_join(wl, BSS_TYPE_STA_BSS, wl->channel,
+			      wl->beacon_int, wl->dtim_period);
+	if (ret < 0) {
+		wl1251_warning("join failed");
+		return;
+	}
+
+	ret = wl1251_event_wait(wl, JOIN_EVENT_COMPLETE_ID, 100);
+	if (ret < 0) {
+		wl1251_warning("join timeout");
+		return;
+	}
+
+	wl->joined = true;
+}
+
 /* caller must hold wl->mutex */
 static int wl1251_tx_frame(struct wl1251 *wl, struct sk_buff *skb)
 {
@@ -287,6 +295,9 @@ static int wl1251_tx_frame(struct wl1251 *wl, struct sk_buff *skb)
 	info = IEEE80211_SKB_CB(skb);
 
 	if (info->control.hw_key) {
+		if (unlikely(wl->monitor_present))
+			return -EINVAL;
+
 		idx = info->control.hw_key->hw_key_idx;
 		if (unlikely(wl->default_key != idx)) {
 			ret = wl1251_acx_default_key(wl, idx);
@@ -294,6 +305,10 @@ static int wl1251_tx_frame(struct wl1251 *wl, struct sk_buff *skb)
 				return ret;
 		}
 	}
+
+	/* Enable tx path in monitor mode for packet injection */
+	if ((wl->vif == NULL) && !wl->joined)
+		enable_tx_for_packet_injection(wl);
 
 	ret = wl1251_tx_path_status(wl);
 	if (ret < 0)
@@ -327,8 +342,10 @@ void wl1251_tx_work(struct work_struct *work)
 	while ((skb = skb_dequeue(&wl->tx_queue))) {
 		if (!woken_up) {
 			ret = wl1251_ps_elp_wakeup(wl);
-			if (ret < 0)
+			if (ret < 0) {
+				skb_queue_head(&wl->tx_queue, skb);
 				goto out;
+			}
 			woken_up = true;
 		}
 
@@ -385,15 +402,18 @@ static void wl1251_tx_packet_cb(struct wl1251 *wl,
 	int hdrlen;
 	u8 *frame;
 
-	skb = wl->tx_frames[result->id];
-	if (skb == NULL) {
-		wl1251_error("SKB for packet %d is NULL", result->id);
+	if (unlikely(result->id >= ARRAY_SIZE(wl->tx_frames) ||
+		     wl->tx_frames[result->id] == NULL)) {
+		wl1251_error("invalid packet id %u", result->id);
 		return;
 	}
+
+	skb = wl->tx_frames[result->id];
 
 	info = IEEE80211_SKB_CB(skb);
 
 	if (!(info->flags & IEEE80211_TX_CTL_NO_ACK) &&
+	    !(info->flags & IEEE80211_TX_CTL_INJECTED) &&
 	    (result->status == TX_SUCCESS))
 		info->flags |= IEEE80211_TX_STAT_ACK;
 
@@ -418,7 +438,7 @@ static void wl1251_tx_packet_cb(struct wl1251 *wl,
 		     result->status, wl1251_tx_parse_status(result->status));
 
 
-	ieee80211_tx_status(wl->hw, skb);
+	ieee80211_tx_status_skb(wl->hw, skb);
 
 	wl->tx_frames[result->id] = NULL;
 }
@@ -427,19 +447,25 @@ static void wl1251_tx_packet_cb(struct wl1251 *wl,
 void wl1251_tx_complete(struct wl1251 *wl)
 {
 	int i, result_index, num_complete = 0, queue_len;
-	struct tx_result result[FW_TX_CMPLT_BLOCK_SIZE], *result_ptr;
+	struct tx_result *result, *result_ptr;
 	unsigned long flags;
 
 	if (unlikely(wl->state != WL1251_STATE_ON))
 		return;
 
+	result = kmalloc_objs(*result, FW_TX_CMPLT_BLOCK_SIZE);
+	if (!result) {
+		wl1251_error("can not allocate result buffer");
+		return;
+	}
+
 	/* First we read the result */
-	wl1251_mem_read(wl, wl->data_path->tx_complete_addr,
-			    result, sizeof(result));
+	wl1251_mem_read(wl, wl->data_path->tx_complete_addr, result,
+			FW_TX_CMPLT_BLOCK_SIZE * sizeof(*result));
 
 	result_index = wl->next_tx_complete;
 
-	for (i = 0; i < ARRAY_SIZE(result); i++) {
+	for (i = 0; i < FW_TX_CMPLT_BLOCK_SIZE; i++) {
 		result_ptr = &result[result_index];
 
 		if (result_ptr->done_1 == 1 &&
@@ -522,6 +548,7 @@ void wl1251_tx_complete(struct wl1251 *wl)
 
 	}
 
+	kfree(result);
 	wl->next_tx_complete = result_index;
 }
 
@@ -543,7 +570,7 @@ void wl1251_tx_flush(struct wl1251 *wl)
 		if (!(info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS))
 				continue;
 
-		ieee80211_tx_status(wl->hw, skb);
+		ieee80211_tx_status_skb(wl->hw, skb);
 	}
 
 	for (i = 0; i < FW_TX_CMPLT_BLOCK_SIZE; i++)
@@ -554,7 +581,7 @@ void wl1251_tx_flush(struct wl1251 *wl)
 			if (!(info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS))
 				continue;
 
-			ieee80211_tx_status(wl->hw, skb);
+			ieee80211_tx_status_skb(wl->hw, skb);
 			wl->tx_frames[i] = NULL;
 		}
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Minimalistic braille device kernel support.
  *
@@ -5,20 +6,6 @@
  * Pressing Insert switches to VC browsing.
  *
  *  Copyright (C) Samuel Thibault <samuel.thibault@ens-lyon.org>
- *
- * This program is free software ; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation ; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY ; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with the program ; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/kernel.h>
@@ -37,7 +24,6 @@
 
 MODULE_AUTHOR("samuel.thibault@ens-lyon.org");
 MODULE_DESCRIPTION("braille device");
-MODULE_LICENSE("GPL");
 
 /*
  * Braille device support part.
@@ -76,14 +62,50 @@ static void braille_write(u16 *buf)
 {
 	static u16 lastwrite[WIDTH];
 	unsigned char data[1 + 1 + 2*WIDTH + 2 + 1], csum = 0, *c;
+	struct nbcon_write_context wctxt = { };
+	unsigned long flags;
 	u16 out;
 	int i;
 
 	if (!braille_co)
 		return;
 
+	/*
+	 * Braille console is not registered in console_list. Instead, it
+	 * is integrated with VT and shows what appears on the graphical
+	 * console under console_lock(). From this POV it is a legacy
+	 * console. But it calls serial console driver which might be
+	 * converted to the NBCON API. It is similar to
+	 * nbcon_legacy_emit_next_record() except that we should try
+	 * harder to get the lock. Otherwise, the Braille device won't show
+	 * everything what is displayed on the terminal.
+	 *
+	 * In short, simulate the original locking using NBCON API.
+	 */
+	if (braille_co->flags & CON_NBCON) {
+		if (panic_on_this_cpu()) {
+			/*
+			 * This should be good enough in practice. Most/all
+			 * serial console drivers have the atomic callback.
+			 */
+			if (!braille_co->write_atomic)
+				return;
+
+			local_irq_save(flags);
+			/* NBCON API strictly requires the ownership. */
+			if (!nbcon_braille_try_acquire(braille_co, &wctxt)) {
+				local_irq_restore(flags);
+				return;
+			}
+		} else {
+			braille_co->device_lock(braille_co, &flags);
+			while (!nbcon_braille_try_acquire(braille_co, &wctxt))
+				cpu_relax();
+		}
+	}
+
 	if (!memcmp(lastwrite, buf, WIDTH * sizeof(*buf)))
-		return;
+		goto unlock_nbcon;
 	memcpy(lastwrite, buf, WIDTH * sizeof(*buf));
 
 #define SOH 1
@@ -116,22 +138,39 @@ static void braille_write(u16 *buf)
 	*c++ = csum;
 	*c++ = ETX;
 
-	braille_co->write(braille_co, data, c - data);
+	if (braille_co->flags & CON_NBCON) {
+		nbcon_write_context_set_buf(&wctxt, (char *)data, c - data);
+		if (panic_on_this_cpu())
+			braille_co->write_atomic(braille_co, &wctxt);
+		else
+			braille_co->write_thread(braille_co, &wctxt);
+	} else {
+		braille_co->write(braille_co, data, c - data);
+	}
+
+unlock_nbcon:
+	if (braille_co->flags & CON_NBCON) {
+		nbcon_braille_release(&wctxt);
+		if (panic_on_this_cpu())
+			local_irq_restore(flags);
+		else
+			braille_co->device_unlock(braille_co, flags);
+	}
 }
 
 /* Follow the VC cursor*/
 static void vc_follow_cursor(struct vc_data *vc)
 {
-	vc_x = vc->vc_x - (vc->vc_x % WIDTH);
-	vc_y = vc->vc_y;
-	lastvc_x = vc->vc_x;
-	lastvc_y = vc->vc_y;
+	vc_x = vc->state.x - (vc->state.x % WIDTH);
+	vc_y = vc->state.y;
+	lastvc_x = vc->state.x;
+	lastvc_y = vc->state.y;
 }
 
 /* Maybe the VC cursor moved, if so follow it */
 static void vc_maybe_cursor_moved(struct vc_data *vc)
 {
-	if (vc->vc_x != lastvc_x || vc->vc_y != lastvc_y)
+	if (vc->state.x != lastvc_x || vc->state.y != lastvc_y)
 		vc_follow_cursor(vc);
 }
 
@@ -144,7 +183,7 @@ static void vc_refresh(struct vc_data *vc)
 	for (i = 0; i < WIDTH; i++) {
 		u16 glyph = screen_glyph(vc,
 				2 * (vc_x + i) + vc_y * vc->vc_size_row);
-		buf[i] = inverse_translate(vc, glyph, 1);
+		buf[i] = inverse_translate(vc, glyph, true);
 	}
 	braille_write(buf);
 }
@@ -238,6 +277,7 @@ static int keyboard_notifier_call(struct notifier_block *blk,
 	case KBD_POST_KEYSYM:
 	{
 		unsigned char type = KTYP(param->value) - 0xf0;
+
 		if (type == KT_SPEC) {
 			unsigned char val = KVAL(param->value);
 			int on_off = -1;
@@ -259,6 +299,7 @@ static int keyboard_notifier_call(struct notifier_block *blk,
 				beep(440);
 		}
 	}
+		break;
 	case KBD_UNBOUND_KEYCODE:
 	case KBD_UNICODE:
 	case KBD_KEYSYM:
@@ -277,6 +318,7 @@ static int vt_notifier_call(struct notifier_block *blk,
 {
 	struct vt_notifier_param *param = _param;
 	struct vc_data *vc = param->vc;
+
 	switch (code) {
 	case VT_ALLOCATE:
 		break;
@@ -285,6 +327,7 @@ static int vt_notifier_call(struct notifier_block *blk,
 	case VT_WRITE:
 	{
 		unsigned char c = param->c;
+
 		if (vc->vc_num != fg_console)
 			break;
 		switch (c) {
@@ -303,7 +346,7 @@ static int vt_notifier_call(struct notifier_block *blk,
 			break;
 		case '\t':
 			c = ' ';
-			/* Fallthrough */
+			fallthrough;
 		default:
 			if (c < 32)
 				/* Ignore other control sequences */
@@ -359,6 +402,7 @@ int braille_register_console(struct console *console, int index,
 		char *console_options, char *braille_options)
 {
 	int ret;
+
 	if (!console_options)
 		/* Only support VisioBraille for now */
 		console_options = "57600o8";
@@ -374,7 +418,7 @@ int braille_register_console(struct console *console, int index,
 	braille_co = console;
 	register_keyboard_notifier(&keyboard_notifier_block);
 	register_vt_notifier(&vt_notifier_block);
-	return 0;
+	return 1;
 }
 
 int braille_unregister_console(struct console *console)
@@ -384,5 +428,5 @@ int braille_unregister_console(struct console *console)
 	unregister_keyboard_notifier(&keyboard_notifier_block);
 	unregister_vt_notifier(&vt_notifier_block);
 	braille_co = NULL;
-	return 0;
+	return 1;
 }

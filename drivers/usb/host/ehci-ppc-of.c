@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-1.0+
 /*
  * EHCI HCD (Host Controller Driver) for USB.
  *
@@ -16,7 +17,7 @@
 #include <linux/signal.h>
 
 #include <linux/of.h>
-#include <linux/of_platform.h>
+#include <linux/of_address.h>
 
 
 static const struct hc_driver ehci_ppc_of_hc_driver = {
@@ -28,7 +29,7 @@ static const struct hc_driver ehci_ppc_of_hc_driver = {
 	 * generic hardware linkage
 	 */
 	.irq			= ehci_irq,
-	.flags			= HCD_MEMORY | HCD_USB2,
+	.flags			= HCD_MEMORY | HCD_DMA | HCD_USB2 | HCD_BH,
 
 	/*
 	 * basic lifecycle operations
@@ -93,7 +94,9 @@ static int ehci_hcd_ppc_of_probe(struct platform_device *op)
 	struct device_node *dn = op->dev.of_node;
 	struct usb_hcd *hcd;
 	struct ehci_hcd	*ehci = NULL;
-	struct resource res;
+	struct resource *res;
+	struct resource ohci_res;
+	void __iomem *regs;
 	int irq;
 	int rv;
 
@@ -104,38 +107,30 @@ static int ehci_hcd_ppc_of_probe(struct platform_device *op)
 
 	dev_dbg(&op->dev, "initializing PPC-OF USB Controller\n");
 
-	rv = of_address_to_resource(dn, 0, &res);
-	if (rv)
-		return rv;
+	regs = devm_platform_get_and_ioremap_resource(op, 0, &res);
+	if (IS_ERR(regs))
+		return PTR_ERR(regs);
+
+	irq = platform_get_irq(op, 0);
+	if (irq	< 0)
+		return irq;
 
 	hcd = usb_create_hcd(&ehci_ppc_of_hc_driver, &op->dev, "PPC-OF USB");
 	if (!hcd)
 		return -ENOMEM;
 
-	hcd->rsrc_start = res.start;
-	hcd->rsrc_len = resource_size(&res);
-
-	irq = irq_of_parse_and_map(dn, 0);
-	if (irq == NO_IRQ) {
-		printk(KERN_ERR "%s: irq_of_parse_and_map failed\n", __FILE__);
-		rv = -EBUSY;
-		goto err_irq;
-	}
-
-	hcd->regs = devm_ioremap_resource(&op->dev, &res);
-	if (IS_ERR(hcd->regs)) {
-		rv = PTR_ERR(hcd->regs);
-		goto err_ioremap;
-	}
+	hcd->regs = regs;
+	hcd->rsrc_start = res->start;
+	hcd->rsrc_len = resource_size(res);
 
 	ehci = hcd_to_ehci(hcd);
 	np = of_find_compatible_node(NULL, NULL, "ibm,usb-ohci-440epx");
 	if (np != NULL) {
 		/* claim we really affected by usb23 erratum */
-		if (!of_address_to_resource(np, 0, &res))
+		if (!of_address_to_resource(np, 0, &ohci_res))
 			ehci->ohci_hcctrl_reg =
 				devm_ioremap(&op->dev,
-					     res.start + OHCI_HCCTRL_OFFSET,
+					     ohci_res.start + OHCI_HCCTRL_OFFSET,
 					     OHCI_HCCTRL_LEN);
 		else
 			pr_debug("%s: no ohci offset in fdt\n", __FILE__);
@@ -144,15 +139,16 @@ static int ehci_hcd_ppc_of_probe(struct platform_device *op)
 		} else {
 			ehci->has_amcc_usb23 = 1;
 		}
+		of_node_put(np);
 	}
 
-	if (of_get_property(dn, "big-endian", NULL)) {
+	if (of_property_read_bool(dn, "big-endian")) {
 		ehci->big_endian_mmio = 1;
 		ehci->big_endian_desc = 1;
 	}
-	if (of_get_property(dn, "big-endian-regs", NULL))
+	if (of_property_read_bool(dn, "big-endian-regs"))
 		ehci->big_endian_mmio = 1;
-	if (of_get_property(dn, "big-endian-desc", NULL))
+	if (of_property_read_bool(dn, "big-endian-desc"))
 		ehci->big_endian_desc = 1;
 
 	ehci->caps = hcd->regs;
@@ -165,34 +161,29 @@ static int ehci_hcd_ppc_of_probe(struct platform_device *op)
 
 	rv = usb_add_hcd(hcd, irq, 0);
 	if (rv)
-		goto err_ioremap;
+		goto err;
 
+	device_wakeup_enable(hcd->self.controller);
 	return 0;
 
-err_ioremap:
-	irq_dispose_mapping(irq);
-err_irq:
+err:
 	usb_put_hcd(hcd);
 
 	return rv;
 }
 
 
-static int ehci_hcd_ppc_of_remove(struct platform_device *op)
+static void ehci_hcd_ppc_of_remove(struct platform_device *op)
 {
-	struct usb_hcd *hcd = dev_get_drvdata(&op->dev);
+	struct usb_hcd *hcd = platform_get_drvdata(op);
 	struct ehci_hcd *ehci = hcd_to_ehci(hcd);
 
 	struct device_node *np;
 	struct resource res;
 
-	dev_set_drvdata(&op->dev, NULL);
-
 	dev_dbg(&op->dev, "stopping PPC-OF USB Controller\n");
 
 	usb_remove_hcd(hcd);
-
-	irq_dispose_mapping(hcd->irq);
 
 	/* use request_mem_region to test if the ohci driver is loaded.  if so
 	 * ensure the ohci core is operational.
@@ -212,17 +203,6 @@ static int ehci_hcd_ppc_of_remove(struct platform_device *op)
 		}
 	}
 	usb_put_hcd(hcd);
-
-	return 0;
-}
-
-
-static void ehci_hcd_ppc_of_shutdown(struct platform_device *op)
-{
-	struct usb_hcd *hcd = dev_get_drvdata(&op->dev);
-
-	if (hcd->driver->shutdown)
-		hcd->driver->shutdown(hcd);
 }
 
 
@@ -238,10 +218,9 @@ MODULE_DEVICE_TABLE(of, ehci_hcd_ppc_of_match);
 static struct platform_driver ehci_hcd_ppc_of_driver = {
 	.probe		= ehci_hcd_ppc_of_probe,
 	.remove		= ehci_hcd_ppc_of_remove,
-	.shutdown	= ehci_hcd_ppc_of_shutdown,
+	.shutdown	= usb_hcd_platform_shutdown,
 	.driver = {
 		.name = "ppc-of-ehci",
-		.owner = THIS_MODULE,
 		.of_match_table = ehci_hcd_ppc_of_match,
 	},
 };

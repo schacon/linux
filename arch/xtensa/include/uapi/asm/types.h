@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * include/asm-xtensa/types.h
  *
@@ -13,15 +14,16 @@
 
 #include <asm-generic/int-ll64.h>
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 # define __XTENSA_UL(x)		(x)
 # define __XTENSA_UL_CONST(x)	x
 #else
 # define __XTENSA_UL(x)		((unsigned long)(x))
-# define __XTENSA_UL_CONST(x)	x##UL
+# define ___XTENSA_UL_CONST(x)	x##UL
+# define __XTENSA_UL_CONST(x)	___XTENSA_UL_CONST(x)
 #endif
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #endif
 

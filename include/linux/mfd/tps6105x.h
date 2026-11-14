@@ -1,15 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2011 ST-Ericsson SA
  * Written on behalf of Linaro for ST-Ericsson
  *
  * Author: Linus Walleij <linus.walleij@linaro.org>
- *
- * License terms: GNU General Public License (GPL) version 2
  */
 #ifndef MFD_TPS6105X_H
 #define MFD_TPS6105X_H
 
 #include <linux/i2c.h>
+#include <linux/regmap.h>
 #include <linux/regulator/machine.h>
 
 /*
@@ -53,7 +53,7 @@
 /**
  * enum tps6105x_mode - desired mode for the TPS6105x
  * @TPS6105X_MODE_SHUTDOWN: this instance is inactive, not used for anything
- * @TPS61905X_MODE_TORCH: this instance is used as a LED, usually a while
+ * @TPS6105X_MODE_TORCH: this instance is used as a LED, usually a while
  *	LED, for example as backlight or flashlight. If this is set, the
  *	TPS6105X will register to the LED framework
  * @TPS6105X_MODE_TORCH_FLASH: this instance is used as a flashgun, usually
@@ -82,20 +82,16 @@ struct tps6105x_platform_data {
 
 /**
  * struct tps6105x - state holder for the TPS6105x drivers
- * @mutex: mutex to serialize I2C accesses
- * @i2c_client: corresponding I2C client
+ * @pdata: associated platform data
+ * @client: corresponding I2C client
  * @regulator: regulator device if used in voltage mode
+ * @regmap: used for i2c communcation on accessing registers
  */
 struct tps6105x {
 	struct tps6105x_platform_data *pdata;
-	struct mutex		lock;
 	struct i2c_client	*client;
 	struct regulator_dev	*regulator;
+	struct regmap		*regmap;
 };
-
-extern int tps6105x_set(struct tps6105x *tps6105x, u8 reg, u8 value);
-extern int tps6105x_get(struct tps6105x *tps6105x, u8 reg, u8 *buf);
-extern int tps6105x_mask_and_set(struct tps6105x *tps6105x, u8 reg,
-				 u8 bitmask, u8 bitvalues);
 
 #endif

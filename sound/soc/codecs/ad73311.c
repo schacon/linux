@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ad73311.c  --  ALSA Soc AD73311 codec support
  *
- * Copyright:	Analog Device Inc.
+ * Copyright:	Analog Devices Inc.
  * Author:	Cliff Cai <cliff.cai@analog.com>
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
  */
 
 #include <linux/init.h>
@@ -22,6 +18,21 @@
 #include <sound/soc.h>
 
 #include "ad73311.h"
+
+static const struct snd_soc_dapm_widget ad73311_dapm_widgets[] = {
+SND_SOC_DAPM_INPUT("VINP"),
+SND_SOC_DAPM_INPUT("VINN"),
+SND_SOC_DAPM_OUTPUT("VOUTN"),
+SND_SOC_DAPM_OUTPUT("VOUTP"),
+};
+
+static const struct snd_soc_dapm_route ad73311_dapm_routes[] = {
+	{ "Capture", NULL, "VINP" },
+	{ "Capture", NULL, "VINN" },
+
+	{ "VOUTN", NULL, "Playback" },
+	{ "VOUTP", NULL, "Playback" },
+};
 
 static struct snd_soc_dai_driver ad73311_dai = {
 	.name = "ad73311-hifi",
@@ -39,28 +50,28 @@ static struct snd_soc_dai_driver ad73311_dai = {
 		.formats = SNDRV_PCM_FMTBIT_S16_LE, },
 };
 
-static struct snd_soc_codec_driver soc_codec_dev_ad73311;
+static const struct snd_soc_component_driver soc_component_dev_ad73311 = {
+	.dapm_widgets		= ad73311_dapm_widgets,
+	.num_dapm_widgets	= ARRAY_SIZE(ad73311_dapm_widgets),
+	.dapm_routes		= ad73311_dapm_routes,
+	.num_dapm_routes	= ARRAY_SIZE(ad73311_dapm_routes),
+	.idle_bias_on		= 1,
+	.use_pmdown_time	= 1,
+	.endianness		= 1,
+};
 
 static int ad73311_probe(struct platform_device *pdev)
 {
-	return snd_soc_register_codec(&pdev->dev,
-			&soc_codec_dev_ad73311, &ad73311_dai, 1);
-}
-
-static int ad73311_remove(struct platform_device *pdev)
-{
-	snd_soc_unregister_codec(&pdev->dev);
-	return 0;
+	return devm_snd_soc_register_component(&pdev->dev,
+			&soc_component_dev_ad73311, &ad73311_dai, 1);
 }
 
 static struct platform_driver ad73311_codec_driver = {
 	.driver = {
 			.name = "ad73311",
-			.owner = THIS_MODULE,
 	},
 
 	.probe = ad73311_probe,
-	.remove = ad73311_remove,
 };
 
 module_platform_driver(ad73311_codec_driver);

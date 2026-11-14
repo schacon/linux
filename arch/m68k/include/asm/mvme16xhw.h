@@ -1,24 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _M68K_MVME16xHW_H_
 #define _M68K_MVME16xHW_H_
 
 #include <asm/irq.h>
-
-/* Board ID data structure - pointer to this retrieved from Bug by head.S */
-
-/* Note, bytes 12 and 13 are board no in BCD (0162,0166,0167,0177,etc) */
-
-extern long mvme_bdid_ptr;
-
-typedef struct {
-	char	bdid[4];
-	u_char	rev, mth, day, yr;
-	u_short	size, reserved;
-	u_short	brdno;
-	char brdsuffix[2];
-	u_long	options;
-	u_short	clun, dlun, ctype, dnum;
-	u_long	option2;
-} t_bdid, *p_bdid;
 
 
 typedef struct {
@@ -40,23 +24,7 @@ typedef struct {
 
 #define mvmelp   ((*(volatile MVMElpPtr)(MVME_LPR_BASE)))
 
-typedef struct {
-	unsigned char
-		ctrl,
-		bcd_sec,
-		bcd_min,
-		bcd_hr,
-		bcd_dow,
-		bcd_dom,
-		bcd_mth,
-		bcd_year;
-} MK48T08_t, *MK48T08ptr_t;
-
-#define RTC_WRITE	0x80
-#define RTC_READ	0x40
-#define RTC_STOP	0x20
-
-#define MVME_RTC_BASE	0xfffc1ff8
+#define MVME_RTC_BASE	0xfffc0000
 
 #define MVME_I596_BASE	0xfff46000
 

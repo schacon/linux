@@ -32,6 +32,8 @@
  */
 
 #include <linux/slab.h>
+#include <rdma/ib_user_verbs.h>
+#include <rdma/iter.h>
 
 #include "mlx4_ib.h"
 
@@ -59,7 +61,7 @@ struct ib_mr *mlx4_ib_get_dma_mr(struct ib_pd *pd, int acc)
 	struct mlx4_ib_mr *mr;
 	int err;
 
-	mr = kmalloc(sizeof *mr, GFP_KERNEL);
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 
@@ -89,50 +91,56 @@ err_free:
 int mlx4_ib_umem_write_mtt(struct mlx4_ib_dev *dev, struct mlx4_mtt *mtt,
 			   struct ib_umem *umem)
 {
-	u64 *pages;
-	struct ib_umem_chunk *chunk;
-	int i, j, k;
-	int n;
-	int len;
-	int err = 0;
+	struct ib_block_iter biter;
+	int err, i = 0;
+	u64 addr;
 
-	pages = (u64 *) __get_free_page(GFP_KERNEL);
-	if (!pages)
-		return -ENOMEM;
+	rdma_umem_for_each_dma_block(umem, &biter, BIT(mtt->page_shift)) {
+		addr = rdma_block_iter_dma_address(&biter);
+		err = mlx4_write_mtt(dev->dev, mtt, i++, 1, &addr);
+		if (err)
+			return err;
+	}
+	return 0;
+}
 
-	i = n = 0;
+static struct ib_umem *mlx4_get_umem_mr(struct ib_device *device, u64 start,
+					u64 length, int access_flags)
+{
+	/*
+	 * Force registering the memory as writable if the underlying pages
+	 * are writable.  This is so rereg can change the access permissions
+	 * from readable to writable without having to run through ib_umem_get_va
+	 * again
+	 */
+	if (!ib_access_writable(access_flags)) {
+		unsigned long untagged_start = untagged_addr(start);
+		struct vm_area_struct *vma;
 
-	list_for_each_entry(chunk, &umem->chunk_list, list)
-		for (j = 0; j < chunk->nmap; ++j) {
-			len = sg_dma_len(&chunk->page_list[j]) >> mtt->page_shift;
-			for (k = 0; k < len; ++k) {
-				pages[i++] = sg_dma_address(&chunk->page_list[j]) +
-					umem->page_size * k;
-				/*
-				 * Be friendly to mlx4_write_mtt() and
-				 * pass it chunks of appropriate size.
-				 */
-				if (i == PAGE_SIZE / sizeof (u64)) {
-					err = mlx4_write_mtt(dev->dev, mtt, n,
-							     i, pages);
-					if (err)
-						goto out;
-					n += i;
-					i = 0;
-				}
-			}
+		mmap_read_lock(current->mm);
+		/*
+		 * FIXME: Ideally this would iterate over all the vmas that
+		 * cover the memory, but for now it requires a single vma to
+		 * entirely cover the MR to support RO mappings.
+		 */
+		vma = find_vma(current->mm, untagged_start);
+		if (vma && vma->vm_end >= untagged_start + length &&
+		    vma->vm_start <= untagged_start) {
+			if (vma->vm_flags & VM_WRITE)
+				access_flags |= IB_ACCESS_LOCAL_WRITE;
+		} else {
+			access_flags |= IB_ACCESS_LOCAL_WRITE;
 		}
 
-	if (i)
-		err = mlx4_write_mtt(dev->dev, mtt, n, i, pages);
+		mmap_read_unlock(current->mm);
+	}
 
-out:
-	free_page((unsigned long) pages);
-	return err;
+	return ib_umem_get_va(device, start, length, access_flags);
 }
 
 struct ib_mr *mlx4_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 				  u64 virt_addr, int access_flags,
+				  struct ib_dmah *dmah,
 				  struct ib_udata *udata)
 {
 	struct mlx4_ib_dev *dev = to_mdev(pd->device);
@@ -141,19 +149,24 @@ struct ib_mr *mlx4_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	int err;
 	int n;
 
-	mr = kmalloc(sizeof *mr, GFP_KERNEL);
+	if (dmah)
+		return ERR_PTR(-EOPNOTSUPP);
+
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 
-	mr->umem = ib_umem_get(pd->uobject->context, start, length,
-			       access_flags, 0);
+	mr->umem = mlx4_get_umem_mr(pd->device, start, length, access_flags);
 	if (IS_ERR(mr->umem)) {
 		err = PTR_ERR(mr->umem);
 		goto err_free;
 	}
 
-	n = ib_umem_page_count(mr->umem);
-	shift = ilog2(mr->umem->page_size);
+	shift = mlx4_ib_umem_calc_optimal_mtt_size(mr->umem, start, &n);
+	if (shift < 0) {
+		err = shift;
+		goto err_umem;
+	}
 
 	err = mlx4_mr_alloc(dev->dev, to_mpd(pd)->pdn, virt_addr, length,
 			    convert_access(access_flags), n, shift, &mr->mmr);
@@ -168,7 +181,9 @@ struct ib_mr *mlx4_ib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	if (err)
 		goto err_mr;
 
+	mr->access_flags = access_flags;
 	mr->ibmr.rkey = mr->ibmr.lkey = mr->mmr.key;
+	mr->ibmr.page_size = 1U << shift;
 
 	return &mr->ibmr;
 
@@ -184,10 +199,158 @@ err_free:
 	return ERR_PTR(err);
 }
 
-int mlx4_ib_dereg_mr(struct ib_mr *ibmr)
+struct ib_mr *mlx4_ib_rereg_user_mr(struct ib_mr *mr, int flags, u64 start,
+				    u64 length, u64 virt_addr,
+				    int mr_access_flags, struct ib_pd *pd,
+				    struct ib_udata *udata)
+{
+	struct mlx4_ib_dev *dev = to_mdev(mr->device);
+	struct mlx4_ib_mr *mmr = to_mmr(mr);
+	struct mlx4_mpt_entry *mpt_entry;
+	struct mlx4_mpt_entry **pmpt_entry = &mpt_entry;
+	int err;
+
+	err = ib_umem_check_rereg(mmr->umem, flags, mr_access_flags);
+	if (err)
+		return ERR_PTR(err);
+
+	/* Since we synchronize this call and mlx4_ib_dereg_mr via uverbs,
+	 * we assume that the calls can't run concurrently. Otherwise, a
+	 * race exists.
+	 */
+	err =  mlx4_mr_hw_get_mpt(dev->dev, &mmr->mmr, &pmpt_entry);
+	if (err)
+		return ERR_PTR(err);
+
+	if (flags & IB_MR_REREG_PD) {
+		err = mlx4_mr_hw_change_pd(dev->dev, *pmpt_entry,
+					   to_mpd(pd)->pdn);
+
+		if (err)
+			goto release_mpt_entry;
+	}
+
+	if (flags & IB_MR_REREG_ACCESS) {
+		if (ib_access_writable(mr_access_flags) &&
+		    !mmr->umem->writable) {
+			err = -EPERM;
+			goto release_mpt_entry;
+		}
+
+		err = mlx4_mr_hw_change_access(dev->dev, *pmpt_entry,
+					       convert_access(mr_access_flags));
+
+		if (err)
+			goto release_mpt_entry;
+	} else {
+		mr_access_flags = mmr->access_flags;
+	}
+
+	if (flags & IB_MR_REREG_TRANS) {
+		int shift;
+		int n;
+
+		mlx4_mr_rereg_mem_cleanup(dev->dev, &mmr->mmr);
+		ib_umem_release(mmr->umem);
+		mmr->umem = mlx4_get_umem_mr(mr->device, start, length,
+					     mr_access_flags);
+		if (IS_ERR(mmr->umem)) {
+			err = PTR_ERR(mmr->umem);
+			/* Prevent mlx4_ib_dereg_mr from free'ing invalid pointer */
+			mmr->umem = NULL;
+			goto release_mpt_entry;
+		}
+		n = ib_umem_num_dma_blocks(mmr->umem, PAGE_SIZE);
+		shift = PAGE_SHIFT;
+
+		err = mlx4_mr_rereg_mem_write(dev->dev, &mmr->mmr,
+					      virt_addr, length, n, shift,
+					      *pmpt_entry);
+		if (err) {
+			ib_umem_release(mmr->umem);
+			goto release_mpt_entry;
+		}
+		mmr->mmr.iova       = virt_addr;
+		mmr->mmr.size       = length;
+
+		err = mlx4_ib_umem_write_mtt(dev, &mmr->mmr.mtt, mmr->umem);
+		if (err) {
+			mlx4_mr_rereg_mem_cleanup(dev->dev, &mmr->mmr);
+			ib_umem_release(mmr->umem);
+			goto release_mpt_entry;
+		}
+	}
+
+	/* If we couldn't transfer the MR to the HCA, just remember to
+	 * return a failure. But dereg_mr will free the resources.
+	 */
+	err = mlx4_mr_hw_write_mpt(dev->dev, &mmr->mmr, pmpt_entry);
+	if (!err && flags & IB_MR_REREG_ACCESS) {
+		mmr->access_flags = mr_access_flags;
+		mmr->mmr.access = convert_access(mr_access_flags);
+	}
+
+release_mpt_entry:
+	mlx4_mr_hw_put_mpt(dev->dev, pmpt_entry);
+	if (err)
+		return ERR_PTR(err);
+	return NULL;
+}
+
+static int
+mlx4_alloc_priv_pages(struct ib_device *device,
+		      struct mlx4_ib_mr *mr,
+		      int max_pages)
+{
+	int ret;
+
+	/* Ensure that size is aligned to DMA cacheline
+	 * requirements.
+	 * max_pages is limited to MLX4_MAX_FAST_REG_PAGES
+	 * so page_map_size will never cross PAGE_SIZE.
+	 */
+	mr->page_map_size = roundup(max_pages * sizeof(u64),
+				    MLX4_MR_PAGES_ALIGN);
+
+	/* Prevent cross page boundary allocation. */
+	mr->pages = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!mr->pages)
+		return -ENOMEM;
+
+	mr->page_map = dma_map_single(device->dev.parent, mr->pages,
+				      mr->page_map_size, DMA_TO_DEVICE);
+
+	if (dma_mapping_error(device->dev.parent, mr->page_map)) {
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	return 0;
+
+err:
+	kfree(mr->pages);
+	return ret;
+}
+
+static void
+mlx4_free_priv_pages(struct mlx4_ib_mr *mr)
+{
+	if (mr->pages) {
+		struct ib_device *device = mr->ibmr.device;
+
+		dma_unmap_single(device->dev.parent, mr->page_map,
+				 mr->page_map_size, DMA_TO_DEVICE);
+		kfree(mr->pages);
+		mr->pages = NULL;
+	}
+}
+
+int mlx4_ib_dereg_mr(struct ib_mr *ibmr, struct ib_udata *udata)
 {
 	struct mlx4_ib_mr *mr = to_mmr(ibmr);
 	int ret;
+
+	mlx4_free_priv_pages(mr);
 
 	ret = mlx4_mr_free(to_mdev(ibmr->device)->dev, &mr->mmr);
 	if (ret)
@@ -199,58 +362,27 @@ int mlx4_ib_dereg_mr(struct ib_mr *ibmr)
 	return 0;
 }
 
-struct ib_mw *mlx4_ib_alloc_mw(struct ib_pd *pd, enum ib_mw_type type)
+int mlx4_ib_alloc_mw(struct ib_mw *ibmw, struct ib_udata *udata)
 {
-	struct mlx4_ib_dev *dev = to_mdev(pd->device);
-	struct mlx4_ib_mw *mw;
+	struct mlx4_ib_dev *dev = to_mdev(ibmw->device);
+	struct mlx4_ib_mw *mw = to_mmw(ibmw);
 	int err;
 
-	mw = kmalloc(sizeof(*mw), GFP_KERNEL);
-	if (!mw)
-		return ERR_PTR(-ENOMEM);
-
-	err = mlx4_mw_alloc(dev->dev, to_mpd(pd)->pdn,
-			    to_mlx4_type(type), &mw->mmw);
+	err = mlx4_mw_alloc(dev->dev, to_mpd(ibmw->pd)->pdn,
+			    to_mlx4_type(ibmw->type), &mw->mmw);
 	if (err)
-		goto err_free;
+		return err;
 
 	err = mlx4_mw_enable(dev->dev, &mw->mmw);
 	if (err)
 		goto err_mw;
 
-	mw->ibmw.rkey = mw->mmw.key;
-
-	return &mw->ibmw;
+	ibmw->rkey = mw->mmw.key;
+	return 0;
 
 err_mw:
 	mlx4_mw_free(dev->dev, &mw->mmw);
-
-err_free:
-	kfree(mw);
-
-	return ERR_PTR(err);
-}
-
-int mlx4_ib_bind_mw(struct ib_qp *qp, struct ib_mw *mw,
-		    struct ib_mw_bind *mw_bind)
-{
-	struct ib_send_wr  wr;
-	struct ib_send_wr *bad_wr;
-	int ret;
-
-	memset(&wr, 0, sizeof(wr));
-	wr.opcode               = IB_WR_BIND_MW;
-	wr.wr_id                = mw_bind->wr_id;
-	wr.send_flags           = mw_bind->send_flags;
-	wr.wr.bind_mw.mw        = mw;
-	wr.wr.bind_mw.bind_info = mw_bind->bind_info;
-	wr.wr.bind_mw.rkey      = ib_inc_rkey(mw->rkey);
-
-	ret = mlx4_ib_post_send(qp, &wr, &bad_wr);
-	if (!ret)
-		mw->rkey = wr.wr.bind_mw.rkey;
-
-	return ret;
+	return err;
 }
 
 int mlx4_ib_dealloc_mw(struct ib_mw *ibmw)
@@ -258,179 +390,80 @@ int mlx4_ib_dealloc_mw(struct ib_mw *ibmw)
 	struct mlx4_ib_mw *mw = to_mmw(ibmw);
 
 	mlx4_mw_free(to_mdev(ibmw->device)->dev, &mw->mmw);
-	kfree(mw);
-
 	return 0;
 }
 
-struct ib_mr *mlx4_ib_alloc_fast_reg_mr(struct ib_pd *pd,
-					int max_page_list_len)
+struct ib_mr *mlx4_ib_alloc_mr(struct ib_pd *pd, enum ib_mr_type mr_type,
+			       u32 max_num_sg)
 {
 	struct mlx4_ib_dev *dev = to_mdev(pd->device);
 	struct mlx4_ib_mr *mr;
 	int err;
 
-	mr = kmalloc(sizeof *mr, GFP_KERNEL);
+	if (mr_type != IB_MR_TYPE_MEM_REG ||
+	    max_num_sg > MLX4_MAX_FAST_REG_PAGES)
+		return ERR_PTR(-EINVAL);
+
+	mr = kzalloc_obj(*mr);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 
 	err = mlx4_mr_alloc(dev->dev, to_mpd(pd)->pdn, 0, 0, 0,
-			    max_page_list_len, 0, &mr->mmr);
+			    max_num_sg, 0, &mr->mmr);
 	if (err)
 		goto err_free;
 
+	err = mlx4_alloc_priv_pages(pd->device, mr, max_num_sg);
+	if (err)
+		goto err_free_mr;
+
+	mr->max_pages = max_num_sg;
 	err = mlx4_mr_enable(dev->dev, &mr->mmr);
 	if (err)
-		goto err_mr;
+		goto err_free_pl;
 
 	mr->ibmr.rkey = mr->ibmr.lkey = mr->mmr.key;
 	mr->umem = NULL;
 
 	return &mr->ibmr;
 
-err_mr:
+err_free_pl:
+	mr->ibmr.device = pd->device;
+	mlx4_free_priv_pages(mr);
+err_free_mr:
 	(void) mlx4_mr_free(dev->dev, &mr->mmr);
-
 err_free:
 	kfree(mr);
 	return ERR_PTR(err);
 }
 
-struct ib_fast_reg_page_list *mlx4_ib_alloc_fast_reg_page_list(struct ib_device *ibdev,
-							       int page_list_len)
+static int mlx4_set_page(struct ib_mr *ibmr, u64 addr)
 {
-	struct mlx4_ib_dev *dev = to_mdev(ibdev);
-	struct mlx4_ib_fast_reg_page_list *mfrpl;
-	int size = page_list_len * sizeof (u64);
+	struct mlx4_ib_mr *mr = to_mmr(ibmr);
 
-	if (page_list_len > MLX4_MAX_FAST_REG_PAGES)
-		return ERR_PTR(-EINVAL);
+	if (unlikely(mr->npages == mr->max_pages))
+		return -ENOMEM;
 
-	mfrpl = kmalloc(sizeof *mfrpl, GFP_KERNEL);
-	if (!mfrpl)
-		return ERR_PTR(-ENOMEM);
-
-	mfrpl->ibfrpl.page_list = kmalloc(size, GFP_KERNEL);
-	if (!mfrpl->ibfrpl.page_list)
-		goto err_free;
-
-	mfrpl->mapped_page_list = dma_alloc_coherent(&dev->dev->pdev->dev,
-						     size, &mfrpl->map,
-						     GFP_KERNEL);
-	if (!mfrpl->mapped_page_list)
-		goto err_free;
-
-	WARN_ON(mfrpl->map & 0x3f);
-
-	return &mfrpl->ibfrpl;
-
-err_free:
-	kfree(mfrpl->ibfrpl.page_list);
-	kfree(mfrpl);
-	return ERR_PTR(-ENOMEM);
-}
-
-void mlx4_ib_free_fast_reg_page_list(struct ib_fast_reg_page_list *page_list)
-{
-	struct mlx4_ib_dev *dev = to_mdev(page_list->device);
-	struct mlx4_ib_fast_reg_page_list *mfrpl = to_mfrpl(page_list);
-	int size = page_list->max_page_list_len * sizeof (u64);
-
-	dma_free_coherent(&dev->dev->pdev->dev, size, mfrpl->mapped_page_list,
-			  mfrpl->map);
-	kfree(mfrpl->ibfrpl.page_list);
-	kfree(mfrpl);
-}
-
-struct ib_fmr *mlx4_ib_fmr_alloc(struct ib_pd *pd, int acc,
-				 struct ib_fmr_attr *fmr_attr)
-{
-	struct mlx4_ib_dev *dev = to_mdev(pd->device);
-	struct mlx4_ib_fmr *fmr;
-	int err = -ENOMEM;
-
-	fmr = kmalloc(sizeof *fmr, GFP_KERNEL);
-	if (!fmr)
-		return ERR_PTR(-ENOMEM);
-
-	err = mlx4_fmr_alloc(dev->dev, to_mpd(pd)->pdn, convert_access(acc),
-			     fmr_attr->max_pages, fmr_attr->max_maps,
-			     fmr_attr->page_shift, &fmr->mfmr);
-	if (err)
-		goto err_free;
-
-	err = mlx4_fmr_enable(to_mdev(pd->device)->dev, &fmr->mfmr);
-	if (err)
-		goto err_mr;
-
-	fmr->ibfmr.rkey = fmr->ibfmr.lkey = fmr->mfmr.mr.key;
-
-	return &fmr->ibfmr;
-
-err_mr:
-	(void) mlx4_mr_free(to_mdev(pd->device)->dev, &fmr->mfmr.mr);
-
-err_free:
-	kfree(fmr);
-
-	return ERR_PTR(err);
-}
-
-int mlx4_ib_map_phys_fmr(struct ib_fmr *ibfmr, u64 *page_list,
-		      int npages, u64 iova)
-{
-	struct mlx4_ib_fmr *ifmr = to_mfmr(ibfmr);
-	struct mlx4_ib_dev *dev = to_mdev(ifmr->ibfmr.device);
-
-	return mlx4_map_phys_fmr(dev->dev, &ifmr->mfmr, page_list, npages, iova,
-				 &ifmr->ibfmr.lkey, &ifmr->ibfmr.rkey);
-}
-
-int mlx4_ib_unmap_fmr(struct list_head *fmr_list)
-{
-	struct ib_fmr *ibfmr;
-	int err;
-	struct mlx4_dev *mdev = NULL;
-
-	list_for_each_entry(ibfmr, fmr_list, list) {
-		if (mdev && to_mdev(ibfmr->device)->dev != mdev)
-			return -EINVAL;
-		mdev = to_mdev(ibfmr->device)->dev;
-	}
-
-	if (!mdev)
-		return 0;
-
-	list_for_each_entry(ibfmr, fmr_list, list) {
-		struct mlx4_ib_fmr *ifmr = to_mfmr(ibfmr);
-
-		mlx4_fmr_unmap(mdev, &ifmr->mfmr, &ifmr->ibfmr.lkey, &ifmr->ibfmr.rkey);
-	}
-
-	/*
-	 * Make sure all MPT status updates are visible before issuing
-	 * SYNC_TPT firmware command.
-	 */
-	wmb();
-
-	err = mlx4_SYNC_TPT(mdev);
-	if (err)
-		pr_warn("SYNC_TPT error %d when "
-		       "unmapping FMRs\n", err);
+	mr->pages[mr->npages++] = cpu_to_be64(addr | MLX4_MTT_FLAG_PRESENT);
 
 	return 0;
 }
 
-int mlx4_ib_fmr_dealloc(struct ib_fmr *ibfmr)
+int mlx4_ib_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg, int sg_nents,
+		      unsigned int *sg_offset)
 {
-	struct mlx4_ib_fmr *ifmr = to_mfmr(ibfmr);
-	struct mlx4_ib_dev *dev = to_mdev(ibfmr->device);
-	int err;
+	struct mlx4_ib_mr *mr = to_mmr(ibmr);
+	int rc;
 
-	err = mlx4_fmr_free(dev->dev, &ifmr->mfmr);
+	mr->npages = 0;
 
-	if (!err)
-		kfree(ifmr);
+	ib_dma_sync_single_for_cpu(ibmr->device, mr->page_map,
+				   mr->page_map_size, DMA_TO_DEVICE);
 
-	return err;
+	rc = ib_sg_to_pages(ibmr, sg, sg_nents, sg_offset, mlx4_set_page);
+
+	ib_dma_sync_single_for_device(ibmr->device, mr->page_map,
+				      mr->page_map_size, DMA_TO_DEVICE);
+
+	return rc;
 }

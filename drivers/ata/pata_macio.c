@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Libata based driver for Apple "macio" family of PATA controllers
  *
@@ -20,8 +21,10 @@
 #include <linux/adb.h>
 #include <linux/pmu.h>
 #include <linux/scatterlist.h>
+#include <linux/irqdomain.h>
 #include <linux/of.h>
 #include <linux/gfp.h>
+#include <linux/pci.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_host.h>
@@ -30,7 +33,6 @@
 #include <asm/macio.h>
 #include <asm/io.h>
 #include <asm/dbdma.h>
-#include <asm/pci-bridge.h>
 #include <asm/machdep.h>
 #include <asm/pmac_feature.h>
 #include <asm/mediabay.h>
@@ -206,6 +208,19 @@ static const char* macio_ata_names[] = {
 /* Don't let a DMA segment go all the way to 64K */
 #define MAX_DBDMA_SEG		0xff00
 
+#ifdef CONFIG_PAGE_SIZE_64KB
+/*
+ * The SCSI core requires the segment size to cover at least a page, so
+ * for 64K page size kernels it must be at least 64K. However the
+ * hardware can't handle 64K, so pata_macio_qc_prep() will split large
+ * requests. To handle the split requests the tablesize must be halved.
+ */
+#define PATA_MACIO_MAX_SEGMENT_SIZE	SZ_64K
+#define PATA_MACIO_SG_TABLESIZE		(MAX_DCMDS / 2)
+#else
+#define PATA_MACIO_MAX_SEGMENT_SIZE	MAX_DBDMA_SEG
+#define PATA_MACIO_SG_TABLESIZE		MAX_DCMDS
+#endif
 
 /*
  * Wait 1s for disk to answer on IDE bus after a hard reset
@@ -483,6 +498,8 @@ static int pata_macio_cable_detect(struct ata_port *ap)
 		struct device_node *root = of_find_node_by_path("/");
 		const char *model = of_get_property(root, "model", NULL);
 
+		of_node_put(root);
+
 		if (cable && !strncmp(cable, "80-", 3)) {
 			/* Some drives fail to detect 80c cable in PowerBook
 			 * These machine use proprietary short IDE cable
@@ -507,7 +524,7 @@ static int pata_macio_cable_detect(struct ata_port *ap)
 	return ATA_CBL_PATA40;
 }
 
-static void pata_macio_qc_prep(struct ata_queued_cmd *qc)
+static enum ata_completion_errors pata_macio_qc_prep(struct ata_queued_cmd *qc)
 {
 	unsigned int write = (qc->tf.flags & ATA_TFLAG_WRITE);
 	struct ata_port *ap = qc->ap;
@@ -520,7 +537,7 @@ static void pata_macio_qc_prep(struct ata_queued_cmd *qc)
 		   __func__, qc, qc->flags, write, qc->dev->devno);
 
 	if (!(qc->flags & ATA_QCFLAG_DMAMAP))
-		return;
+		return AC_ERR_OK;
 
 	table = (struct dbdma_cmd *) priv->dma_table_cpu;
 
@@ -537,34 +554,39 @@ static void pata_macio_qc_prep(struct ata_queued_cmd *qc)
 
 		while (sg_len) {
 			/* table overflow should never happen */
-			BUG_ON (pi++ >= MAX_DCMDS);
+			if (WARN_ON_ONCE(pi >= MAX_DCMDS))
+				return AC_ERR_SYSTEM;
 
 			len = (sg_len < MAX_DBDMA_SEG) ? sg_len : MAX_DBDMA_SEG;
-			st_le16(&table->command, write ? OUTPUT_MORE: INPUT_MORE);
-			st_le16(&table->req_count, len);
-			st_le32(&table->phy_addr, addr);
+			table->command = cpu_to_le16(write ? OUTPUT_MORE: INPUT_MORE);
+			table->req_count = cpu_to_le16(len);
+			table->phy_addr = cpu_to_le32(addr);
 			table->cmd_dep = 0;
 			table->xfer_status = 0;
 			table->res_count = 0;
 			addr += len;
 			sg_len -= len;
 			++table;
+			++pi;
 		}
 	}
 
 	/* Should never happen according to Tejun */
-	BUG_ON(!pi);
+	if (WARN_ON_ONCE(!pi))
+		return AC_ERR_SYSTEM;
 
 	/* Convert the last command to an input/output */
 	table--;
-	st_le16(&table->command, write ? OUTPUT_LAST: INPUT_LAST);
+	table->command = cpu_to_le16(write ? OUTPUT_LAST: INPUT_LAST);
 	table++;
 
 	/* Add the stop command to the end of the list */
 	memset(table, 0, sizeof(struct dbdma_cmd));
-	st_le16(&table->command, DBDMA_STOP);
+	table->command = cpu_to_le16(DBDMA_STOP);
 
 	dev_dbgdma(priv->dev, "%s: %d DMA list entries\n", __func__, pi);
+
+	return AC_ERR_OK;
 }
 
 
@@ -661,8 +683,7 @@ static u8 pata_macio_bmdma_status(struct ata_port *ap)
 	 * a multi-block transfer.
 	 *
 	 * - The dbdma fifo hasn't yet finished flushing to
-	 * to system memory when the disk interrupt occurs.
-	 *
+	 * system memory when the disk interrupt occurs.
 	 */
 
 	/* First check for errors */
@@ -737,7 +758,7 @@ static void pata_macio_irq_clear(struct ata_port *ap)
 
 static void pata_macio_reset_hw(struct pata_macio_priv *priv, int resume)
 {
-	dev_dbg(priv->dev, "Enabling & resetting... \n");
+	dev_dbg(priv->dev, "Enabling & resetting...\n");
 
 	if (priv->mediabay)
 		return;
@@ -791,7 +812,8 @@ static void pata_macio_reset_hw(struct pata_macio_priv *priv, int resume)
 /* Hook the standard slave config to fixup some HW related alignment
  * restrictions
  */
-static int pata_macio_slave_config(struct scsi_device *sdev)
+static int pata_macio_sdev_configure(struct scsi_device *sdev,
+				     struct queue_limits *lim)
 {
 	struct ata_port *ap = ata_shost_to_port(sdev->host);
 	struct pata_macio_priv *priv = ap->private_data;
@@ -800,7 +822,7 @@ static int pata_macio_slave_config(struct scsi_device *sdev)
 	int rc;
 
 	/* First call original */
-	rc = ata_scsi_slave_config(sdev);
+	rc = ata_scsi_sdev_configure(sdev, lim);
 	if (rc)
 		return rc;
 
@@ -809,8 +831,8 @@ static int pata_macio_slave_config(struct scsi_device *sdev)
 
 	/* OHare has issues with non cache aligned DMA on some chipsets */
 	if (priv->kind == controller_ohare) {
-		blk_queue_update_dma_alignment(sdev->request_queue, 31);
-		blk_queue_update_dma_pad(sdev->request_queue, 31);
+		lim->dma_alignment = 31;
+		lim->dma_pad_mask = 31;
 
 		/* Tell the world about it */
 		ata_dev_info(dev, "OHare alignment limits applied\n");
@@ -824,8 +846,8 @@ static int pata_macio_slave_config(struct scsi_device *sdev)
 	/* Shasta and K2 seem to have "issues" with reads ... */
 	if (priv->kind == controller_sh_ata6 || priv->kind == controller_k2_ata6) {
 		/* Allright these are bad, apply restrictions */
-		blk_queue_update_dma_alignment(sdev->request_queue, 15);
-		blk_queue_update_dma_pad(sdev->request_queue, 15);
+		lim->dma_alignment = 15;
+		lim->dma_pad_mask = 15;
 
 		/* We enable MWI and hack cache line size directly here, this
 		 * is specific to this chipset and not normal values, we happen
@@ -845,16 +867,11 @@ static int pata_macio_slave_config(struct scsi_device *sdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM
-
+#ifdef CONFIG_PM_SLEEP
 static int pata_macio_do_suspend(struct pata_macio_priv *priv, pm_message_t mesg)
 {
-	int rc;
-
 	/* First, core libata suspend to do most of the work */
-	rc = ata_host_suspend(priv->host, mesg);
-	if (rc)
-		return rc;
+	ata_host_suspend(priv->host, mesg);
 
 	/* Restore to default timings */
 	pata_macio_default_timings(priv);
@@ -907,15 +924,18 @@ static int pata_macio_do_resume(struct pata_macio_priv *priv)
 
 	return 0;
 }
+#endif /* CONFIG_PM_SLEEP */
 
-#endif /* CONFIG_PM */
-
-static struct scsi_host_template pata_macio_sht = {
-	ATA_BASE_SHT(DRV_NAME),
-	.sg_tablesize		= MAX_DCMDS,
+static const struct scsi_host_template pata_macio_sht = {
+	__ATA_BASE_SHT(DRV_NAME),
+	.sg_tablesize		= PATA_MACIO_SG_TABLESIZE,
 	/* We may not need that strict one */
 	.dma_boundary		= ATA_DMA_BOUNDARY,
-	.slave_configure	= pata_macio_slave_config,
+	.max_segment_size	= PATA_MACIO_MAX_SEGMENT_SIZE,
+	.sdev_configure		= pata_macio_sdev_configure,
+	.sdev_groups		= ata_common_sdev_groups,
+	.can_queue		= ATA_DEF_QUEUE,
+	.tag_alloc_policy_rr	= true,
 };
 
 static struct ata_port_operations pata_macio_ops = {
@@ -950,7 +970,7 @@ static void pata_macio_invariants(struct pata_macio_priv *priv)
 		priv->kind = controller_k2_ata6;
 	        priv->timings = pata_macio_kauai_timings;
 	} else if (of_device_is_compatible(priv->node, "keylargo-ata")) {
-		if (strcmp(priv->node->name, "ata-4") == 0) {
+		if (of_node_name_eq(priv->node, "ata-4")) {
 			priv->kind = controller_kl_ata4;
 			priv->timings = pata_macio_kl66_timings;
 		} else {
@@ -972,7 +992,7 @@ static void pata_macio_invariants(struct pata_macio_priv *priv)
 	priv->aapl_bus_id =  bidp ? *bidp : 0;
 
 	/* Fixup missing Apple bus ID in case of media-bay */
-	if (priv->mediabay && bidp == 0)
+	if (priv->mediabay && !bidp)
 		priv->aapl_bus_id = 1;
 }
 
@@ -1022,7 +1042,7 @@ static void pmac_macio_calc_timing_masks(struct pata_macio_priv *priv,
 		}
 		i++;
 	}
-	dev_dbg(priv->dev, "Supported masks: PIO=%lx, MWDMA=%lx, UDMA=%lx\n",
+	dev_dbg(priv->dev, "Supported masks: PIO=%x, MWDMA=%x, UDMA=%x\n",
 		pinfo->pio_mask, pinfo->mwdma_mask, pinfo->udma_mask);
 }
 
@@ -1043,11 +1063,6 @@ static int pata_macio_common_init(struct pata_macio_priv *priv,
 
 	/* Make sure we have sane initial timings in the cache */
 	pata_macio_default_timings(priv);
-
-	/* Not sure what the real max is but we know it's less than 64K, let's
-	 * use 64K minus 256
-	 */
-	dma_set_max_seg_size(priv->dev, MAX_DBDMA_SEG);
 
 	/* Allocate libata host for 1 port */
 	memset(&pinfo, 0, sizeof(struct ata_port_info));
@@ -1131,13 +1146,10 @@ static int pata_macio_attach(struct macio_dev *mdev,
 	macio_enable_devres(mdev);
 
 	/* Allocate and init private data structure */
-	priv = devm_kzalloc(&mdev->ofdev.dev,
-			    sizeof(struct pata_macio_priv), GFP_KERNEL);
-	if (priv == NULL) {
-		dev_err(&mdev->ofdev.dev,
-			"Failed to allocate private memory\n");
+	priv = devm_kzalloc_obj(&mdev->ofdev.dev, struct pata_macio_priv);
+	if (!priv)
 		return -ENOMEM;
-	}
+
 	priv->node = of_node_get(mdev->ofdev.dev.of_node);
 	priv->mdev = mdev;
 	priv->dev = &mdev->ofdev.dev;
@@ -1189,7 +1201,7 @@ static int pata_macio_attach(struct macio_dev *mdev,
 	return rc;
 }
 
-static int pata_macio_detach(struct macio_dev *mdev)
+static void pata_macio_detach(struct macio_dev *mdev)
 {
 	struct ata_host *host = macio_get_drvdata(mdev);
 	struct pata_macio_priv *priv = host->private_data;
@@ -1204,12 +1216,9 @@ static int pata_macio_detach(struct macio_dev *mdev)
 	ata_host_detach(host);
 
 	unlock_media_bay(priv->mdev->media_bay);
-
-	return 0;
 }
 
-#ifdef CONFIG_PM
-
+#ifdef CONFIG_PM_SLEEP
 static int pata_macio_suspend(struct macio_dev *mdev, pm_message_t mesg)
 {
 	struct ata_host *host = macio_get_drvdata(mdev);
@@ -1223,8 +1232,7 @@ static int pata_macio_resume(struct macio_dev *mdev)
 
 	return pata_macio_do_resume(host->private_data);
 }
-
-#endif /* CONFIG_PM */
+#endif /* CONFIG_PM_SLEEP */
 
 #ifdef CONFIG_PMAC_MEDIABAY
 static void pata_macio_mb_event(struct macio_dev* mdev, int mb_state)
@@ -1279,19 +1287,16 @@ static int pata_macio_pci_attach(struct pci_dev *pdev,
 	}
 
 	/* Allocate and init private data structure */
-	priv = devm_kzalloc(&pdev->dev,
-			    sizeof(struct pata_macio_priv), GFP_KERNEL);
-	if (priv == NULL) {
-		dev_err(&pdev->dev,
-			"Failed to allocate private memory\n");
+	priv = devm_kzalloc_obj(&pdev->dev, struct pata_macio_priv);
+	if (!priv)
 		return -ENOMEM;
-	}
+
 	priv->node = of_node_get(np);
 	priv->pdev = pdev;
 	priv->dev = &pdev->dev;
 
 	/* Get MMIO regions */
-	if (pci_request_regions(pdev, "pata-macio")) {
+	if (pcim_request_all_regions(pdev, "pata-macio")) {
 		dev_err(&pdev->dev,
 			"Cannot obtain PCI resources\n");
 		return -EBUSY;
@@ -1311,45 +1316,36 @@ static int pata_macio_pci_attach(struct pci_dev *pdev,
 
 static void pata_macio_pci_detach(struct pci_dev *pdev)
 {
-	struct ata_host *host = dev_get_drvdata(&pdev->dev);
+	struct ata_host *host = pci_get_drvdata(pdev);
 
 	ata_host_detach(host);
 }
 
-#ifdef CONFIG_PM
-
+#ifdef CONFIG_PM_SLEEP
 static int pata_macio_pci_suspend(struct pci_dev *pdev, pm_message_t mesg)
 {
-	struct ata_host *host = dev_get_drvdata(&pdev->dev);
+	struct ata_host *host = pci_get_drvdata(pdev);
 
 	return pata_macio_do_suspend(host->private_data, mesg);
 }
 
 static int pata_macio_pci_resume(struct pci_dev *pdev)
 {
-	struct ata_host *host = dev_get_drvdata(&pdev->dev);
+	struct ata_host *host = pci_get_drvdata(pdev);
 
 	return pata_macio_do_resume(host->private_data);
 }
+#endif /* CONFIG_PM_SLEEP */
 
-#endif /* CONFIG_PM */
-
-static struct of_device_id pata_macio_match[] =
+static const struct of_device_id pata_macio_match[] =
 {
-	{
-	.name 		= "IDE",
-	},
-	{
-	.name 		= "ATA",
-	},
-	{
-	.type		= "ide",
-	},
-	{
-	.type		= "ata",
-	},
-	{},
+	{ .name = "IDE", },
+	{ .name = "ATA", },
+	{ .type = "ide", },
+	{ .type = "ata", },
+	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, pata_macio_match);
 
 static struct macio_driver pata_macio_driver =
 {
@@ -1360,7 +1356,7 @@ static struct macio_driver pata_macio_driver =
 	},
 	.probe		= pata_macio_attach,
 	.remove		= pata_macio_detach,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.suspend	= pata_macio_suspend,
 	.resume		= pata_macio_resume,
 #endif
@@ -1370,12 +1366,12 @@ static struct macio_driver pata_macio_driver =
 };
 
 static const struct pci_device_id pata_macio_pci_match[] = {
-	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_UNI_N_ATA),	0 },
-	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_IPID_ATA100),	0 },
-	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_K2_ATA100),	0 },
-	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_SH_ATA),	0 },
-	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_IPID2_ATA),	0 },
-	{},
+	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_UNI_N_ATA) },
+	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_IPID_ATA100) },
+	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_K2_ATA100) },
+	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_SH_ATA) },
+	{ PCI_VDEVICE(APPLE, PCI_DEVICE_ID_APPLE_IPID2_ATA) },
+	{ }
 };
 
 static struct pci_driver pata_macio_pci_driver = {
@@ -1383,13 +1379,10 @@ static struct pci_driver pata_macio_pci_driver = {
 	.id_table	= pata_macio_pci_match,
 	.probe		= pata_macio_pci_attach,
 	.remove		= pata_macio_pci_detach,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.suspend	= pata_macio_pci_suspend,
 	.resume		= pata_macio_pci_resume,
 #endif
-	.driver = {
-		.owner		= THIS_MODULE,
-	},
 };
 MODULE_DEVICE_TABLE(pci, pata_macio_pci_match);
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _LINUX_TIOCL_H
 #define _LINUX_TIOCL_H
 
@@ -35,5 +36,6 @@ struct tiocl_selection {
 #define TIOCL_BLANKSCREEN	14	/* keep screen blank even if a key is pressed */
 #define TIOCL_BLANKEDSCREEN	15	/* return which vt was blanked */
 #define TIOCL_GETKMSGREDIRECT	17	/* get the vt the kernel messages are restricted to */
+#define TIOCL_GETBRACKETEDPASTE	18	/* get whether paste may be bracketed */
 
 #endif /* _LINUX_TIOCL_H */

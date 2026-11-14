@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * kref.h - library routines for handling generic reference counted objects
  *
@@ -7,23 +8,19 @@
  * based on kobject.h which was:
  * Copyright (C) 2002-2003 Patrick Mochel <mochel@osdl.org>
  * Copyright (C) 2002-2003 Open Source Development Labs
- *
- * This file is released under the GPLv2.
- *
  */
 
 #ifndef _KREF_H_
 #define _KREF_H_
 
-#include <linux/bug.h>
-#include <linux/atomic.h>
-#include <linux/kernel.h>
-#include <linux/mutex.h>
 #include <linux/spinlock.h>
+#include <linux/refcount.h>
 
 struct kref {
-	atomic_t refcount;
+	refcount_t refcount;
 };
+
+#define KREF_INIT(n)	{ .refcount = REFCOUNT_INIT(n), }
 
 /**
  * kref_init - initialize object.
@@ -31,7 +28,12 @@ struct kref {
  */
 static inline void kref_init(struct kref *kref)
 {
-	atomic_set(&kref->refcount, 1);
+	refcount_set(&kref->refcount, 1);
+}
+
+static inline unsigned int kref_read(const struct kref *kref)
+{
+	return refcount_read(&kref->refcount);
 }
 
 /**
@@ -40,108 +42,70 @@ static inline void kref_init(struct kref *kref)
  */
 static inline void kref_get(struct kref *kref)
 {
-	/* If refcount was 0 before incrementing then we have a race
-	 * condition when this kref is freeing by some other thread right now.
-	 * In this case one should use kref_get_unless_zero()
-	 */
-	WARN_ON_ONCE(atomic_inc_return(&kref->refcount) < 2);
+	refcount_inc(&kref->refcount);
 }
 
 /**
- * kref_sub - subtract a number of refcounts for object.
- * @kref: object.
- * @count: Number of recounts to subtract.
- * @release: pointer to the function that will clean up the object when the
+ * kref_put - Decrement refcount for object
+ * @kref: Object
+ * @release: Pointer to the function that will clean up the object when the
  *	     last reference to the object is released.
- *	     This pointer is required, and it is not acceptable to pass kfree
- *	     in as this function.  If the caller does pass kfree to this
- *	     function, you will be publicly mocked mercilessly by the kref
- *	     maintainer, and anyone else who happens to notice it.  You have
- *	     been warned.
  *
- * Subtract @count from the refcount, and if 0, call release().
- * Return 1 if the object was removed, otherwise return 0.  Beware, if this
- * function returns 0, you still can not count on the kref from remaining in
- * memory.  Only use the return value if you want to see if the kref is now
- * gone, not present.
- */
-static inline int kref_sub(struct kref *kref, unsigned int count,
-	     void (*release)(struct kref *kref))
-{
-	WARN_ON(release == NULL);
-
-	if (atomic_sub_and_test((int) count, &kref->refcount)) {
-		release(kref);
-		return 1;
-	}
-	return 0;
-}
-
-/**
- * kref_put - decrement refcount for object.
- * @kref: object.
- * @release: pointer to the function that will clean up the object when the
- *	     last reference to the object is released.
- *	     This pointer is required, and it is not acceptable to pass kfree
- *	     in as this function.  If the caller does pass kfree to this
- *	     function, you will be publicly mocked mercilessly by the kref
- *	     maintainer, and anyone else who happens to notice it.  You have
- *	     been warned.
+ * Decrement the refcount, and if 0, call @release.  The caller may not
+ * pass NULL or kfree() as the release function.
  *
- * Decrement the refcount, and if 0, call release().
- * Return 1 if the object was removed, otherwise return 0.  Beware, if this
- * function returns 0, you still can not count on the kref from remaining in
- * memory.  Only use the return value if you want to see if the kref is now
- * gone, not present.
+ * Return: 1 if this call removed the object, otherwise return 0.  Beware,
+ * if this function returns 0, another caller may have removed the object
+ * by the time this function returns.  The return value is only certain
+ * if you want to see if the object is definitely released.
  */
 static inline int kref_put(struct kref *kref, void (*release)(struct kref *kref))
 {
-	return kref_sub(kref, 1, release);
-}
-
-/**
- * kref_put_spinlock_irqsave - decrement refcount for object.
- * @kref: object.
- * @release: pointer to the function that will clean up the object when the
- *	     last reference to the object is released.
- *	     This pointer is required, and it is not acceptable to pass kfree
- *	     in as this function.
- * @lock: lock to take in release case
- *
- * Behaves identical to kref_put with one exception.  If the reference count
- * drops to zero, the lock will be taken atomically wrt dropping the reference
- * count.  The release function has to call spin_unlock() without _irqrestore.
- */
-static inline int kref_put_spinlock_irqsave(struct kref *kref,
-		void (*release)(struct kref *kref),
-		spinlock_t *lock)
-{
-	unsigned long flags;
-
-	WARN_ON(release == NULL);
-	if (atomic_add_unless(&kref->refcount, -1, 1))
-		return 0;
-	spin_lock_irqsave(lock, flags);
-	if (atomic_dec_and_test(&kref->refcount)) {
+	if (refcount_dec_and_test(&kref->refcount)) {
 		release(kref);
-		local_irq_restore(flags);
 		return 1;
 	}
-	spin_unlock_irqrestore(lock, flags);
 	return 0;
 }
 
+/**
+ * kref_put_mutex - Decrement refcount for object
+ * @kref: Object
+ * @release: Pointer to the function that will clean up the object when the
+ *	     last reference to the object is released.
+ * @mutex: Mutex which protects the release function.
+ *
+ * This variant of kref_lock() calls the @release function with the @mutex
+ * held.  The @release function will release the mutex.
+ */
 static inline int kref_put_mutex(struct kref *kref,
 				 void (*release)(struct kref *kref),
-				 struct mutex *lock)
+				 struct mutex *mutex)
+	__cond_acquires(true, mutex)
 {
-	WARN_ON(release == NULL);
-	if (unlikely(!atomic_add_unless(&kref->refcount, -1, 1))) {
-		mutex_lock(lock);
-		if (unlikely(!atomic_dec_and_test(&kref->refcount))) {
-			mutex_unlock(lock);
-			return 0;
-		}
+	if (refcount_dec_and_mutex_lock(&kref->refcount, mutex)) {
+		release(kref);
+		return 1;
+	}
+	return 0;
+}
+
+/**
+ * kref_put_lock - Decrement refcount for object
+ * @kref: Object
+ * @release: Pointer to the function that will clean up the object when the
+ *	     last reference to the object is released.
+ * @lock: Spinlock which protects the release function.
+ *
+ * This variant of kref_lock() calls the @release function with the @lock
+ * held.  The @release function will release the lock.
+ */
+static inline int kref_put_lock(struct kref *kref,
+				void (*release)(struct kref *kref),
+				spinlock_t *lock)
+	__cond_acquires(true, lock)
+{
+	if (refcount_dec_and_lock(&kref->refcount, lock)) {
 		release(kref);
 		return 1;
 	}
@@ -152,8 +116,6 @@ static inline int kref_put_mutex(struct kref *kref,
  * kref_get_unless_zero - Increment refcount for object unless it is zero.
  * @kref: object.
  *
- * Return non-zero if the increment succeeded. Otherwise return 0.
- *
  * This function is intended to simplify locking around refcounting for
  * objects that can be looked up from a lookup structure, and which are
  * removed from that lookup structure in the object destructor.
@@ -163,9 +125,11 @@ static inline int kref_put_mutex(struct kref *kref,
  * With a lookup followed by a kref_get_unless_zero *with return value check*
  * locking in the kref_put path can be deferred to the actual removal from
  * the lookup structure and RCU lookups become trivial.
+ *
+ * Return: non-zero if the increment succeeded. Otherwise return 0.
  */
 static inline int __must_check kref_get_unless_zero(struct kref *kref)
 {
-	return atomic_add_unless(&kref->refcount, 1, 0);
+	return refcount_inc_not_zero(&kref->refcount);
 }
 #endif /* _KREF_H_ */

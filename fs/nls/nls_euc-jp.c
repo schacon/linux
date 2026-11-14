@@ -553,7 +553,6 @@ static struct nls_table table = {
 	.charset	= "euc-jp",
 	.uni2char	= uni2char,
 	.char2uni	= char2uni,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_euc_jp(void)
@@ -578,4 +577,5 @@ static void __exit exit_nls_euc_jp(void)
 module_init(init_nls_euc_jp)
 module_exit(exit_nls_euc_jp)
 
+MODULE_DESCRIPTION("NLS Japanese charset (EUC-JP)");
 MODULE_LICENSE("Dual BSD/GPL");

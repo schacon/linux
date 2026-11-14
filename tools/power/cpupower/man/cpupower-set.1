@@ -3,7 +3,7 @@
 cpupower\-set \- Set processor power related kernel or hardware configurations
 .SH SYNOPSIS
 .ft B
-.B cpupower set [ \-b VAL ] [ \-s VAL ] [ \-m VAL ]
+.B cpupower set [ \-b VAL | \-e POLICY | \-m MODE | \-t BOOL ]
 
 
 .SH DESCRIPTION
@@ -19,7 +19,7 @@ described in the Options sections.
 Use \fBcpupower info \fP to read out current settings and whether they are
 supported on the system at all.
 
-.SH Options
+.SH OPTIONS
 .PP
 \-\-perf-bias, \-b
 .RS 4
@@ -55,34 +55,40 @@ Use \fBcpupower -c all info -b\fP to verify.
 
 This options needs the msr kernel driver (CONFIG_X86_MSR) loaded.
 .RE
+
 .PP
-\-\-sched\-mc,  \-m [ VAL ]
-.RE
-\-\-sched\-smt, \-s [ VAL ]
+\-\-epp, \-e
 .RS 4
-\-\-sched\-mc utilizes cores in one processor package/socket first before
-processes are scheduled to other processor packages/sockets.
+Sets the energy performance policy preference on supported Intel or AMD
+processors which use the Intel or AMD P-State cpufreq driver respectively.
 
-\-\-sched\-smt utilizes thread siblings of one processor core first before
-processes are scheduled to other cores.
+Available policies can be found with
+\fBcat /sys/devices/system/cpu/cpufreq/policy0/energy_performance_available_preferences\fP :
+.RS 4
+default performance balance_performance balance_power power
+.RE
 
-The impact on power consumption and performance (positiv or negativ) heavily
-depends on processor support for deep sleep states, frequency scaling and
-frequency boost modes and their dependencies between other thread siblings
-and processor cores.
+.RE
 
-Taken over from kernel documentation:
+.PP
+\-\-amd\-pstate\-mode, \-m
+.RS 4
+Sets the AMD P-State mode for supported AMD processors.
+Available modes are "active", "guided" or "passive".
 
-Adjust the kernel's multi-core scheduler support.
+Refer to the AMD P-State kernel documentation for further information.
 
-Possible values are:
-.RS 2
-0 - No power saving load balance (default value)
+.RE
 
-1 - Fill one thread/core/package first for long running threads
+.PP
+\-\-turbo\-boost, \-\-boost, \-t
+.RS 4
+This option is used to enable or disable the boost feature on
+supported Intel and AMD processors, and other boost supported systems.
+(The --boost option is an alias for the --turbo-boost option)
 
-2 - Also bias task wakeups to semi-idle cpu package for power
-savings
+This option takes as parameter either \fB1\fP to enable, or \fB0\fP to disable the feature.
+
 .RE
 
 .SH "SEE ALSO"

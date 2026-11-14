@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Interrupt request handling routines. On the
  * Sparc the IRQs are basically 'cast in stone'
@@ -17,6 +18,7 @@
 
 #include <asm/cacheflush.h>
 #include <asm/cpudata.h>
+#include <asm/setup.h>
 #include <asm/pcic.h>
 #include <asm/leon.h>
 
@@ -164,7 +166,7 @@ void irq_link(unsigned int irq)
 
 	p = &irq_table[irq];
 	pil = p->pil;
-	BUG_ON(pil > SUN4D_MAX_IRQ);
+	BUG_ON(pil >= SUN4D_MAX_IRQ);
 	p->next = irq_map[pil];
 	irq_map[pil] = p;
 
@@ -181,7 +183,7 @@ void irq_unlink(unsigned int irq)
 	spin_lock_irqsave(&irq_map_lock, flags);
 
 	p = &irq_table[irq];
-	BUG_ON(p->pil > SUN4D_MAX_IRQ);
+	BUG_ON(p->pil >= SUN4D_MAX_IRQ);
 	pnext = &irq_map[p->pil];
 	while (*pnext != p)
 		pnext = &(*pnext)->next;
@@ -197,19 +199,19 @@ int arch_show_interrupts(struct seq_file *p, int prec)
 	int j;
 
 #ifdef CONFIG_SMP
-	seq_printf(p, "RES: ");
+	seq_printf(p, "%*s:", prec, "RES");
 	for_each_online_cpu(j)
-		seq_printf(p, "%10u ", cpu_data(j).irq_resched_count);
-	seq_printf(p, "     IPI rescheduling interrupts\n");
-	seq_printf(p, "CAL: ");
+		seq_put_decimal_ull_width(p, " ", cpu_data(j).irq_resched_count, 10);
+	seq_printf(p, " IPI rescheduling interrupts\n");
+	seq_printf(p, "%*s:", prec, "CAL");
 	for_each_online_cpu(j)
-		seq_printf(p, "%10u ", cpu_data(j).irq_call_count);
-	seq_printf(p, "     IPI function call interrupts\n");
+		seq_put_decimal_ull_width(p, " ", cpu_data(j).irq_call_count, 10);
+	seq_printf(p, " IPI function call interrupts\n");
 #endif
-	seq_printf(p, "NMI: ");
+	seq_printf(p, "%*s:", prec, "NMI");
 	for_each_online_cpu(j)
-		seq_printf(p, "%10u ", cpu_data(j).counter);
-	seq_printf(p, "     Non-maskable interrupts\n");
+		seq_put_decimal_ull_width(p, " ", cpu_data(j).counter, 10);
+	seq_printf(p, " Non-maskable interrupts\n");
 	return 0;
 }
 
@@ -266,11 +268,11 @@ int sparc_floppy_request_irq(unsigned int irq, irq_handler_t irq_handler)
 	if (sparc_cpu_model != sparc_leon) {
 		struct tt_entry *trap_table;
 
-		trap_table = &trapbase_cpu1;
+		trap_table = &trapbase_cpu1[0];
 		INSTANTIATE(trap_table)
-		trap_table = &trapbase_cpu2;
+		trap_table = &trapbase_cpu2[0];
 		INSTANTIATE(trap_table)
-		trap_table = &trapbase_cpu3;
+		trap_table = &trapbase_cpu3[0];
 		INSTANTIATE(trap_table)
 	}
 #endif

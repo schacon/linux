@@ -13,16 +13,15 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
+#include <linux/memblock.h>
 #include <linux/pm.h>
 
 #include <asm/bootinfo.h>
 #include <asm/reboot.h>
+#include <asm/setup.h>
 #include <asm/gt64120.h>
 
 #include <cobalt.h>
-
-extern void cobalt_machine_restart(char *command);
-extern void cobalt_machine_halt(void);
 
 const char *get_system_type(void)
 {
@@ -41,8 +40,8 @@ const char *get_system_type(void)
 
 /*
  * Cobalt doesn't have PS/2 keyboard/mouse interfaces,
- * keyboard conntroller is never used.
- * Also PCI-ISA bridge DMA contoroller is never used.
+ * keyboard controller is never used.
+ * Also PCI-ISA bridge DMA controller is never used.
  */
 static struct resource cobalt_reserved_resources[] = {
 	{	/* dma1 */
@@ -84,9 +83,11 @@ void __init plat_mem_setup(void)
 	/* I/O port resource */
 	ioport_resource.end = 0x01ffffff;
 
+	cobalt_pci_init();
+
 	/* These resources have been reserved by VIA SuperI/O chip. */
 	for (i = 0; i < ARRAY_SIZE(cobalt_reserved_resources); i++)
-		request_resource(&ioport_resource, cobalt_reserved_resources + i);
+		insert_resource(&ioport_resource, cobalt_reserved_resources + i);
 }
 
 /*
@@ -111,10 +112,7 @@ void __init prom_init(void)
 			strlcat(arcs_cmdline, " ", COMMAND_LINE_SIZE);
 	}
 
-	add_memory_region(0x0, memsz, BOOT_MEM_RAM);
-}
+	memblock_add(0, memsz);
 
-void __init prom_free_prom_memory(void)
-{
-	/* Nothing to do! */
+	setup_8250_early_printk_port(CKSEG1ADDR(0x1c800000), 0, 0);
 }

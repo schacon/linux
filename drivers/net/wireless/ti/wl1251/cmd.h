@@ -1,23 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * This file is part of wl1251
  *
  * Copyright (c) 1998-2007 Texas Instruments Incorporated
  * Copyright (C) 2008 Nokia Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 
 #ifndef __WL1251_CMD_H__
@@ -30,17 +16,15 @@
 struct acx_header;
 
 int wl1251_cmd_send(struct wl1251 *wl, u16 type, void *buf, size_t buf_len);
-int wl1251_cmd_test(struct wl1251 *wl, void *buf, size_t buf_len, u8 answer);
 int wl1251_cmd_interrogate(struct wl1251 *wl, u16 id, void *buf, size_t len);
 int wl1251_cmd_configure(struct wl1251 *wl, u16 id, void *buf, size_t len);
 int wl1251_cmd_vbm(struct wl1251 *wl, u8 identity,
 		   void *bitmap, u16 bitmap_len, u8 bitmap_control);
-int wl1251_cmd_data_path(struct wl1251 *wl, u8 channel, bool enable);
+int wl1251_cmd_data_path_rx(struct wl1251 *wl, u8 channel, bool enable);
+int wl1251_cmd_data_path_tx(struct wl1251 *wl, u8 channel, bool enable);
 int wl1251_cmd_join(struct wl1251 *wl, u8 bss_type, u8 channel,
 		    u16 beacon_interval, u8 dtim_interval);
 int wl1251_cmd_ps_mode(struct wl1251 *wl, u8 ps_mode);
-int wl1251_cmd_read_memory(struct wl1251 *wl, u32 addr, void *answer,
-			   size_t len);
 int wl1251_cmd_template_set(struct wl1251 *wl, u16 cmd_id,
 			    void *buf, size_t buf_len);
 int wl1251_cmd_scan(struct wl1251 *wl, u8 *ssid, size_t ssid_len,
@@ -102,8 +86,6 @@ enum wl1251_commands {
 struct wl1251_cmd_header {
 	u16 id;
 	u16 status;
-	/* payload */
-	u8 data[0];
 } __packed;
 
 struct  wl1251_command {
@@ -166,6 +148,11 @@ struct cmd_read_write_memory {
 
 #define CMDMBOX_HEADER_LEN 4
 #define CMDMBOX_INFO_ELEM_HEADER_LEN 4
+
+#define WL1251_SCAN_OPT_PASSIVE		1
+#define WL1251_SCAN_OPT_5GHZ_BAND	2
+#define WL1251_SCAN_OPT_TRIGGERD_SCAN	4
+#define WL1251_SCAN_OPT_PRIORITY_HIGH	8
 
 #define WL1251_SCAN_MIN_DURATION 30000
 #define WL1251_SCAN_MAX_DURATION 60000
@@ -289,7 +276,7 @@ struct wl1251_cmd_packet_template {
 	struct wl1251_cmd_header header;
 
 	__le16 size;
-	u8 data[0];
+	u8 data[];
 } __packed;
 
 #define TIM_ELE_ID    5

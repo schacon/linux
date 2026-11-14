@@ -1,34 +1,53 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_VDSO_H
 #define _ASM_X86_VDSO_H
 
-#if defined CONFIG_X86_32 || defined CONFIG_COMPAT
-extern const char VDSO32_PRELINK[];
+#include <asm/page_types.h>
+#include <linux/linkage.h>
+#include <linux/init.h>
 
-/*
- * Given a pointer to the vDSO image, find the pointer to VDSO32_name
- * as that symbol is defined in the vDSO sources or linker script.
- */
-#define VDSO32_SYMBOL(base, name)					\
-({									\
-	extern const char VDSO32_##name[];				\
-	(void __user *)(VDSO32_##name - VDSO32_PRELINK +		\
-			(unsigned long)(base));				\
-})
-#endif
+#define __VDSO_PAGES	6
 
-/*
- * These symbols are defined with the addresses in the vsyscall page.
- * See vsyscall-sigreturn.S.
- */
-extern void __user __kernel_sigreturn;
-extern void __user __kernel_rt_sigreturn;
+#define VDSO_NR_VCLOCK_PAGES	2
+#define VDSO_VCLOCK_PAGES_START(_b)	((_b) + (__VDSO_PAGES - VDSO_NR_VCLOCK_PAGES) * PAGE_SIZE)
+#define VDSO_PAGE_PVCLOCK_OFFSET	0
+#define VDSO_PAGE_HVCLOCK_OFFSET	1
 
-/*
- * These symbols are defined by vdso32.S to mark the bounds
- * of the ELF DSO images included therein.
- */
-extern const char vdso32_int80_start, vdso32_int80_end;
-extern const char vdso32_syscall_start, vdso32_syscall_end;
-extern const char vdso32_sysenter_start, vdso32_sysenter_end;
+#ifndef __ASSEMBLER__
+
+#include <linux/mm_types.h>
+
+struct vdso_image {
+	void *data;
+	unsigned long size;   /* Always a multiple of PAGE_SIZE */
+
+	unsigned long alt, alt_len;
+	unsigned long extable_base, extable_len;
+	const void *extable;
+
+	long sym___kernel_sigreturn;
+	long sym___kernel_rt_sigreturn;
+	long sym___kernel_vsyscall;
+	long sym_int80_landing_pad;
+	long sym_vdso32_sigreturn_landing_pad;
+	long sym_vdso32_rt_sigreturn_landing_pad;
+	long sym___futex_list64_try_unlock_cs_start;
+	long sym___futex_list64_try_unlock_cs_end;
+	long sym___futex_list32_try_unlock_cs_start;
+	long sym___futex_list32_try_unlock_cs_end;
+};
+
+extern const struct vdso_image vdso64_image;
+extern const struct vdso_image vdsox32_image;
+extern const struct vdso_image vdso32_image;
+
+extern int __init init_vdso_image(const struct vdso_image *image);
+
+extern int map_vdso_once(const struct vdso_image *image, unsigned long addr);
+
+extern bool fixup_vdso_exception(struct pt_regs *regs, int trapnr,
+				 unsigned long error_code,
+				 unsigned long fault_addr);
+#endif /* __ASSEMBLER__ */
 
 #endif /* _ASM_X86_VDSO_H */

@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Amit Bhor, Sameer Dhavale: Codito Technologies 2004
  */
@@ -11,75 +8,101 @@
 #define __ASM_ARC_PTRACE_H
 
 #include <uapi/asm/ptrace.h>
+#include <linux/compiler.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
+
+typedef union {
+	struct {
+#ifdef CONFIG_CPU_BIG_ENDIAN
+		unsigned long state:8, vec:8, cause:8, param:8;
+#else
+		unsigned long param:8, cause:8, vec:8, state:8;
+#endif
+	};
+	unsigned long full;
+} ecr_reg;
 
 /* THE pt_regs: Defines how regs are saved during entry into kernel */
 
+#ifdef CONFIG_ISA_ARCOMPACT
 struct pt_regs {
-	/*
-	 * 1 word gutter after reg-file has been saved
-	 * Technically not needed, Since SP always points to a "full" location
-	 * (vs. "empty"). But pt_regs is shared with tools....
-	 */
-	long res;
 
 	/* Real registers */
-	long bta;	/* bta_l1, bta_l2, erbta */
-	long lp_start;
-	long lp_end;
-	long lp_count;
-	long status32;	/* status32_l1, status32_l2, erstatus */
-	long ret;	/* ilink1, ilink2 or eret */
-	long blink;
-	long fp;
-	long r26;	/* gp */
-	long r12;
-	long r11;
-	long r10;
-	long r9;
-	long r8;
-	long r7;
-	long r6;
-	long r5;
-	long r4;
-	long r3;
-	long r2;
-	long r1;
-	long r0;
-	long sp;	/* user/kernel sp depending on where we came from  */
-	long orig_r0;
+	unsigned long bta;	/* bta_l1, bta_l2, erbta */
 
-	/*to distinguish bet excp, syscall, irq */
-	union {
-#ifdef CONFIG_CPU_BIG_ENDIAN
-		/* so that assembly code is same for LE/BE */
-		unsigned long orig_r8:16, event:16;
-#else
-		unsigned long event:16, orig_r8:16;
-#endif
-		long orig_r8_word;
-	};
+	unsigned long lp_start, lp_end, lp_count;
+
+	unsigned long status32;	/* status32_l1, status32_l2, erstatus */
+	unsigned long ret;	/* ilink1, ilink2 or eret */
+	unsigned long blink;
+	unsigned long fp;
+	unsigned long r26;	/* gp */
+
+	unsigned long r12, r11, r10, r9, r8, r7, r6, r5, r4, r3, r2, r1, r0;
+
+	unsigned long sp;	/* User/Kernel depending on where we came from */
+	unsigned long orig_r0;
+
+	/*
+	 * To distinguish bet excp, syscall, irq
+	 * For traps and exceptions, Exception Cause Register.
+	 * 	ECR: <00> <VV> <CC> <PP>
+	 * 	Last word used by Linux for extra state mgmt (syscall-restart)
+	 * For interrupts, use artificial ECR values to note current prio-level
+	 */
+	ecr_reg ecr;
 };
-
-/* Callee saved registers - need to be saved only when you are scheduled out */
 
 struct callee_regs {
-	long res;	/* Again this is not needed */
-	long r25;
-	long r24;
-	long r23;
-	long r22;
-	long r21;
-	long r20;
-	long r19;
-	long r18;
-	long r17;
-	long r16;
-	long r15;
-	long r14;
-	long r13;
+	unsigned long r25, r24, r23, r22, r21, r20, r19, r18, r17, r16, r15, r14, r13;
 };
+
+#define MAX_REG_OFFSET offsetof(struct pt_regs, ecr)
+
+#else
+
+struct pt_regs {
+
+	unsigned long orig_r0;
+
+	ecr_reg ecr;		/* Exception Cause Reg */
+
+	unsigned long bta;	/* erbta */
+
+	unsigned long fp;
+	unsigned long r30;
+	unsigned long r12;
+	unsigned long r26;	/* gp */
+
+#ifdef CONFIG_ARC_HAS_ACCL_REGS
+	unsigned long r58, r59;	/* ACCL/ACCH used by FPU / DSP MPY */
+#endif
+#ifdef CONFIG_ARC_DSP_SAVE_RESTORE_REGS
+	unsigned long DSP_CTRL;
+#endif
+
+	unsigned long sp;	/* user/kernel sp depending on entry  */
+
+	/*------- Below list auto saved by h/w -----------*/
+	unsigned long r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11;
+
+	unsigned long blink;
+	unsigned long lp_end, lp_start, lp_count;
+
+	unsigned long ei, ldi, jli;
+
+	unsigned long ret;
+	unsigned long status32;
+};
+
+struct callee_regs {
+	unsigned long r25, r24, r23, r22, r21, r20, r19, r18, r17, r16, r15, r14, r13;
+};
+
+#define MAX_REG_OFFSET offsetof(struct pt_regs, status32)
+
+#endif
 
 #define instruction_pointer(regs)	((regs)->ret)
 #define profile_pc(regs)		instruction_pointer(regs)
@@ -99,32 +122,56 @@ struct callee_regs {
 /* return 1 if PC in delay slot */
 #define delay_mode(regs) ((regs->status32 & STATUS_DE_MASK) == STATUS_DE_MASK)
 
-#define in_syscall(regs)    (regs->event & orig_r8_IS_SCALL)
-#define in_brkpt_trap(regs) (regs->event & orig_r8_IS_BRKPT)
+#define in_syscall(regs)    ((regs->ecr.vec == ECR_V_TRAP) && !regs->ecr.param)
+#define in_brkpt_trap(regs) ((regs->ecr.vec == ECR_V_TRAP) && regs->ecr.param)
 
-#define syscall_wont_restart(regs) (regs->event |= orig_r8_IS_SCALL_RESTARTED)
-#define syscall_restartable(regs) !(regs->event &  orig_r8_IS_SCALL_RESTARTED)
+#define STATE_SCALL_RESTARTED	0x01
+
+#define syscall_wont_restart(regs) (regs->ecr.state |= STATE_SCALL_RESTARTED)
+#define syscall_restartable(regs) !(regs->ecr.state &  STATE_SCALL_RESTARTED)
 
 #define current_pt_regs()					\
 ({								\
 	/* open-coded current_thread_info() */			\
 	register unsigned long sp asm ("sp");			\
 	unsigned long pg_start = (sp & ~(THREAD_SIZE - 1));	\
-	(struct pt_regs *)(pg_start + THREAD_SIZE - 4) - 1;	\
+	(struct pt_regs *)(pg_start + THREAD_SIZE) - 1;	\
 })
 
 static inline long regs_return_value(struct pt_regs *regs)
 {
-	return regs->r0;
+	return (long)regs->r0;
 }
 
-#endif /* !__ASSEMBLY__ */
+static inline void instruction_pointer_set(struct pt_regs *regs,
+					   unsigned long val)
+{
+	instruction_pointer(regs) = val;
+}
 
-#define orig_r8_IS_SCALL		0x0001
-#define orig_r8_IS_SCALL_RESTARTED	0x0002
-#define orig_r8_IS_BRKPT		0x0004
-#define orig_r8_IS_EXCPN		0x0008
-#define orig_r8_IS_IRQ1			0x0010
-#define orig_r8_IS_IRQ2			0x0020
+static inline unsigned long kernel_stack_pointer(struct pt_regs *regs)
+{
+	return regs->sp;
+}
+
+extern int regs_query_register_offset(const char *name);
+extern const char *regs_query_register_name(unsigned int offset);
+extern bool regs_within_kernel_stack(struct pt_regs *regs, unsigned long addr);
+extern unsigned long regs_get_kernel_stack_nth(struct pt_regs *regs,
+					       unsigned int n);
+
+static inline unsigned long regs_get_register(struct pt_regs *regs,
+					      unsigned int offset)
+{
+	if (unlikely(offset > MAX_REG_OFFSET))
+		return 0;
+
+	return *(unsigned long *)((unsigned long)regs + offset);
+}
+
+extern int syscall_trace_enter(struct pt_regs *);
+extern void syscall_trace_exit(struct pt_regs *);
+
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __ASM_PTRACE_H */

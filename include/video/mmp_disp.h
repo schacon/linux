@@ -1,23 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * linux/include/video/mmp_disp.h
  * Header file for Marvell MMP Display Controller
  *
  * Copyright (C) 2012 Marvell Technology Group Ltd.
  * Authors: Zhou Zhu <zzhu3@marvell.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
- *
  */
 
 #ifndef _MMP_DISP_H_
@@ -91,6 +78,11 @@ struct mmp_win {
 	u16	up_crop;
 	u16	bottom_crop;
 	int	pix_fmt;
+	/*
+	 * pitch[0]: graphics/video layer line length or y pitch
+	 * pitch[1]/pitch[2]: video u/v pitch if non-zero
+	 */
+	u32	pitch[3];
 };
 
 struct mmp_addr {
@@ -164,7 +156,7 @@ struct mmp_overlay {
 	int status;
 	struct mutex access_ok;
 
-	struct mmp_overlay_ops *ops;
+	const struct mmp_overlay_ops *ops;
 };
 
 /* panel type */
@@ -180,7 +172,7 @@ struct mmp_panel {
 	/* use node to register to list */
 	struct list_head node;
 	const char *name;
-	/* path name used to connect to proper path configed */
+	/* path name used to connect to proper path configured */
 	const char *plat_path_name;
 	struct device *dev;
 	int panel_type;
@@ -239,7 +231,7 @@ struct mmp_path {
 
 	/* layers */
 	int overlay_num;
-	struct mmp_overlay overlays[0];
+	struct mmp_overlay overlays[] __counted_by(overlay_num);
 };
 
 extern struct mmp_path *mmp_get_path(const char *name);
@@ -299,7 +291,7 @@ static inline int mmp_overlay_set_addr(struct mmp_overlay *overlay,
  * it defined a common interface that plat driver need to implement
  */
 struct mmp_path_info {
-	/* driver data, set when registed*/
+	/* driver data, set when registered */
 	const char *name;
 	struct device *dev;
 	int id;
@@ -307,7 +299,7 @@ struct mmp_path_info {
 	int overlay_num;
 	void (*set_mode)(struct mmp_path *path, struct mmp_mode *mode);
 	void (*set_onoff)(struct mmp_path *path, int status);
-	struct mmp_overlay_ops *overlay_ops;
+	const struct mmp_overlay_ops *overlay_ops;
 	void *plat_data;
 };
 
@@ -317,7 +309,7 @@ extern void mmp_unregister_path(struct mmp_path *path);
 extern void mmp_register_panel(struct mmp_panel *panel);
 extern void mmp_unregister_panel(struct mmp_panel *panel);
 
-/* defintions for platform data */
+/* definitions for platform data */
 /* interface for buffer driver */
 struct mmp_buffer_driver_mach_info {
 	const char	*name;
@@ -334,6 +326,7 @@ struct mmp_mach_path_config {
 	int output_type;
 	u32 path_config;
 	u32 link_config;
+	u32 dsi_rbswap;
 };
 
 struct mmp_mach_plat_info {

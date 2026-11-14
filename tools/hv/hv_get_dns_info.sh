@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/bin/sh
 
-# This example script parses /etc/resolv.conf to retrive DNS information.
+# This example script parses /etc/resolv.conf to retrieve DNS information.
 # In the interest of keeping the KVP daemon code free of distro specific
 # information; the kvp daemon code invokes this external script to gather
 # DNS information.
@@ -10,4 +10,4 @@
 # this script can be based on the Network Manager APIs for retrieving DNS
 # entries.
 
-cat /etc/resolv.conf 2>/dev/null | awk '/^nameserver/ { print $2 }'
+exec awk '/^nameserver/ { print $2 }' /etc/resolv.conf 2>/dev/null

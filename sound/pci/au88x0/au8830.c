@@ -1,8 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 #include "au8830.h"
 #include "au88x0.h"
-static DEFINE_PCI_DEVICE_TABLE(snd_vortex_ids) = {
-	{PCI_VDEVICE(AUREAL, PCI_DEVICE_ID_AUREAL_VORTEX_2), 0,},
-	{0,}
+static const struct pci_device_id snd_vortex_ids[] = {
+	{ PCI_VDEVICE(AUREAL, PCI_DEVICE_ID_AUREAL_VORTEX_2), .driver_data = 0 },
+	{ }
 };
 
 #include "au88x0_synth.c"

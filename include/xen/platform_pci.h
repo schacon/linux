@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _XEN_PLATFORM_PCI_H
 #define _XEN_PLATFORM_PCI_H
 
@@ -29,7 +30,7 @@
 static inline int xen_must_unplug_nics(void) {
 #if (defined(CONFIG_XEN_NETDEV_FRONTEND) || \
 		defined(CONFIG_XEN_NETDEV_FRONTEND_MODULE)) && \
-		defined(CONFIG_XEN_PVHVM)
+		defined(CONFIG_X86)
         return 1;
 #else
         return 0;
@@ -39,13 +40,34 @@ static inline int xen_must_unplug_nics(void) {
 static inline int xen_must_unplug_disks(void) {
 #if (defined(CONFIG_XEN_BLKDEV_FRONTEND) || \
 		defined(CONFIG_XEN_BLKDEV_FRONTEND_MODULE)) && \
-		defined(CONFIG_XEN_PVHVM)
+		defined(CONFIG_X86)
         return 1;
 #else
         return 0;
 #endif
 }
 
-extern int xen_platform_pci_unplug;
-
+#if defined(CONFIG_X86)
+extern bool xen_has_pv_devices(void);
+extern bool xen_has_pv_disk_devices(void);
+extern bool xen_has_pv_nic_devices(void);
+extern bool xen_has_pv_and_legacy_disk_devices(void);
+#else
+static inline bool xen_has_pv_devices(void)
+{
+	return IS_ENABLED(CONFIG_XEN);
+}
+static inline bool xen_has_pv_disk_devices(void)
+{
+	return IS_ENABLED(CONFIG_XEN);
+}
+static inline bool xen_has_pv_nic_devices(void)
+{
+	return IS_ENABLED(CONFIG_XEN);
+}
+static inline bool xen_has_pv_and_legacy_disk_devices(void)
+{
+	return false;
+}
+#endif
 #endif /* _XEN_PLATFORM_PCI_H */

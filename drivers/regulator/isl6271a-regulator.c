@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * isl6271a-regulator.c
  *
  * Support for Intersil ISL6271A voltage regulator
  *
  * Copyright (C) 2010 Marek Vasut <marek.vasut@gmail.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any kind,
- * whether express or implied; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 
 #include <linux/kernel.h>
@@ -31,7 +23,6 @@
 /* PMIC details */
 struct isl_pmic {
 	struct i2c_client	*client;
-	struct regulator_dev	*rdev[3];
 	struct mutex		mtx;
 };
 
@@ -66,14 +57,14 @@ static int isl6271a_set_voltage_sel(struct regulator_dev *dev,
 	return err;
 }
 
-static struct regulator_ops isl_core_ops = {
+static const struct regulator_ops isl_core_ops = {
 	.get_voltage_sel = isl6271a_get_voltage_sel,
 	.set_voltage_sel = isl6271a_set_voltage_sel,
 	.list_voltage	= regulator_list_voltage_linear,
 	.map_voltage	= regulator_map_voltage_linear,
 };
 
-static struct regulator_ops isl_fixed_ops = {
+static const struct regulator_ops isl_fixed_ops = {
 	.list_voltage	= regulator_list_voltage_linear,
 };
 
@@ -106,18 +97,19 @@ static const struct regulator_desc isl_rd[] = {
 	},
 };
 
-static int isl6271a_probe(struct i2c_client *i2c,
-				     const struct i2c_device_id *id)
+static int isl6271a_probe(struct i2c_client *i2c)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(i2c);
+	struct regulator_dev *rdev;
 	struct regulator_config config = { };
-	struct regulator_init_data *init_data	= i2c->dev.platform_data;
+	struct regulator_init_data *init_data	= dev_get_platdata(&i2c->dev);
 	struct isl_pmic *pmic;
-	int err, i;
+	int i;
 
 	if (!i2c_check_functionality(i2c->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EIO;
 
-	pmic = devm_kzalloc(&i2c->dev, sizeof(struct isl_pmic), GFP_KERNEL);
+	pmic = devm_kzalloc_obj(&i2c->dev, struct isl_pmic);
 	if (!pmic)
 		return -ENOMEM;
 
@@ -130,40 +122,24 @@ static int isl6271a_probe(struct i2c_client *i2c,
 		if (i == 0)
 			config.init_data = init_data;
 		else
-			config.init_data = 0;
+			config.init_data = NULL;
 		config.driver_data = pmic;
 
-		pmic->rdev[i] = regulator_register(&isl_rd[i], &config);
-		if (IS_ERR(pmic->rdev[i])) {
+		rdev = devm_regulator_register(&i2c->dev, &isl_rd[i], &config);
+		if (IS_ERR(rdev)) {
 			dev_err(&i2c->dev, "failed to register %s\n", id->name);
-			err = PTR_ERR(pmic->rdev[i]);
-			goto error;
+			return PTR_ERR(rdev);
 		}
 	}
 
 	i2c_set_clientdata(i2c, pmic);
 
 	return 0;
-
-error:
-	while (--i >= 0)
-		regulator_unregister(pmic->rdev[i]);
-	return err;
-}
-
-static int isl6271a_remove(struct i2c_client *i2c)
-{
-	struct isl_pmic *pmic = i2c_get_clientdata(i2c);
-	int i;
-
-	for (i = 0; i < 3; i++)
-		regulator_unregister(pmic->rdev[i]);
-	return 0;
 }
 
 static const struct i2c_device_id isl6271a_id[] = {
-	{.name = "isl6271a", 0 },
-	{ },
+	{ .name = "isl6271a" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, isl6271a_id);
@@ -171,10 +147,9 @@ MODULE_DEVICE_TABLE(i2c, isl6271a_id);
 static struct i2c_driver isl6271a_i2c_driver = {
 	.driver = {
 		.name = "isl6271a",
-		.owner = THIS_MODULE,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = isl6271a_probe,
-	.remove = isl6271a_remove,
 	.id_table = isl6271a_id,
 };
 

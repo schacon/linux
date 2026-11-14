@@ -1,23 +1,24 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef _ASM_ARC_MMU_H
 #define _ASM_ARC_MMU_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
+
+#include <linux/threads.h>	/* NR_CPUS */
 
 typedef struct {
-	unsigned long asid;	/* Pvt Addr-Space ID for mm */
-#ifdef CONFIG_ARC_TLB_DBG
-	struct task_struct *tsk;
-#endif
+	unsigned long asid[NR_CPUS];	/* 8 bit MMU PID + Generation cycle */
 } mm_context_t;
 
+struct pt_regs;
+extern void do_tlb_overlap_fault(unsigned long, unsigned long, struct pt_regs *);
+
 #endif
+
+#include <asm/mmu-arcv2.h>
 
 #endif

@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * cs53l32a (Adaptec AVC-2010 and AVC-2410) i2c ivtv driver.
  * Copyright (C) 2005  Martin Vaughan
  *
  * Audio source switching for Adaptec AVC-2410 added by Trev Jackson
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 
@@ -24,11 +11,10 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/ioctl.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/i2c.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-device.h>
-#include <media/v4l2-chip-ident.h>
 #include <media/v4l2-ctrls.h>
 
 MODULE_DESCRIPTION("i2c device driver for cs53l32a Audio ADC");
@@ -104,14 +90,6 @@ static int cs53l32a_s_ctrl(struct v4l2_ctrl *ctrl)
 	return -EINVAL;
 }
 
-static int cs53l32a_g_chip_ident(struct v4l2_subdev *sd, struct v4l2_dbg_chip_ident *chip)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	return v4l2_chip_ident_i2c_client(client,
-			chip, V4L2_IDENT_CS53l32A, 0);
-}
-
 static int cs53l32a_log_status(struct v4l2_subdev *sd)
 {
 	struct cs53l32a_state *state = to_state(sd);
@@ -130,14 +108,6 @@ static const struct v4l2_ctrl_ops cs53l32a_ctrl_ops = {
 
 static const struct v4l2_subdev_core_ops cs53l32a_core_ops = {
 	.log_status = cs53l32a_log_status,
-	.g_chip_ident = cs53l32a_g_chip_ident,
-	.g_ext_ctrls = v4l2_subdev_g_ext_ctrls,
-	.try_ext_ctrls = v4l2_subdev_try_ext_ctrls,
-	.s_ext_ctrls = v4l2_subdev_s_ext_ctrls,
-	.g_ctrl = v4l2_subdev_g_ctrl,
-	.s_ctrl = v4l2_subdev_s_ctrl,
-	.queryctrl = v4l2_subdev_queryctrl,
-	.querymenu = v4l2_subdev_querymenu,
 };
 
 static const struct v4l2_subdev_audio_ops cs53l32a_audio_ops = {
@@ -158,9 +128,9 @@ static const struct v4l2_subdev_ops cs53l32a_ops = {
  * concerning the addresses: i2c wants 7 bit (without the r/w bit), so '>>1'
  */
 
-static int cs53l32a_probe(struct i2c_client *client,
-			  const struct i2c_device_id *id)
+static int cs53l32a_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct cs53l32a_state *state;
 	struct v4l2_subdev *sd;
 	int i;
@@ -170,12 +140,12 @@ static int cs53l32a_probe(struct i2c_client *client,
 		return -EIO;
 
 	if (!id)
-		strlcpy(client->name, "cs53l32a", sizeof(client->name));
+		strscpy(client->name, "cs53l32a", sizeof(client->name));
 
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	state = kzalloc(sizeof(struct cs53l32a_state), GFP_KERNEL);
+	state = devm_kzalloc_obj(&client->dev, *state);
 	if (state == NULL)
 		return -ENOMEM;
 	sd = &state->sd;
@@ -197,7 +167,6 @@ static int cs53l32a_probe(struct i2c_client *client,
 		int err = state->hdl.error;
 
 		v4l2_ctrl_handler_free(&state->hdl);
-		kfree(state);
 		return err;
 	}
 
@@ -221,26 +190,23 @@ static int cs53l32a_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int cs53l32a_remove(struct i2c_client *client)
+static void cs53l32a_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct cs53l32a_state *state = to_state(sd);
 
 	v4l2_device_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(&state->hdl);
-	kfree(state);
-	return 0;
 }
 
 static const struct i2c_device_id cs53l32a_id[] = {
-	{ "cs53l32a", 0 },
+	{ .name = "cs53l32a" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cs53l32a_id);
 
 static struct i2c_driver cs53l32a_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "cs53l32a",
 	},
 	.probe		= cs53l32a_probe,

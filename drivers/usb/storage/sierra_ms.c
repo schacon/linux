@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <scsi/scsi.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_cmnd.h>
@@ -76,6 +77,13 @@ static int sierra_get_swoc_info(struct usb_device *udev,
 			sizeof(struct swoc_info),	/* __u16 size 	     */
 			USB_CTRL_SET_TIMEOUT);		/* int timeout 	     */
 
+	/*
+	 * A short IN transfer leaves the tail of swocInfo uninitialized;
+	 * only a full transfer is valid.
+	 */
+	if (result != sizeof(struct swoc_info))
+		return -EIO;
+
 	swocInfo->LinuxSKU = le16_to_cpu(swocInfo->LinuxSKU);
 	swocInfo->LinuxVer = le16_to_cpu(swocInfo->LinuxVer);
 	return result;
@@ -89,7 +97,7 @@ static void debug_swoc(const struct device *dev, struct swoc_info *swocInfo)
 }
 
 
-static ssize_t show_truinst(struct device *dev, struct device_attribute *attr,
+static ssize_t truinst_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	struct swoc_info *swocInfo;
@@ -97,45 +105,39 @@ static ssize_t show_truinst(struct device *dev, struct device_attribute *attr,
 	struct usb_device *udev = interface_to_usbdev(intf);
 	int result;
 	if (swi_tru_install == TRU_FORCE_MS) {
-		result = snprintf(buf, PAGE_SIZE, "Forced Mass Storage\n");
+		result = sysfs_emit(buf, "Forced Mass Storage\n");
 	} else {
-		swocInfo = kmalloc(sizeof(struct swoc_info), GFP_KERNEL);
+		swocInfo = kmalloc_obj(struct swoc_info);
 		if (!swocInfo) {
-			snprintf(buf, PAGE_SIZE, "Error\n");
+			sysfs_emit(buf, "Error\n");
 			return -ENOMEM;
 		}
 		result = sierra_get_swoc_info(udev, swocInfo);
 		if (result < 0) {
 			dev_dbg(dev, "SWIMS: failed SWoC query\n");
 			kfree(swocInfo);
-			snprintf(buf, PAGE_SIZE, "Error\n");
+			sysfs_emit(buf, "Error\n");
 			return -EIO;
 		}
 		debug_swoc(dev, swocInfo);
-		result = snprintf(buf, PAGE_SIZE,
-			"REV=%02d SKU=%04X VER=%04X\n",
-			swocInfo->rev,
-			swocInfo->LinuxSKU,
-			swocInfo->LinuxVer);
+		result = sysfs_emit(buf,
+				    "REV=%02d SKU=%04X VER=%04X\n",
+				    swocInfo->rev,
+				    swocInfo->LinuxSKU,
+				    swocInfo->LinuxVer);
 		kfree(swocInfo);
 	}
 	return result;
 }
-static DEVICE_ATTR(truinst, S_IRUGO, show_truinst, NULL);
+static DEVICE_ATTR_RO(truinst);
 
 int sierra_ms_init(struct us_data *us)
 {
 	int result, retries;
 	struct swoc_info *swocInfo;
 	struct usb_device *udev;
-	struct Scsi_Host *sh;
 
-	retries = 3;
-	result = 0;
 	udev = us->pusb_dev;
-
-	sh = us_to_host(us);
-	scsi_get_host_dev(sh);
 
 	/* Force Modem mode */
 	if (swi_tru_install == TRU_FORCE_MODEM) {
@@ -154,8 +156,7 @@ int sierra_ms_init(struct us_data *us)
 	else {
 		usb_stor_dbg(us, "SWIMS: Normal SWoC Logic\n");
 
-		swocInfo = kmalloc(sizeof(struct swoc_info),
-				GFP_KERNEL);
+		swocInfo = kmalloc_obj(struct swoc_info);
 		if (!swocInfo)
 			return -ENOMEM;
 
@@ -177,7 +178,8 @@ int sierra_ms_init(struct us_data *us)
 
 		debug_swoc(&us->pusb_dev->dev, swocInfo);
 
-		/* If there is not Linux software on the TRU-Install device
+		/*
+		 * If there is not Linux software on the TRU-Install device
 		 * then switch to modem mode
 		 */
 		if (!containsFullLinuxPackage(swocInfo)) {
@@ -192,8 +194,6 @@ int sierra_ms_init(struct us_data *us)
 		kfree(swocInfo);
 	}
 complete:
-	result = device_create_file(&us->pusb_intf->dev, &dev_attr_truinst);
-
-	return 0;
+	return device_create_file(&us->pusb_intf->dev, &dev_attr_truinst);
 }
 

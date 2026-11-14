@@ -1,8 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifdef __KERNEL__
 #ifndef __MICROBLAZE_KGDB_H__
 #define __MICROBLAZE_KGDB_H__
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #define CACHE_FLUSH_IS_SAFE	1
 #define BUFMAX			2048
@@ -23,6 +24,9 @@ static inline void arch_kgdb_breakpoint(void)
 	__asm__ __volatile__("brki r16, 0x18;");
 }
 
-#endif /* __ASSEMBLY__ */
+struct pt_regs;
+asmlinkage void microblaze_kgdb_break(struct pt_regs *regs);
+
+#endif /* __ASSEMBLER__ */
 #endif /* __MICROBLAZE_KGDB_H__ */
 #endif /* __KERNEL__ */

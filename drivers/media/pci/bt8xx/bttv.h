@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *
  *  bttv - Bt848 frame grabber driver
@@ -17,7 +18,6 @@
 #include <linux/videodev2.h>
 #include <linux/i2c.h>
 #include <media/v4l2-device.h>
-#include <media/i2c-addr.h>
 #include <media/tuner.h>
 
 /* ---------------------------------------------------------- */
@@ -165,7 +165,7 @@
 #define BTTV_BOARD_PV_M4900                0x8b
 #define BTTV_BOARD_OSPREY440               0x8c
 #define BTTV_BOARD_ASOUND_SKYEYE	   0x8d
-#define BTTV_BOARD_SABRENT_TVFM   	   0x8e
+#define BTTV_BOARD_SABRENT_TVFM		   0x8e
 #define BTTV_BOARD_HAUPPAUGE_IMPACTVCB     0x8f
 #define BTTV_BOARD_MACHTV_MAGICTV          0x90
 #define BTTV_BOARD_SSAI_SECURITY	   0x91
@@ -185,6 +185,11 @@
 #define BTTV_BOARD_PV183                   0x9f
 #define BTTV_BOARD_TVT_TD3116		   0xa0
 #define BTTV_BOARD_APOSONIC_WDVR           0xa1
+#define BTTV_BOARD_ADLINK_MPG24            0xa2
+#define BTTV_BOARD_BT848_CAP_14            0xa3
+#define BTTV_BOARD_CYBERVISION_CV06        0xa4
+#define BTTV_BOARD_KWORLD_VSTREAM_XPERT    0xa5
+#define BTTV_BOARD_PCI_8604PW              0xa6
 
 /* more card-specific defines */
 #define PT2254_L_CHANNEL 0x10
@@ -232,6 +237,7 @@ struct tvcard {
 #define PLL_NONE 0
 #define PLL_28   1
 #define PLL_35   2
+#define PLL_14   3
 
 	/* i2c audio flags */
 	unsigned int no_msp34xx:1;
@@ -259,7 +265,7 @@ extern struct tvcard bttv_tvcards[];
  * that they are changed to octal.  One should not use hex number, macros, or
  * anything else with this macro.  Just use plain integers from 0 to 3.
  */
-#define _MUXSELf(a)      	0##a << 30
+#define _MUXSELf(a)		0##a << 30
 #define _MUXSELe(a, b...)	0##a << 28 | _MUXSELf(b)
 #define _MUXSELd(a, b...)	0##a << 26 | _MUXSELe(b)
 #define _MUXSELc(a, b...)	0##a << 24 | _MUXSELd(b)
@@ -282,8 +288,7 @@ extern void bttv_init_card1(struct bttv *btv);
 extern void bttv_init_card2(struct bttv *btv);
 extern void bttv_init_tuner(struct bttv *btv);
 
-/* card-specific funtions */
-extern void tea5757_set_freq(struct bttv *btv, unsigned short freq);
+/* card-specific functions */
 extern u32 bttv_tda9880_setnorm(struct bttv *btv, u32 gpiobits);
 
 /* extra tweaks for some chipsets */
@@ -336,7 +341,7 @@ struct bttv_sub_driver {
 	int                    (*probe)(struct bttv_sub_device *sub);
 	void                   (*remove)(struct bttv_sub_device *sub);
 };
-#define to_bttv_sub_drv(x) container_of((x), struct bttv_sub_driver, drv)
+#define to_bttv_sub_drv(x) container_of_const((x), struct bttv_sub_driver, drv)
 
 int bttv_sub_register(struct bttv_sub_driver *drv, char *wanted);
 int bttv_sub_unregister(struct bttv_sub_driver *drv);
@@ -372,8 +377,3 @@ extern void bttv_input_fini(struct bttv *dev);
 extern void bttv_input_irq(struct bttv *dev);
 
 #endif /* _BTTV_H_ */
-/*
- * Local variables:
- * c-basic-offset: 8
- * End:
- */

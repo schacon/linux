@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * auxio.h:  Definitions and code for the Auxiliary I/O register.
  *
@@ -28,14 +29,14 @@
 #define AUXIO_FLPY_EJCT   0x02    /* Eject floppy disk.  Write only. */
 #define AUXIO_LED         0x01    /* On if set, off if unset. Read/Write */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /*
  * NOTE: these routines are implementation dependent--
  * understand the hardware you are querying!
  */
-extern void set_auxio(unsigned char bits_on, unsigned char bits_off);
-extern unsigned char get_auxio(void); /* .../asm/floppy.h */
+void set_auxio(unsigned char bits_on, unsigned char bits_off);
+unsigned char get_auxio(void); /* .../asm/floppy.h */
 
 /*
  * The following routines are provided for driver-compatibility
@@ -74,11 +75,11 @@ do { \
 	} \
 } while (0)
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* !(__ASSEMBLER__) */
 
 
 /* AUXIO2 (Power Off Control) */
-extern __volatile__ unsigned char * auxio_power_register;
+extern volatile u8 __iomem *auxio_power_register;
 
 #define	AUXIO_POWER_DETECT_FAILURE	32
 #define	AUXIO_POWER_CLEAR_FAILURE	2

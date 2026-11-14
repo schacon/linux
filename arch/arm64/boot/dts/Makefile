@@ -1,8 +1,43 @@
-dtb-$(CONFIG_ARCH_VEXPRESS) += rtsm_ve-aemv8a.dtb foundation-v8.dtb
-
-targets += dtbs
-targets += $(dtb-y)
-
-dtbs: $(addprefix $(obj)/, $(dtb-y))
-
-clean-files := *.dtb
+# SPDX-License-Identifier: GPL-2.0
+subdir-y += actions
+subdir-y += airoha
+subdir-y += allwinner
+subdir-y += altera
+subdir-y += amazon
+subdir-y += amd
+subdir-y += amlogic
+subdir-y += apm
+subdir-y += apple
+subdir-y += arm
+subdir-y += aspeed
+subdir-y += axiado
+subdir-y += bitmain
+subdir-y += blaize
+subdir-y += broadcom
+subdir-y += bst
+subdir-y += cavium
+subdir-y += cix
+subdir-y += exynos
+subdir-y += freescale
+subdir-y += google
+subdir-y += hisilicon
+subdir-y += intel
+subdir-y += lg
+subdir-y += marvell
+subdir-y += mediatek
+subdir-y += microchip
+subdir-y += nuvoton
+subdir-y += nvidia
+subdir-y += qcom
+subdir-y += realtek
+subdir-y += renesas
+subdir-y += rockchip
+subdir-y += socionext
+subdir-y += sophgo
+subdir-y += sprd
+subdir-y += st
+subdir-y += synaptics
+subdir-y += tesla
+subdir-y += ti
+subdir-y += toshiba
+subdir-y += xilinx

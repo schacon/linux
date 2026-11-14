@@ -363,7 +363,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_cp863(void)
@@ -379,4 +378,5 @@ static void __exit exit_nls_cp863(void)
 module_init(init_nls_cp863)
 module_exit(exit_nls_cp863)
 
+MODULE_DESCRIPTION("NLS Codepage 863 (Canadian French)");
 MODULE_LICENSE("Dual BSD/GPL");

@@ -1,11 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <asm/cpu_device_id.h>
-#include <asm/processor.h>
+#include <asm/cpufeature.h>
 #include <linux/cpu.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/slab.h>
 
 /**
- * x86_match_cpu - match current CPU again an array of x86_cpu_ids
+ * x86_match_cpu - match current CPU against an array of x86_cpu_ids
  * @match: Pointer to array of x86_cpu_ids. Last entry terminated with
  *         {}.
  *
@@ -15,12 +16,16 @@
  * respective wildcard entries.
  *
  * A typical table entry would be to match a specific CPU
- * { X86_VENDOR_INTEL, 6, 0x12 }
- * or to match a specific CPU feature
- * { X86_FEATURE_MATCH(X86_FEATURE_FOOBAR) }
+ *
+ * X86_MATCH_VFM_FEATURE(INTEL_BROADWELL, X86_FEATURE_ANY, NULL);
  *
  * Fields can be wildcarded with %X86_VENDOR_ANY, %X86_FAMILY_ANY,
- * %X86_MODEL_ANY, %X86_FEATURE_ANY or 0 (except for vendor)
+ * %X86_MODEL_ANY, %X86_FEATURE_ANY (except for vendor)
+ *
+ * asm/cpu_device_id.h contains a set of useful macros which are shortcuts
+ * for various common selections. The above can be shortened to:
+ *
+ * X86_MATCH_VFM(INTEL_BROADWELL, NULL);
  *
  * Arrays used to match for this should also be declared using
  * MODULE_DEVICE_TABLE(x86cpu, ...)
@@ -33,14 +38,22 @@ const struct x86_cpu_id *x86_match_cpu(const struct x86_cpu_id *match)
 	const struct x86_cpu_id *m;
 	struct cpuinfo_x86 *c = &boot_cpu_data;
 
-	for (m = match; m->vendor | m->family | m->model | m->feature; m++) {
+	for (m = match; m->flags & X86_CPU_ID_FLAG_ENTRY_VALID; m++) {
 		if (m->vendor != X86_VENDOR_ANY && c->x86_vendor != m->vendor)
 			continue;
 		if (m->family != X86_FAMILY_ANY && c->x86 != m->family)
 			continue;
 		if (m->model != X86_MODEL_ANY && c->x86_model != m->model)
 			continue;
+		if (m->steppings != X86_STEPPING_ANY &&
+		    !(BIT(c->x86_stepping) & m->steppings))
+			continue;
+		if (m->platform_mask != X86_PLATFORM_ANY &&
+		    !(BIT(c->intel_platform_id) & m->platform_mask))
+			continue;
 		if (m->feature != X86_FEATURE_ANY && !cpu_has(c, m->feature))
+			continue;
+		if (m->type != X86_CPU_TYPE_ANY && c->topo.cpu_type != m->type)
 			continue;
 		return m;
 	}
@@ -48,44 +61,13 @@ const struct x86_cpu_id *x86_match_cpu(const struct x86_cpu_id *match)
 }
 EXPORT_SYMBOL(x86_match_cpu);
 
-ssize_t arch_print_cpu_modalias(struct device *dev,
-				struct device_attribute *attr,
-				char *bufptr)
+bool x86_match_min_microcode_rev(const struct x86_cpu_id *table)
 {
-	int size = PAGE_SIZE;
-	int i, n;
-	char *buf = bufptr;
+	const struct x86_cpu_id *res = x86_match_cpu(table);
 
-	n = snprintf(buf, size, "x86cpu:vendor:%04X:family:%04X:"
-		     "model:%04X:feature:",
-		boot_cpu_data.x86_vendor,
-		boot_cpu_data.x86,
-		boot_cpu_data.x86_model);
-	size -= n;
-	buf += n;
-	size -= 1;
-	for (i = 0; i < NCAPINTS*32; i++) {
-		if (boot_cpu_has(i)) {
-			n = snprintf(buf, size, ",%04X", i);
-			if (n >= size) {
-				WARN(1, "x86 features overflow page\n");
-				break;
-			}
-			size -= n;
-			buf += n;
-		}
-	}
-	*buf++ = '\n';
-	return buf - bufptr;
-}
+	if (!res || res->driver_data > boot_cpu_data.microcode)
+		return false;
 
-int arch_cpu_uevent(struct device *dev, struct kobj_uevent_env *env)
-{
-	char *buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
-	if (buf) {
-		arch_print_cpu_modalias(NULL, NULL, buf);
-		add_uevent_var(env, "MODALIAS=%s", buf);
-		kfree(buf);
-	}
-	return 0;
+	return true;
 }
+EXPORT_SYMBOL_GPL(x86_match_min_microcode_rev);

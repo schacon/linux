@@ -1,16 +1,22 @@
-#define EM_GPIO_0  (1 << 0)
-#define EM_GPIO_1  (1 << 1)
-#define EM_GPIO_2  (1 << 2)
-#define EM_GPIO_3  (1 << 3)
-#define EM_GPIO_4  (1 << 4)
-#define EM_GPIO_5  (1 << 5)
-#define EM_GPIO_6  (1 << 6)
-#define EM_GPIO_7  (1 << 7)
+/* SPDX-License-Identifier: GPL-2.0 */
 
-#define EM_GPO_0   (1 << 0)
-#define EM_GPO_1   (1 << 1)
-#define EM_GPO_2   (1 << 2)
-#define EM_GPO_3   (1 << 3)
+/*
+ * em28xx-reg.h - Register definitions for em28xx driver
+ */
+
+#define EM_GPIO_0  ((unsigned char)BIT(0))
+#define EM_GPIO_1  ((unsigned char)BIT(1))
+#define EM_GPIO_2  ((unsigned char)BIT(2))
+#define EM_GPIO_3  ((unsigned char)BIT(3))
+#define EM_GPIO_4  ((unsigned char)BIT(4))
+#define EM_GPIO_5  ((unsigned char)BIT(5))
+#define EM_GPIO_6  ((unsigned char)BIT(6))
+#define EM_GPIO_7  ((unsigned char)BIT(7))
+
+#define EM_GPO_0   ((unsigned char)BIT(0))
+#define EM_GPO_1   ((unsigned char)BIT(1))
+#define EM_GPO_2   ((unsigned char)BIT(2))
+#define EM_GPO_3   ((unsigned char)BIT(3))
 
 /* em28xx endpoints */
 /* 0x82:   (always ?) analog */
@@ -25,10 +31,12 @@
 #define EM28XX_R00_CHIPCFG	0x00
 
 /* em28xx Chip Configuration 0x00 */
-#define EM28XX_CHIPCFG_VENDOR_AUDIO		0x80
-#define EM28XX_CHIPCFG_I2S_VOLUME_CAPABLE	0x40
-#define EM28XX_CHIPCFG_I2S_5_SAMPRATES		0x30
-#define EM28XX_CHIPCFG_I2S_3_SAMPRATES		0x20
+#define EM2860_CHIPCFG_VENDOR_AUDIO		0x80
+#define EM2860_CHIPCFG_I2S_VOLUME_CAPABLE	0x40
+#define EM2820_CHIPCFG_I2S_3_SAMPRATES		0x30
+#define EM2860_CHIPCFG_I2S_5_SAMPRATES		0x30
+#define EM2820_CHIPCFG_I2S_1_SAMPRATE		0x20
+#define EM2860_CHIPCFG_I2S_3_SAMPRATES		0x20
 #define EM28XX_CHIPCFG_AC97			0x10
 #define EM28XX_CHIPCFG_AUDIOMASK		0x30
 
@@ -47,10 +55,10 @@
 #define EM28XX_CHIPCFG2_TS_PACKETSIZE_564	0x02
 #define EM28XX_CHIPCFG2_TS_PACKETSIZE_752	0x03
 
-
 /* GPIO/GPO registers */
-#define EM2880_R04_GPO	0x04    /* em2880-em2883 only */
-#define EM28XX_R08_GPIO	0x08	/* em2820 or upper */
+#define EM2880_R04_GPO		0x04    /* em2880-em2883 only */
+#define EM2820_R08_GPIO_CTRL	0x08	/* em2820-em2873/83 only */
+#define EM2820_R09_GPIO_STATE	0x09	/* em2820-em2873/83 only */
 
 #define EM28XX_R06_I2C_CLK	0x06
 
@@ -59,15 +67,15 @@
 #define EM28XX_I2C_CLK_WAIT_ENABLE	0x40
 #define EM28XX_I2C_EEPROM_ON_BOARD	0x08
 #define EM28XX_I2C_EEPROM_KEY_VALID	0x04
-#define EM2874_I2C_SECONDARY_BUS_SELECT	0x04 /* em2874 has two i2c busses */
+#define EM2874_I2C_SECONDARY_BUS_SELECT	0x04 /* em2874 has two i2c buses */
 #define EM28XX_I2C_FREQ_1_5_MHZ		0x03 /* bus frequency (bits [1-0]) */
 #define EM28XX_I2C_FREQ_25_KHZ		0x02
 #define EM28XX_I2C_FREQ_400_KHZ		0x01
 #define EM28XX_I2C_FREQ_100_KHZ		0x00
 
-
 #define EM28XX_R0A_CHIPID	0x0a
-#define EM28XX_R0C_USBSUSP	0x0c	/* */
+#define EM28XX_R0C_USBSUSP	0x0c
+#define   EM28XX_R0C_USBSUSP_SNAPSHOT	0x20 /* 1=button pressed, needs reset */
 
 #define EM28XX_R0E_AUDIOSRC	0x0e
 #define EM28XX_R0F_XCLK	0x0f
@@ -91,6 +99,24 @@
 #define EM28XX_XCLK_FREQUENCY_24MHZ	0x0b
 
 #define EM28XX_R10_VINMODE	0x10
+	  /* used by all non-camera devices: */
+#define   EM28XX_VINMODE_YUV422_CbYCrY  0x10
+	  /* used by camera devices: */
+#define   EM28XX_VINMODE_YUV422_YUYV    0x08
+#define   EM28XX_VINMODE_YUV422_YVYU    0x09
+#define   EM28XX_VINMODE_YUV422_UYVY    0x0a
+#define   EM28XX_VINMODE_YUV422_VYUY    0x0b
+#define   EM28XX_VINMODE_RGB8_BGGR      0x0c
+#define   EM28XX_VINMODE_RGB8_GRBG      0x0d
+#define   EM28XX_VINMODE_RGB8_GBRG      0x0e
+#define   EM28XX_VINMODE_RGB8_RGGB      0x0f
+	  /*
+	   * apparently:
+	   *   bit 0: swap component 1+2 with 3+4
+	   *                 => e.g.: YUYV => YVYU, BGGR => GRBG
+	   *   bit 1: swap component 1 with 2 and 3 with 4
+	   *                 => e.g.: YUYV => UYVY, BGGR => GBRG
+	   */
 
 #define EM28XX_R11_VINCTRL	0x11
 
@@ -153,7 +179,6 @@
 #define EM28XX_OUTFMT_YUV422_Y1UY0V	0x15
 #define EM28XX_OUTFMT_YUV411		0x18
 
-
 #define EM28XX_R28_XMIN	0x28
 #define EM28XX_R29_XMAX	0x29
 #define EM28XX_R2A_YMIN	0x2a
@@ -183,17 +208,44 @@
 #define EM28XX_R43_AC97BUSY	0x43
 
 #define EM28XX_R45_IR		0x45
-	/* 0x45  bit 7    - parity bit
-		 bits 6-0 - count
-	   0x46  IR brand
-	   0x47  IR data
+	/*
+	 * 0x45  bit 7    - parity bit
+	 *	 bits 6-0 - count
+	 * 0x46  IR brand
+	 *  0x47  IR data
 	 */
 
 /* em2874 registers */
 #define EM2874_R50_IR_CONFIG    0x50
 #define EM2874_R51_IR           0x51
+#define EM2874_R5D_TS1_PKT_SIZE 0x5d
+#define EM2874_R5E_TS2_PKT_SIZE 0x5e
+	/*
+	 * For both TS1 and TS2, In isochronous mode:
+	 *  0x01  188 bytes
+	 *  0x02  376 bytes
+	 *  0x03  564 bytes
+	 *  0x04  752 bytes
+	 *  0x05  940 bytes
+	 * In bulk mode:
+	 *  0x01..0xff  total packet count in 188-byte
+	 */
+
 #define EM2874_R5F_TS_ENABLE    0x5f
-#define EM2874_R80_GPIO         0x80
+
+/* em2874/174/84, em25xx, em276x/7x/8x GPIO registers */
+/*
+ * NOTE: not all ports are bonded out;
+ * Some ports are multiplexed with special function I/O
+ */
+#define EM2874_R80_GPIO_P0_CTRL    0x80
+#define EM2874_R81_GPIO_P1_CTRL    0x81
+#define EM2874_R82_GPIO_P2_CTRL    0x82
+#define EM2874_R83_GPIO_P3_CTRL    0x83
+#define EM2874_R84_GPIO_P0_STATE   0x84
+#define EM2874_R85_GPIO_P1_STATE   0x85
+#define EM2874_R86_GPIO_P2_STATE   0x86
+#define EM2874_R87_GPIO_P3_STATE   0x87
 
 /* em2874 IR config register (0x50) */
 #define EM2874_IR_NEC           0x00
@@ -203,12 +255,12 @@
 #define EM2874_IR_RC6_MODE_6A   0x0b
 
 /* em2874 Transport Stream Enable Register (0x5f) */
-#define EM2874_TS1_CAPTURE_ENABLE (1 << 0)
-#define EM2874_TS1_FILTER_ENABLE  (1 << 1)
-#define EM2874_TS1_NULL_DISCARD   (1 << 2)
-#define EM2874_TS2_CAPTURE_ENABLE (1 << 4)
-#define EM2874_TS2_FILTER_ENABLE  (1 << 5)
-#define EM2874_TS2_NULL_DISCARD   (1 << 6)
+#define EM2874_TS1_CAPTURE_ENABLE ((unsigned char)BIT(0))
+#define EM2874_TS1_FILTER_ENABLE  ((unsigned char)BIT(1))
+#define EM2874_TS1_NULL_DISCARD   ((unsigned char)BIT(2))
+#define EM2874_TS2_CAPTURE_ENABLE ((unsigned char)BIT(4))
+#define EM2874_TS2_FILTER_ENABLE  ((unsigned char)BIT(5))
+#define EM2874_TS2_NULL_DISCARD   ((unsigned char)BIT(6))
 
 /* register settings */
 #define EM2800_AUDIO_SRC_TUNER  0x0d
@@ -230,6 +282,9 @@ enum em28xx_chip_id {
 	CHIP_ID_EM2874 = 65,
 	CHIP_ID_EM2884 = 68,
 	CHIP_ID_EM28174 = 113,
+	CHIP_ID_EM28178 = 114,
+	CHIP_ID_EM28281 = 145,
+	CHIP_ID_EM2828X = 148,
 };
 
 /*

@@ -1,14 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- *  arch/arm/plat-omap/include/mach/keypad.h
- *
  *  Copyright (C) 2006 Komal Shah <komal_shah802003@yahoo.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
-#ifndef ASMARM_ARCH_KEYPAD_H
-#define ASMARM_ARCH_KEYPAD_H
+#ifndef __KEYPAD_OMAP_H
+#define __KEYPAD_OMAP_H
 
 #ifndef CONFIG_ARCH_OMAP1
 #warning Please update the board to use matrix-keypad driver
@@ -24,9 +19,6 @@ struct omap_kp_platform_data {
 	bool rep;
 	unsigned long delay;
 	bool dbounce;
-	/* specific to OMAP242x*/
-	unsigned int *row_gpios;
-	unsigned int *col_gpios;
 };
 
 /* Group (0..3) -- when multiple keys are pressed, only the

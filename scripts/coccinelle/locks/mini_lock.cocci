@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /// Find missing unlocks.  This semantic match considers the specific case
 /// where the unlock is missing from an if branch, and there is a lock
 /// before the if and an unlock after the if.  False positives are due to
@@ -6,12 +7,12 @@
 /// function call that releases the lock.
 ///
 // Confidence: Moderate
-// Copyright: (C) 2010-2012 Nicolas Palix.  GPLv2.
-// Copyright: (C) 2010-2012 Julia Lawall, INRIA/LIP6.  GPLv2.
-// Copyright: (C) 2010-2012 Gilles Muller, INRIA/LiP6.  GPLv2.
-// URL: http://coccinelle.lip6.fr/
+// Copyright: (C) 2010-2012 Nicolas Palix.
+// Copyright: (C) 2010-2012 Julia Lawall, INRIA/LIP6.
+// Copyright: (C) 2010-2012 Gilles Muller, INRIA/LiP6.
+// URL: https://coccinelle.gitlabpages.inria.fr/website
 // Comments:
-// Options: -no_includes -include_headers
+// Options: --no-includes --include-headers
 
 virtual context
 virtual org
@@ -52,11 +53,31 @@ spin_lock_irq@p1
 spin_lock_irqsave@p1
 ) (E1@p,...);
 
-@looped@
+@err_candidate exists@
+expression E1;
+position prelocked.p;
+position up != prelocked.p1;
+position rc;
+identifier lock,unlock;
+@@
+
+lock(E1@p,...);
+... when != E1
+    when any
+if (...) {
+  ... when != E1
+  return@rc ...;
+}
+... when != E1
+    when any
+unlock@up(E1,...);
+
+@looped exists@
+position err_candidate.rc;
 position r;
 @@
 
-for(...;...;...) { <+... return@r ...; ...+> }
+for(...;...;...) { <+... return@rc@r ...; ...+> }
 
 @err exists@
 expression E1;
@@ -67,12 +88,14 @@ identifier lock,unlock;
 @@
 
 *lock(E1@p,...);
-<+... when != E1
+... when != E1
+    when any
 if (...) {
   ... when != E1
 *  return@r ...;
 }
-...+>
+... when != E1
+    when any
 *unlock@up(E1,...);
 
 @script:python depends on org@

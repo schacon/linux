@@ -36,38 +36,43 @@
 extern struct shared_info *HYPERVISOR_shared_info;
 extern struct start_info *xen_start_info;
 
+#include <asm/bug.h>
+#include <asm/cpuid/api.h>
 #include <asm/processor.h>
+
+#define XEN_SIGNATURE "XenVMMXenVMM"
 
 static inline uint32_t xen_cpuid_base(void)
 {
-	uint32_t base, eax, ebx, ecx, edx;
-	char signature[13];
-
-	for (base = 0x40000000; base < 0x40010000; base += 0x100) {
-		cpuid(base, &eax, &ebx, &ecx, &edx);
-		*(uint32_t *)(signature + 0) = ebx;
-		*(uint32_t *)(signature + 4) = ecx;
-		*(uint32_t *)(signature + 8) = edx;
-		signature[12] = 0;
-
-		if (!strcmp("XenVMMXenVMM", signature) && ((eax - base) >= 2))
-			return base;
-	}
-
-	return 0;
+	return cpuid_base_hypervisor(XEN_SIGNATURE, 2);
 }
 
-#ifdef CONFIG_XEN
-extern bool xen_hvm_need_lapic(void);
+struct pci_dev;
 
-static inline bool xen_x2apic_para_available(void)
-{
-	return xen_hvm_need_lapic();
-}
+#ifdef CONFIG_XEN_PV_DOM0
+bool xen_initdom_restore_msi(struct pci_dev *dev);
 #else
-static inline bool xen_x2apic_para_available(void)
+static inline bool xen_initdom_restore_msi(struct pci_dev *dev) { return true; }
+#endif
+
+#ifdef CONFIG_HOTPLUG_CPU
+void xen_arch_register_cpu(int num);
+void xen_arch_unregister_cpu(int num);
+#endif
+
+#ifdef CONFIG_PVH
+void __init xen_pvh_init(struct boot_params *boot_params);
+void __init mem_map_via_hcall(struct boot_params *boot_params_p);
+#endif
+
+bool xen_is_cpu_lazy_mode(void);
+
+#if defined(CONFIG_XEN_DOM0) && defined(CONFIG_ACPI)
+void xen_sanitize_proc_cap_bits(uint32_t *buf);
+#else
+static inline void xen_sanitize_proc_cap_bits(uint32_t *buf)
 {
-	return (xen_cpuid_base() != 0);
+	BUG();
 }
 #endif
 

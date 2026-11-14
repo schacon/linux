@@ -1,20 +1,17 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  linux/arch/arm/mm/arm740.S: utility functions for ARM740
  *
  *  Copyright (C) 2004-2006 Hyok S. Choi (hyok.choi@samsung.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/cfi_types.h>
+#include <linux/pgtable.h>
 #include <asm/assembler.h>
 #include <asm/asm-offsets.h>
 #include <asm/hwcap.h>
 #include <asm/pgtable-hwdef.h>
-#include <asm/pgtable.h>
 #include <asm/ptrace.h>
 
 #include "proc-macros.S"
@@ -28,21 +25,32 @@
  *
  * These are not required.
  */
-ENTRY(cpu_arm740_proc_init)
-ENTRY(cpu_arm740_do_idle)
-ENTRY(cpu_arm740_dcache_clean_area)
-ENTRY(cpu_arm740_switch_mm)
-	mov	pc, lr
+SYM_TYPED_FUNC_START(cpu_arm740_proc_init)
+	ret	lr
+SYM_FUNC_END(cpu_arm740_proc_init)
+
+SYM_TYPED_FUNC_START(cpu_arm740_do_idle)
+	ret	lr
+SYM_FUNC_END(cpu_arm740_do_idle)
+
+SYM_TYPED_FUNC_START(cpu_arm740_dcache_clean_area)
+	ret	lr
+SYM_FUNC_END(cpu_arm740_dcache_clean_area)
+
+SYM_TYPED_FUNC_START(cpu_arm740_switch_mm)
+	ret	lr
+SYM_FUNC_END(cpu_arm740_switch_mm)
 
 /*
  * cpu_arm740_proc_fin()
  */
-ENTRY(cpu_arm740_proc_fin)
+SYM_TYPED_FUNC_START(cpu_arm740_proc_fin)
 	mrc	p15, 0, r0, c1, c0, 0
 	bic	r0, r0, #0x3f000000		@ bank/f/lock/s
 	bic	r0, r0, #0x0000000c		@ w-buffer/cache
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
-	mov	pc, lr
+	ret	lr
+SYM_FUNC_END(cpu_arm740_proc_fin)
 
 /*
  * cpu_arm740_reset(loc)
@@ -50,17 +58,15 @@ ENTRY(cpu_arm740_proc_fin)
  * Notes   : This sets up everything for a reset
  */
 	.pushsection	.idmap.text, "ax"
-ENTRY(cpu_arm740_reset)
+SYM_TYPED_FUNC_START(cpu_arm740_reset)
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c0, 0		@ invalidate cache
 	mrc	p15, 0, ip, c1, c0, 0		@ get ctrl register
 	bic	ip, ip, #0x0000000c		@ ............wc..
 	mcr	p15, 0, ip, c1, c0, 0		@ ctrl register
-	mov	pc, r0
-ENDPROC(cpu_arm740_reset)
+	ret	r0
+SYM_FUNC_END(cpu_arm740_reset)
 	.popsection
-
-	__CPUINIT
 
 	.type	__arm740_setup, #function
 __arm740_setup:
@@ -117,7 +123,7 @@ __arm740_setup:
 						@ need some benchmark
 	orr	r0, r0, #0x0000000d		@ MPU/Cache/WB
 
-	mov	pc, lr
+	ret	lr
 
 	.size	__arm740_setup, . - __arm740_setup
 
@@ -134,14 +140,14 @@ __arm740_setup:
 
 	.align
 
-	.section ".proc.info.init", #alloc, #execinstr
+	.section ".proc.info.init", "a"
 	.type	__arm740_proc_info,#object
 __arm740_proc_info:
 	.long	0x41807400
 	.long	0xfffffff0
 	.long	0
 	.long	0
-	b	__arm740_setup
+	initfn	__arm740_setup, __arm740_proc_info
 	.long	cpu_arch_name
 	.long	cpu_elf_name
 	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB | HWCAP_26BIT

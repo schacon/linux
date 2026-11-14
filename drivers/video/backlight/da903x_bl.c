@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Backlight driver for Dialog Semiconductor DA9030/DA9034
  *
@@ -6,16 +7,11 @@
  *
  * Copyright (C) 2006-2008 Marvell International Ltd.
  *	Eric Miao <eric.miao@marvell.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
-#include <linux/fb.h>
 #include <linux/backlight.h>
 #include <linux/mfd/da903x.h>
 #include <linux/slab.h>
@@ -80,18 +76,7 @@ static int da903x_backlight_set(struct backlight_device *bl, int brightness)
 
 static int da903x_backlight_update_status(struct backlight_device *bl)
 {
-	int brightness = bl->props.brightness;
-
-	if (bl->props.power != FB_BLANK_UNBLANK)
-		brightness = 0;
-
-	if (bl->props.fb_blank != FB_BLANK_UNBLANK)
-		brightness = 0;
-
-	if (bl->props.state & BL_CORE_SUSPENDED)
-		brightness = 0;
-
-	return da903x_backlight_set(bl, brightness);
+	return da903x_backlight_set(bl, backlight_get_brightness(bl));
 }
 
 static int da903x_backlight_get_brightness(struct backlight_device *bl)
@@ -109,13 +94,13 @@ static const struct backlight_ops da903x_backlight_ops = {
 
 static int da903x_backlight_probe(struct platform_device *pdev)
 {
-	struct da9034_backlight_pdata *pdata = pdev->dev.platform_data;
+	struct da9034_backlight_pdata *pdata = dev_get_platdata(&pdev->dev);
 	struct da903x_backlight_data *data;
 	struct backlight_device *bl;
 	struct backlight_properties props;
 	int max_brightness;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(&pdev->dev, *data);
 	if (data == NULL)
 		return -ENOMEM;
 
@@ -144,8 +129,9 @@ static int da903x_backlight_probe(struct platform_device *pdev)
 	memset(&props, 0, sizeof(props));
 	props.type = BACKLIGHT_RAW;
 	props.max_brightness = max_brightness;
-	bl = backlight_device_register(pdev->name, data->da903x_dev, data,
-				       &da903x_backlight_ops, &props);
+	bl = devm_backlight_device_register(&pdev->dev, pdev->name,
+					data->da903x_dev, data,
+					&da903x_backlight_ops, &props);
 	if (IS_ERR(bl)) {
 		dev_err(&pdev->dev, "failed to register backlight\n");
 		return PTR_ERR(bl);
@@ -158,21 +144,11 @@ static int da903x_backlight_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int da903x_backlight_remove(struct platform_device *pdev)
-{
-	struct backlight_device *bl = platform_get_drvdata(pdev);
-
-	backlight_device_unregister(bl);
-	return 0;
-}
-
 static struct platform_driver da903x_backlight_driver = {
 	.driver		= {
 		.name	= "da903x-backlight",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= da903x_backlight_probe,
-	.remove		= da903x_backlight_remove,
 };
 
 module_platform_driver(da903x_backlight_driver);

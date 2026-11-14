@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Support Infineon TLE62x0 driver chips
  *
  * Copyright (c) 2007 Simtec Electronics
  *	Ben Dooks, <ben@simtec.co.uk>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/device.h>
@@ -52,8 +49,7 @@ static inline int tle62x0_write(struct tle62x0_state *st)
 		buff[1] = gpio_state;
 	}
 
-	dev_dbg(&st->us->dev, "buff %02x,%02x,%02x\n",
-		buff[0], buff[1], buff[2]);
+	dev_dbg(&st->us->dev, "buff %3ph\n", buff);
 
 	return spi_write(st->us, buff, (st->nr_gpio == 16) ? 3 : 2);
 }
@@ -145,7 +141,7 @@ static ssize_t tle62x0_gpio_show(struct device *dev,
 	value = (st->gpio_state >> gpio_num) & 1;
 	mutex_unlock(&st->lock);
 
-	return snprintf(buf, PAGE_SIZE, "%d", value);
+	return sysfs_emit(buf, "%d\n", value);
 }
 
 static ssize_t tle62x0_gpio_store(struct device *dev,
@@ -155,10 +151,10 @@ static ssize_t tle62x0_gpio_store(struct device *dev,
 	struct tle62x0_state *st = dev_get_drvdata(dev);
 	int gpio_num = to_gpio_num(attr);
 	unsigned long val;
-	char *endp;
+	int ret;
 
-	val = simple_strtoul(buf, &endp, 0);
-	if (buf == endp)
+	ret = kstrtoul(buf, 0, &val);
+	if (ret)
 		return -EINVAL;
 
 	dev_dbg(dev, "setting gpio %d to %ld\n", gpio_num, val);
@@ -247,17 +243,15 @@ static int tle62x0_probe(struct spi_device *spi)
 	int ptr;
 	int ret;
 
-	pdata = spi->dev.platform_data;
+	pdata = dev_get_platdata(&spi->dev);
 	if (pdata == NULL) {
 		dev_err(&spi->dev, "no device data specified\n");
 		return -EINVAL;
 	}
 
-	st = kzalloc(sizeof(struct tle62x0_state), GFP_KERNEL);
-	if (st == NULL) {
-		dev_err(&spi->dev, "no memory for device state\n");
+	st = kzalloc_obj(struct tle62x0_state);
+	if (st == NULL)
 		return -ENOMEM;
-	}
 
 	st->us = spi;
 	st->nr_gpio = pdata->gpio_count;
@@ -294,7 +288,7 @@ static int tle62x0_probe(struct spi_device *spi)
 	return ret;
 }
 
-static int tle62x0_remove(struct spi_device *spi)
+static void tle62x0_remove(struct spi_device *spi)
 {
 	struct tle62x0_state *st = spi_get_drvdata(spi);
 	int ptr;
@@ -304,13 +298,11 @@ static int tle62x0_remove(struct spi_device *spi)
 
 	device_remove_file(&spi->dev, &dev_attr_status_show);
 	kfree(st);
-	return 0;
 }
 
 static struct spi_driver tle62x0_driver = {
 	.driver = {
 		.name	= "tle62x0",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= tle62x0_probe,
 	.remove		= tle62x0_remove,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * hwmon-vid.c - VID/VRM/VRD voltage conversions
  *
@@ -6,20 +7,6 @@
  * Partly imported from i2c-vid.h of the lm_sensors project
  * Copyright (c) 2002 Mark D. Studebaker <mdsxyz123@yahoo.com>
  * With assistance from Trent Piepho <xyzzy@speakeasy.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -27,6 +14,10 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/hwmon-vid.h>
+
+#ifdef CONFIG_X86
+#include <asm/msr.h>
+#endif
 
 /*
  * Common code for decoding VID pins.
@@ -62,15 +53,15 @@
  * The 13 specification corresponds to the Intel Pentium M series. There
  * doesn't seem to be any named specification for these. The conversion
  * tables are detailed directly in the various Pentium M datasheets:
- * http://www.intel.com/design/intarch/pentiumm/docs_pentiumm.htm
+ * https://www.intel.com/design/intarch/pentiumm/docs_pentiumm.htm
  *
  * The 14 specification corresponds to Intel Core series. There
  * doesn't seem to be any named specification for these. The conversion
  * tables are detailed directly in the various Pentium Core datasheets:
- * http://www.intel.com/design/mobile/datashts/309221.htm
+ * https://www.intel.com/design/mobile/datashts/309221.htm
  *
  * The 110 (VRM 11) specification corresponds to Intel Conroe based series.
- * http://www.intel.com/design/processor/applnots/313214.htm
+ * https://www.intel.com/design/processor/applnots/313214.htm
  */
 
 /*
@@ -109,7 +100,7 @@ int vid_from_reg(int val, u8 vrm)
 		val &= 0x1f;
 		if (val == 0x1f)
 			return 0;
-				/* fall through */
+		fallthrough;
 	case 25:		/* AMD NPT 0Fh */
 		val &= 0x3f;
 		return (val < 32) ? 1550 - 25 * val
@@ -135,7 +126,7 @@ int vid_from_reg(int val, u8 vrm)
 
 	case 84:		/* VRM 8.4 */
 		val &= 0x0f;
-				/* fall through */
+		fallthrough;
 	case 82:		/* VRM 8.2 */
 		val &= 0x1f;
 		return val == 0x1f ? 0 :
@@ -246,16 +237,17 @@ static struct vrm_model vrm_models[] = {
  */
 static u8 get_via_model_d_vrm(void)
 {
-	unsigned int vid, brand, dummy;
+	u64 msr;
+	unsigned int vid, brand;
 	static const char *brands[4] = {
 		"C7-M", "C7", "Eden", "C7-D"
 	};
 
-	rdmsr(0x198, dummy, vid);
-	vid &= 0xff;
+	rdmsrq(0x198, msr);
+	vid = (msr >> 32) & 0xff;
 
-	rdmsr(0x1154, brand, dummy);
-	brand = ((brand >> 4) ^ (brand >> 2)) & 0x03;
+	rdmsrq(0x1154, msr);
+	brand = ((msr >> 4) ^ (msr >> 2)) & 0x03;
 
 	if (vid > 0x3f) {
 		pr_info("Using %d-bit VID table for VIA %s CPU\n",
@@ -293,7 +285,7 @@ u8 vid_which_vrm(void)
 	if (c->x86 < 6)		/* Any CPU with family lower than 6 */
 		return 0;	/* doesn't have VID */
 
-	vrm_ret = find_vrm(c->x86, c->x86_model, c->x86_mask, c->x86_vendor);
+	vrm_ret = find_vrm(c->x86, c->x86_model, c->x86_stepping, c->x86_vendor);
 	if (vrm_ret == 134)
 		vrm_ret = get_via_model_d_vrm();
 	if (vrm_ret == 0)

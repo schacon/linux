@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * xfi linux driver.
  *
  * Copyright (C) 2008, Creative Technology Ltd. All Rights Reserved.
- *
- * This source file is released under GPL v2 license (no other versions).
- * See the COPYING file included in the main directory of this source
- * distribution for the license terms and conditions.
  */
 
 #include <linux/init.h>
@@ -21,14 +18,13 @@
 MODULE_AUTHOR("Creative Technology Ltd");
 MODULE_DESCRIPTION("X-Fi driver version 1.03");
 MODULE_LICENSE("GPL v2");
-MODULE_SUPPORTED_DEVICE("{{Creative Labs, Sound Blaster X-Fi}");
 
 static unsigned int reference_rate = 48000;
 static unsigned int multiple = 2;
 MODULE_PARM_DESC(reference_rate, "Reference rate (default=48000)");
-module_param(reference_rate, uint, S_IRUGO);
+module_param(reference_rate, uint, 0444);
 MODULE_PARM_DESC(multiple, "Rate multiplier (default=2)");
-module_param(multiple, uint, S_IRUGO);
+module_param(multiple, uint, 0444);
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;
@@ -44,7 +40,7 @@ MODULE_PARM_DESC(enable, "Enable Creative X-Fi driver");
 module_param_array(subsystem, int, NULL, 0444);
 MODULE_PARM_DESC(subsystem, "Override subsystem ID for Creative X-Fi driver");
 
-static DEFINE_PCI_DEVICE_TABLE(ct_pci_dev_ids) = {
+static const struct pci_device_id ct_pci_dev_ids[] = {
 	/* only X-Fi is supported, so... */
 	{ PCI_DEVICE(PCI_VENDOR_ID_CREATIVE, PCI_DEVICE_ID_CREATIVE_20K1),
 	  .driver_data = ATC20K1,
@@ -60,7 +56,7 @@ static int
 ct_card_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 {
 	static int dev;
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct ct_atc *atc;
 	int err;
 
@@ -71,58 +67,51 @@ ct_card_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 		dev++;
 		return -ENOENT;
 	}
-	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	err = snd_devm_card_new(&pci->dev, index[dev], id[dev], THIS_MODULE,
+				0, &card);
 	if (err)
 		return err;
 	if ((reference_rate != 48000) && (reference_rate != 44100)) {
-		printk(KERN_ERR "ctxfi: Invalid reference_rate value %u!!!\n",
-		       reference_rate);
-		printk(KERN_ERR "ctxfi: The valid values for reference_rate "
-		       "are 48000 and 44100, Value 48000 is assumed.\n");
+		dev_err(card->dev,
+			"Invalid reference_rate value %u!!!\n",
+			reference_rate);
+		dev_err(card->dev,
+			"The valid values for reference_rate are 48000 and 44100, Value 48000 is assumed.\n");
 		reference_rate = 48000;
 	}
 	if ((multiple != 1) && (multiple != 2) && (multiple != 4)) {
-		printk(KERN_ERR "ctxfi: Invalid multiple value %u!!!\n",
-		       multiple);
-		printk(KERN_ERR "ctxfi: The valid values for multiple are "
-		       "1, 2 and 4, Value 2 is assumed.\n");
+		dev_err(card->dev, "Invalid multiple value %u!!!\n",
+			multiple);
+		dev_err(card->dev,
+			"The valid values for multiple are 1, 2 and 4, Value 2 is assumed.\n");
 		multiple = 2;
 	}
 	err = ct_atc_create(card, pci, reference_rate, multiple,
 			    pci_id->driver_data, subsystem[dev], &atc);
 	if (err < 0)
-		goto error;
+		return err;
 
 	card->private_data = atc;
 
 	/* Create alsa devices supported by this card */
 	err = ct_atc_create_alsa_devs(atc);
 	if (err < 0)
-		goto error;
+		return err;
 
-	strcpy(card->driver, "SB-XFi");
-	strcpy(card->shortname, "Creative X-Fi");
+	strscpy(card->driver, "SB-XFi");
+	strscpy(card->shortname, "Creative X-Fi");
 	snprintf(card->longname, sizeof(card->longname), "%s %s %s",
 		 card->shortname, atc->chip_name, atc->model_name);
 
 	err = snd_card_register(card);
 	if (err < 0)
-		goto error;
+		return err;
 
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	dev++;
 
 	return 0;
-
-error:
-	snd_card_free(card);
-	return err;
-}
-
-static void ct_card_remove(struct pci_dev *pci)
-{
-	snd_card_free(pci_get_drvdata(pci));
-	pci_set_drvdata(pci, NULL);
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -152,7 +141,6 @@ static struct pci_driver ct_driver = {
 	.name = KBUILD_MODNAME,
 	.id_table = ct_pci_dev_ids,
 	.probe = ct_card_probe,
-	.remove = ct_card_remove,
 	.driver = {
 		.pm = CT_CARD_PM_OPS,
 	},

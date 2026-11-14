@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_PID_NS_H
 #define _LINUX_PID_NS_H
 
@@ -7,60 +8,88 @@
 #include <linux/workqueue.h>
 #include <linux/threads.h>
 #include <linux/nsproxy.h>
-#include <linux/kref.h>
+#include <linux/ns_common.h>
+#include <linux/idr.h>
 
-struct pidmap {
-       atomic_t nr_free;
-       void *page;
-};
+/* MAX_PID_NS_LEVEL is needed for limiting size of 'struct pid' */
+#define MAX_PID_NS_LEVEL 32
 
-#define BITS_PER_PAGE		(PAGE_SIZE * 8)
-#define BITS_PER_PAGE_MASK	(BITS_PER_PAGE-1)
-#define PIDMAP_ENTRIES		((PID_MAX_LIMIT+BITS_PER_PAGE-1)/BITS_PER_PAGE)
+struct fs_pin;
 
-struct bsd_acct_struct;
+#if defined(CONFIG_SYSCTL) && defined(CONFIG_MEMFD_CREATE)
+/* modes for vm.memfd_noexec sysctl */
+#define MEMFD_NOEXEC_SCOPE_EXEC			0 /* MFD_EXEC implied if unset */
+#define MEMFD_NOEXEC_SCOPE_NOEXEC_SEAL		1 /* MFD_NOEXEC_SEAL implied if unset */
+#define MEMFD_NOEXEC_SCOPE_NOEXEC_ENFORCED	2 /* same as 1, except MFD_EXEC rejected */
+#endif
 
 struct pid_namespace {
-	struct kref kref;
-	struct pidmap pidmap[PIDMAP_ENTRIES];
-	int last_pid;
-	unsigned int nr_hashed;
+	struct idr idr;
+	struct rcu_head rcu;
+	unsigned int pid_allocated;
+#ifdef CONFIG_SYSCTL
+#if defined(CONFIG_MEMFD_CREATE)
+	int memfd_noexec_scope;
+#endif
+	struct ctl_table_set	set;
+	struct ctl_table_header *sysctls;
+#endif
 	struct task_struct *child_reaper;
 	struct kmem_cache *pid_cachep;
 	unsigned int level;
+	int pid_max;
 	struct pid_namespace *parent;
-#ifdef CONFIG_PROC_FS
-	struct vfsmount *proc_mnt;
-	struct dentry *proc_self;
-#endif
 #ifdef CONFIG_BSD_PROCESS_ACCT
-	struct bsd_acct_struct *bacct;
+	struct fs_pin *bacct;
 #endif
 	struct user_namespace *user_ns;
-	struct work_struct proc_work;
-	kgid_t pid_gid;
-	int hide_pid;
+	struct ucounts *ucounts;
 	int reboot;	/* group exit code if this pidns was rebooted */
-	unsigned int proc_inum;
-};
+	struct ns_common ns;
+	struct work_struct	work;
+} __randomize_layout;
 
 extern struct pid_namespace init_pid_ns;
 
-#define PIDNS_HASH_ADDING (1U << 31)
+#define PIDNS_ADDING (1U << 31)
 
 #ifdef CONFIG_PID_NS
+static inline struct pid_namespace *to_pid_ns(struct ns_common *ns)
+{
+	return container_of(ns, struct pid_namespace, ns);
+}
+
 static inline struct pid_namespace *get_pid_ns(struct pid_namespace *ns)
 {
-	if (ns != &init_pid_ns)
-		kref_get(&ns->kref);
+	ns_ref_inc(ns);
 	return ns;
 }
 
-extern struct pid_namespace *copy_pid_ns(unsigned long flags,
+#if defined(CONFIG_SYSCTL) && defined(CONFIG_MEMFD_CREATE)
+static inline int pidns_memfd_noexec_scope(struct pid_namespace *ns)
+{
+	int scope = MEMFD_NOEXEC_SCOPE_EXEC;
+
+	for (; ns; ns = ns->parent)
+		scope = max(scope, READ_ONCE(ns->memfd_noexec_scope));
+
+	return scope;
+}
+#else
+static inline int pidns_memfd_noexec_scope(struct pid_namespace *ns)
+{
+	return 0;
+}
+#endif
+
+extern struct pid_namespace *copy_pid_ns(u64 flags,
 	struct user_namespace *user_ns, struct pid_namespace *ns);
 extern void zap_pid_ns_processes(struct pid_namespace *pid_ns);
 extern int reboot_pid_ns(struct pid_namespace *pid_ns, int cmd);
 extern void put_pid_ns(struct pid_namespace *ns);
+
+extern bool pidns_is_ancestor(struct pid_namespace *child,
+			      struct pid_namespace *ancestor);
 
 #else /* !CONFIG_PID_NS */
 #include <linux/err.h>
@@ -70,7 +99,12 @@ static inline struct pid_namespace *get_pid_ns(struct pid_namespace *ns)
 	return ns;
 }
 
-static inline struct pid_namespace *copy_pid_ns(unsigned long flags,
+static inline int pidns_memfd_noexec_scope(struct pid_namespace *ns)
+{
+	return 0;
+}
+
+static inline struct pid_namespace *copy_pid_ns(u64 flags,
 	struct user_namespace *user_ns, struct pid_namespace *ns)
 {
 	if (flags & CLONE_NEWPID)
@@ -91,10 +125,23 @@ static inline int reboot_pid_ns(struct pid_namespace *pid_ns, int cmd)
 {
 	return 0;
 }
+
+static inline bool pidns_is_ancestor(struct pid_namespace *child,
+				     struct pid_namespace *ancestor)
+{
+	return false;
+}
 #endif /* CONFIG_PID_NS */
 
 extern struct pid_namespace *task_active_pid_ns(struct task_struct *tsk);
 void pidhash_init(void);
-void pidmap_init(void);
+void pid_idr_init(void);
+int register_pidns_sysctls(struct pid_namespace *pidns);
+void unregister_pidns_sysctls(struct pid_namespace *pidns);
+
+static inline bool task_is_in_init_pid_ns(struct task_struct *tsk)
+{
+	return task_active_pid_ns(tsk) == &init_pid_ns;
+}
 
 #endif /* _LINUX_PID_NS_H */

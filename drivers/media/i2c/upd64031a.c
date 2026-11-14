@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * upd64031A - NEC Electronics Ghost Reduction for NTSC in Japan
  *
  * 2003 by T.Adachi <tadachi@tadachi-net.com>
  * 2003 by Takeru KOMORIYA <komoriya@paken.org>
- * 2006 by Hans Verkuil <hverkuil@xs4all.nl>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * 2006 by Hans Verkuil <hverkuil@kernel.org>
  */
 
 
@@ -27,8 +14,7 @@
 #include <linux/videodev2.h>
 #include <linux/slab.h>
 #include <media/v4l2-device.h>
-#include <media/v4l2-chip-ident.h>
-#include <media/upd64031a.h>
+#include <media/i2c/upd64031a.h>
 
 /* --------------------- read registers functions define -------------------- */
 
@@ -147,13 +133,6 @@ static int upd64031a_s_routing(struct v4l2_subdev *sd,
 	return upd64031a_s_frequency(sd, NULL);
 }
 
-static int upd64031a_g_chip_ident(struct v4l2_subdev *sd, struct v4l2_dbg_chip_ident *chip)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	return v4l2_chip_ident_i2c_client(client, chip, V4L2_IDENT_UPD64031A, 0);
-}
-
 static int upd64031a_log_status(struct v4l2_subdev *sd)
 {
 	v4l2_info(sd, "Status: SA00=0x%02x SA01=0x%02x\n",
@@ -164,12 +143,6 @@ static int upd64031a_log_status(struct v4l2_subdev *sd)
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 static int upd64031a_g_register(struct v4l2_subdev *sd, struct v4l2_dbg_register *reg)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	if (!v4l2_chip_match_i2c_client(client, &reg->match))
-		return -EINVAL;
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
 	reg->val = upd64031a_read(sd, reg->reg & 0xff);
 	reg->size = 1;
 	return 0;
@@ -177,12 +150,6 @@ static int upd64031a_g_register(struct v4l2_subdev *sd, struct v4l2_dbg_register
 
 static int upd64031a_s_register(struct v4l2_subdev *sd, const struct v4l2_dbg_register *reg)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	if (!v4l2_chip_match_i2c_client(client, &reg->match))
-		return -EINVAL;
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
 	upd64031a_write(sd, reg->reg & 0xff, reg->val & 0xff);
 	return 0;
 }
@@ -192,7 +159,6 @@ static int upd64031a_s_register(struct v4l2_subdev *sd, const struct v4l2_dbg_re
 
 static const struct v4l2_subdev_core_ops upd64031a_core_ops = {
 	.log_status = upd64031a_log_status,
-	.g_chip_ident = upd64031a_g_chip_ident,
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 	.g_register = upd64031a_g_register,
 	.s_register = upd64031a_s_register,
@@ -217,8 +183,7 @@ static const struct v4l2_subdev_ops upd64031a_ops = {
 
 /* i2c implementation */
 
-static int upd64031a_probe(struct i2c_client *client,
-			   const struct i2c_device_id *id)
+static int upd64031a_probe(struct i2c_client *client)
 {
 	struct upd64031a_state *state;
 	struct v4l2_subdev *sd;
@@ -230,7 +195,7 @@ static int upd64031a_probe(struct i2c_client *client,
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	state = kzalloc(sizeof(struct upd64031a_state), GFP_KERNEL);
+	state = devm_kzalloc_obj(&client->dev, *state);
 	if (state == NULL)
 		return -ENOMEM;
 	sd = &state->sd;
@@ -244,26 +209,23 @@ static int upd64031a_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int upd64031a_remove(struct i2c_client *client)
+static void upd64031a_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_device_unregister_subdev(sd);
-	kfree(to_state(sd));
-	return 0;
 }
 
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id upd64031a_id[] = {
-	{ "upd64031a", 0 },
+	{ .name = "upd64031a" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, upd64031a_id);
 
 static struct i2c_driver upd64031a_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "upd64031a",
 	},
 	.probe		= upd64031a_probe,

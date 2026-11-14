@@ -1,13 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Renesas SuperH DMA Engine support
  *
  * Copyright (C) 2009 Nobuhiro Iwamatsu <iwamatsu.nobuhiro@renesas.com>
  * Copyright (C) 2009 Renesas Solutions, Inc. All rights reserved.
- *
- * This is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  */
 #ifndef __DMA_SHDMA_H
@@ -28,18 +24,19 @@ struct sh_dmae_chan {
 	struct shdma_chan shdma_chan;
 	const struct sh_dmae_slave_config *config; /* Slave DMA configuration */
 	int xmit_shift;			/* log_2(bytes_per_xfer) */
-	u32 __iomem *base;
-	char dev_id[16];		/* unique name per DMAC of channel */
+	void __iomem *base;
+	char dev_id[32];		/* unique name per DMAC of channel */
 	int pm_error;
+	dma_addr_t slave_addr;
 };
 
 struct sh_dmae_device {
 	struct shdma_dev shdma_dev;
 	struct sh_dmae_chan *chan[SH_DMAE_MAX_CHANNELS];
-	struct sh_dmae_pdata *pdata;
+	const struct sh_dmae_pdata *pdata;
 	struct list_head node;
-	u32 __iomem *chan_reg;
-	u16 __iomem *dmars;
+	void __iomem *chan_reg;
+	void __iomem *dmars;
 	unsigned int chcr_offset;
 	u32 chcr_ie_bit;
 };

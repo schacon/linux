@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/arm/mach-orion5x/net2big-setup.c
  *
  * LaCie 2Big Network NAS setup
  *
  * Copyright (C) 2009 Simon Guinot <sguinot@lacie.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/kernel.h>
@@ -20,14 +17,15 @@
 #include <linux/input.h>
 #include <linux/i2c.h>
 #include <linux/ata_platform.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
+#include <linux/gpio/machine.h>
 #include <linux/delay.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
-#include <mach/orion5x.h>
 #include <plat/orion-gpio.h>
 #include "common.h"
 #include "mpp.h"
+#include "orion5x.h"
 
 /*****************************************************************************
  * LaCie 2Big Network Info
@@ -217,19 +215,30 @@ err_free_1:
 static struct gpio_led net2big_leds[] = {
 	{
 		.name = "net2big:red:power",
-		.gpio = NET2BIG_GPIO_PWR_RED_LED,
 	},
 	{
 		.name = "net2big:blue:power",
-		.gpio = NET2BIG_GPIO_PWR_BLUE_LED,
 	},
 	{
 		.name = "net2big:red:sata0",
-		.gpio = NET2BIG_GPIO_SATA0_RED_LED,
 	},
 	{
 		.name = "net2big:red:sata1",
-		.gpio = NET2BIG_GPIO_SATA1_RED_LED,
+	},
+};
+
+static struct gpiod_lookup_table net2big_leds_gpio_table = {
+	.dev_id = "leds-gpio",
+	.table = {
+		GPIO_LOOKUP_IDX("orion_gpio0", NET2BIG_GPIO_PWR_RED_LED, NULL,
+				0, GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP_IDX("orion_gpio0", NET2BIG_GPIO_PWR_BLUE_LED, NULL,
+				1, GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP_IDX("orion_gpio0", NET2BIG_GPIO_SATA0_RED_LED, NULL,
+				2, GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP_IDX("orion_gpio0", NET2BIG_GPIO_SATA1_RED_LED, NULL,
+				3, GPIO_ACTIVE_HIGH),
+		{ },
 	},
 };
 
@@ -285,6 +294,7 @@ static void __init net2big_gpio_leds_init(void)
 	if (err)
 		pr_err("net2big: failed to setup SATA1 blue LED GPIO\n");
 
+	gpiod_add_lookup_table(&net2big_leds_gpio_table);
 	platform_device_register(&net2big_gpio_leds);
 }
 
@@ -397,8 +407,10 @@ static void __init net2big_init(void)
 	net2big_sata_power_init();
 	orion5x_sata_init(&net2big_sata_data);
 
-	mvebu_mbus_add_window("devbus-boot", NET2BIG_NOR_BOOT_BASE,
-			      NET2BIG_NOR_BOOT_SIZE);
+	mvebu_mbus_add_window_by_id(ORION_MBUS_DEVBUS_BOOT_TARGET,
+				    ORION_MBUS_DEVBUS_BOOT_ATTR,
+				    NET2BIG_NOR_BOOT_BASE,
+				    NET2BIG_NOR_BOOT_SIZE);
 	platform_device_register(&net2big_nor_flash);
 
 	platform_device_register(&net2big_gpio_buttons);
@@ -411,7 +423,7 @@ static void __init net2big_init(void)
 
 	if (gpio_request(NET2BIG_GPIO_POWER_OFF, "power-off") == 0 &&
 	    gpio_direction_output(NET2BIG_GPIO_POWER_OFF, 0) == 0)
-		pm_power_off = net2big_power_off;
+		register_platform_power_off(net2big_power_off);
 	else
 		pr_err("net2big: failed to configure power-off GPIO\n");
 
@@ -421,6 +433,7 @@ static void __init net2big_init(void)
 /* Warning: LaCie use a wrong mach-type (0x20e=526) in their bootloader. */
 MACHINE_START(NET2BIG, "LaCie 2Big Network")
 	.atag_offset	= 0x100,
+	.nr_irqs	= ORION5X_NR_IRQS,
 	.init_machine	= net2big_init,
 	.map_io		= orion5x_map_io,
 	.init_early	= orion5x_init_early,
@@ -429,4 +442,3 @@ MACHINE_START(NET2BIG, "LaCie 2Big Network")
 	.fixup		= tag_fixup_mem32,
 	.restart	= orion5x_restart,
 MACHINE_END
-

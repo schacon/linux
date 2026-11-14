@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _PARISC_ERRNO_H
 #define _PARISC_ERRNO_H
 
@@ -35,9 +36,10 @@
 
 #define	EDOTDOT		66	/* RFS specific error */
 #define	EBADMSG		67	/* Not a data message */
+#define	EFSBADCRC	EBADMSG	/* Bad CRC detected */
 #define	EUSERS		68	/* Too many users */
 #define	EDQUOT		69	/* Quota exceeded */
-#define	ESTALE		70	/* Stale NFS file handle */
+#define	ESTALE		70	/* Stale file handle */
 #define	EREMOTE		71	/* Object is remote */
 #define	EOVERFLOW	72	/* Value too large for defined data type */
 
@@ -61,6 +63,7 @@
 #define	ERESTART	175	/* Interrupted system call should be restarted */
 #define	ESTRPIPE	176	/* Streams pipe error */
 #define	EUCLEAN		177	/* Structure needs cleaning */
+#define	EFSCORRUPTED	EUCLEAN	/* Filesystem is corrupted */
 #define	ENOTNAM		178	/* Not a XENIX named type file */
 #define	ENAVAIL		179	/* No XENIX semaphores available */
 #define	EISNAM		180	/* Is a named type file */
@@ -74,7 +77,6 @@
 
 /* We now return you to your regularly scheduled HPUX. */
 
-#define ENOSYM		215	/* symbol does not exist in executable */
 #define	ENOTSOCK	216	/* Socket operation on non-socket */
 #define	EDESTADDRREQ	217	/* Destination address required */
 #define	EMSGSIZE	218	/* Message too long */
@@ -97,22 +99,20 @@
 #define	ENOTCONN	235	/* Transport endpoint is not connected */
 #define	ESHUTDOWN	236	/* Cannot send after transport endpoint shutdown */
 #define	ETOOMANYREFS	237	/* Too many references: cannot splice */
-#define EREFUSED	ECONNREFUSED	/* for HP's NFS apparently */
 #define	ETIMEDOUT	238	/* Connection timed out */
 #define	ECONNREFUSED	239	/* Connection refused */
-#define EREMOTERELEASE	240	/* Remote peer released connection */
+#define	EREFUSED	ECONNREFUSED	/* for HP's NFS apparently */
 #define	EHOSTDOWN	241	/* Host is down */
 #define	EHOSTUNREACH	242	/* No route to host */
 
 #define	EALREADY	244	/* Operation already in progress */
 #define	EINPROGRESS	245	/* Operation now in progress */
-#define	EWOULDBLOCK	246	/* Operation would block (Linux returns EAGAIN) */
+#define	EWOULDBLOCK	EAGAIN	/* Operation would block (Not HPUX compliant) */
 #define	ENOTEMPTY	247	/* Directory not empty */
 #define	ENAMETOOLONG	248	/* File name too long */
 #define	ELOOP		249	/* Too many symbolic links encountered */
 #define	ENOSYS		251	/* Function not implemented */
 
-#define ENOTSUP		252	/* Function not implemented (POSIX.4 / HPUX) */
 #define ECANCELLED	253	/* aio request was canceled before complete (POSIX.4 / HPUX) */
 #define ECANCELED	ECANCELLED	/* SuSv3 and Solaris wants one 'L' */
 
@@ -123,5 +123,7 @@
 #define	ERFKILL		256	/* Operation not possible due to RF-kill */
 
 #define EHWPOISON	257	/* Memory page has hardware error */
+
+#define EFTYPE		258	/* Wrong file type for the intended operation */
 
 #endif

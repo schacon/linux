@@ -1,19 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/boards/mach-x3proto/gpio.c
  *
  * Renesas SH-X3 Prototype Baseboard GPIO Support.
  *
  * Copyright (C) 2010 - 2012  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
 #include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
@@ -21,6 +18,7 @@
 #include <linux/io.h>
 #include <mach/ilsel.h>
 #include <mach/hardware.h>
+#include <linux/property.h>
 
 #define KEYCTLR	0xb81c0000
 #define KEYOUTR	0xb81c0002
@@ -60,9 +58,9 @@ static int x3proto_gpio_to_irq(struct gpio_chip *chip, unsigned gpio)
 	return virq;
 }
 
-static void x3proto_gpio_irq_handler(unsigned int irq, struct irq_desc *desc)
+static void x3proto_gpio_irq_handler(struct irq_desc *desc)
 {
-	struct irq_data *data = irq_get_irq_data(irq);
+	struct irq_data *data = irq_desc_get_irq_data(desc);
 	struct irq_chip *chip = irq_data_get_irq_chip(data);
 	unsigned long mask;
 	int pin;
@@ -71,10 +69,14 @@ static void x3proto_gpio_irq_handler(unsigned int irq, struct irq_desc *desc)
 
 	mask = __raw_readw(KEYDETR);
 	for_each_set_bit(pin, &mask, NR_BASEBOARD_GPIOS)
-		generic_handle_irq(irq_linear_revmap(x3proto_irq_domain, pin));
+		generic_handle_domain_irq(x3proto_irq_domain, pin);
 
 	chip->irq_unmask(data);
 }
+
+const struct software_node x3proto_gpiochip_node = {
+	.name = "x3proto-gpio",
+};
 
 struct gpio_chip x3proto_gpio_chip = {
 	.label			= "x3proto-gpio",
@@ -107,11 +109,17 @@ int __init x3proto_gpio_setup(void)
 	if (unlikely(ilsel < 0))
 		return ilsel;
 
-	ret = gpiochip_add(&x3proto_gpio_chip);
-	if (unlikely(ret))
+	ret = software_node_register(&x3proto_gpiochip_node);
+	if (ret)
 		goto err_gpio;
 
-	x3proto_irq_domain = irq_domain_add_linear(NULL, NR_BASEBOARD_GPIOS,
+	x3proto_gpio_chip.fwnode = software_node_fwnode(&x3proto_gpiochip_node);
+
+	ret = gpiochip_add_data(&x3proto_gpio_chip, NULL);
+	if (unlikely(ret))
+		goto err_swnode;
+
+	x3proto_irq_domain = irq_domain_create_linear(NULL, NR_BASEBOARD_GPIOS,
 						   &x3proto_gpio_irq_ops, NULL);
 	if (unlikely(!x3proto_irq_domain))
 		goto err_irq;
@@ -128,10 +136,10 @@ int __init x3proto_gpio_setup(void)
 	return 0;
 
 err_irq:
-	ret = gpiochip_remove(&x3proto_gpio_chip);
-	if (unlikely(ret))
-		pr_err("Failed deregistering GPIO\n");
-
+	gpiochip_remove(&x3proto_gpio_chip);
+	ret = 0;
+err_swnode:
+	software_node_unregister(&x3proto_gpiochip_node);
 err_gpio:
 	synchronize_irq(ilsel);
 

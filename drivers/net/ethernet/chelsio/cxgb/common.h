@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*****************************************************************************
  *                                                                           *
  * File: common.h                                                            *
@@ -6,17 +7,6 @@
  * Description:                                                              *
  *  part of the Chelsio 10Gb Ethernet Driver.                                *
  *                                                                           *
- * This program is free software; you can redistribute it and/or modify      *
- * it under the terms of the GNU General Public License, version 2, as       *
- * published by the Free Software Foundation.                                *
- *                                                                           *
- * You should have received a copy of the GNU General Public License along   *
- * with this program; if not, write to the Free Software Foundation, Inc.,   *
- * 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.                 *
- *                                                                           *
- * THIS SOFTWARE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR IMPLIED    *
- * WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTIES OF      *
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.                     *
  *                                                                           *
  * http://www.chelsio.com                                                    *
  *                                                                           *
@@ -50,17 +40,15 @@
 #include <linux/if_vlan.h>
 #include <linux/mdio.h>
 #include <linux/crc32.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <asm/io.h>
 #include <linux/pci_ids.h>
 
 #define DRV_DESCRIPTION "Chelsio 10Gb Ethernet Driver"
 #define DRV_NAME "cxgb"
-#define DRV_VERSION "2.2"
 
 #define CH_DEVICE(devid, ssid, idx) \
-	{ PCI_VENDOR_ID_CHELSIO, devid, PCI_ANY_ID, ssid, 0, 0, idx }
+	{ PCI_VDEVICE_SUB(CHELSIO, devid, PCI_ANY_ID, ssid), .driver_data = idx }
 
 #define SUPPORTED_PAUSE       (1 << 13)
 #define SUPPORTED_LOOPBACK    (1 << 15)
@@ -86,6 +74,11 @@ struct t1_rx_mode {
 
 #define SPEED_INVALID 0xffff
 #define DUPLEX_INVALID 0xff
+
+/* Max frame size PM3393 can handle. Includes Ethernet header and CRC. */
+#define PM3393_MAX_FRAME_SIZE 9600
+
+#define VSC7326_MAX_MTU 9600
 
 enum {
 	CHBT_BOARD_N110,
@@ -220,7 +213,6 @@ struct port_info {
 	struct cmac *mac;
 	struct cphy *phy;
 	struct link_config link_config;
-	struct net_device_stats netstats;
 };
 
 struct sge;
@@ -237,7 +229,6 @@ struct adapter {
 	int msg_enable;
 	u32 mmio_len;
 
-	struct work_struct ext_intr_handler_task;
 	struct adapter_params params;
 
 	/* Terminator modules. */
@@ -256,6 +247,7 @@ struct adapter {
 
 	/* guards async operations */
 	spinlock_t async_lock ____cacheline_aligned;
+	u32 pending_thread_intr;
 	u32 slow_intr_mask;
 	int t1powersave;
 };
@@ -324,30 +316,26 @@ static inline unsigned int core_ticks_per_usec(const adapter_t *adap)
 	return board_info(adap)->clock_core / 1000000;
 }
 
-extern int __t1_tpi_read(adapter_t *adapter, u32 addr, u32 *valp);
-extern int __t1_tpi_write(adapter_t *adapter, u32 addr, u32 value);
-extern int t1_tpi_write(adapter_t *adapter, u32 addr, u32 value);
-extern int t1_tpi_read(adapter_t *adapter, u32 addr, u32 *value);
+int __t1_tpi_read(adapter_t *adapter, u32 addr, u32 *valp);
+int __t1_tpi_write(adapter_t *adapter, u32 addr, u32 value);
+int t1_tpi_write(adapter_t *adapter, u32 addr, u32 value);
+int t1_tpi_read(adapter_t *adapter, u32 addr, u32 *value);
 
-extern void t1_interrupts_enable(adapter_t *adapter);
-extern void t1_interrupts_disable(adapter_t *adapter);
-extern void t1_interrupts_clear(adapter_t *adapter);
-extern int t1_elmer0_ext_intr_handler(adapter_t *adapter);
-extern void t1_elmer0_ext_intr(adapter_t *adapter);
-extern int t1_slow_intr_handler(adapter_t *adapter);
+void t1_interrupts_enable(adapter_t *adapter);
+void t1_interrupts_disable(adapter_t *adapter);
+void t1_interrupts_clear(adapter_t *adapter);
+int t1_elmer0_ext_intr_handler(adapter_t *adapter);
+irqreturn_t t1_slow_intr_handler(adapter_t *adapter);
 
-extern int t1_link_start(struct cphy *phy, struct cmac *mac, struct link_config *lc);
-extern const struct board_info *t1_get_board_info(unsigned int board_id);
-extern const struct board_info *t1_get_board_info_from_ids(unsigned int devid,
-						    unsigned short ssid);
-extern int t1_seeprom_read(adapter_t *adapter, u32 addr, __le32 *data);
-extern int t1_get_board_rev(adapter_t *adapter, const struct board_info *bi,
+int t1_link_start(struct cphy *phy, struct cmac *mac, struct link_config *lc);
+const struct board_info *t1_get_board_info(unsigned int board_id);
+int t1_seeprom_read(adapter_t *adapter, u32 addr, __le32 *data);
+int t1_get_board_rev(adapter_t *adapter, const struct board_info *bi,
 		     struct adapter_params *p);
-extern int t1_init_hw_modules(adapter_t *adapter);
-extern int t1_init_sw_modules(adapter_t *adapter, const struct board_info *bi);
-extern void t1_free_sw_modules(adapter_t *adapter);
-extern void t1_fatal_err(adapter_t *adapter);
-extern void t1_link_changed(adapter_t *adapter, int port_id);
-extern void t1_link_negotiated(adapter_t *adapter, int port_id, int link_stat,
+int t1_init_hw_modules(adapter_t *adapter);
+int t1_init_sw_modules(adapter_t *adapter, const struct board_info *bi);
+void t1_free_sw_modules(adapter_t *adapter);
+void t1_link_changed(adapter_t *adapter, int port_id);
+void t1_link_negotiated(adapter_t *adapter, int port_id, int link_stat,
 			    int speed, int duplex, int pause);
 #endif /* _CXGB_COMMON_H_ */

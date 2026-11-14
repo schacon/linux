@@ -1,8 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASMAXP_PTRACE_H
 #define _ASMAXP_PTRACE_H
 
 #include <uapi/asm/ptrace.h>
-
+#include <asm/irqflags.h>
 
 #define arch_has_single_step()		(1)
 #define user_mode(regs) (((regs)->ps & 8) != 0)
@@ -15,8 +16,24 @@
 
 #define current_pt_regs() \
   ((struct pt_regs *) ((char *)current_thread_info() + 2*PAGE_SIZE) - 1)
-#define signal_pt_regs current_pt_regs
 
-#define force_successful_syscall_return() (current_pt_regs()->r0 = 0)
+#define force_successful_syscall_return() \
+	(current_thread_info()->syscall_meta \
+	|= ALPHA_SYSCALL_META_FORCE_SUCCESS)
 
+static inline unsigned long regs_return_value(struct pt_regs *regs)
+{
+	return regs->r0;
+}
+
+unsigned long user_stack_pointer(struct pt_regs *regs);
+
+static __always_inline bool regs_irqs_disabled(struct pt_regs *regs)
+{
+	return arch_irqs_disabled_flags(regs->ps);
+}
+
+/* Syscall emulation defines */
+#define PTRACE_SYSEMU			0x1d
+#define PTRACE_SYSEMU_SINGLESTEP	0x1e
 #endif

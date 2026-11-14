@@ -1,18 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AMD CS5535/CS5536 GPIO driver
  * Copyright (C) 2006  Advanced Micro Devices, Inc.
  * Copyright (C) 2007-2009  Andres Salomon <dilinger@collabora.co.uk>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public License
- * as published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
 #include <linux/io.h>
 #include <linux/cs5535.h>
 #include <asm/msr.h>
@@ -201,7 +198,7 @@ EXPORT_SYMBOL_GPL(cs5535_gpio_setup_event);
 
 static int chip_gpio_request(struct gpio_chip *c, unsigned offset)
 {
-	struct cs5535_gpio_chip *chip = (struct cs5535_gpio_chip *) c;
+	struct cs5535_gpio_chip *chip = gpiochip_get_data(c);
 	unsigned long flags;
 
 	spin_lock_irqsave(&chip->lock, flags);
@@ -231,17 +228,19 @@ static int chip_gpio_get(struct gpio_chip *chip, unsigned offset)
 	return cs5535_gpio_isset(offset, GPIO_READ_BACK);
 }
 
-static void chip_gpio_set(struct gpio_chip *chip, unsigned offset, int val)
+static int chip_gpio_set(struct gpio_chip *chip, unsigned int offset, int val)
 {
 	if (val)
 		cs5535_gpio_set(offset, GPIO_OUTPUT_VAL);
 	else
 		cs5535_gpio_clear(offset, GPIO_OUTPUT_VAL);
+
+	return 0;
 }
 
 static int chip_direction_input(struct gpio_chip *c, unsigned offset)
 {
-	struct cs5535_gpio_chip *chip = (struct cs5535_gpio_chip *) c;
+	struct cs5535_gpio_chip *chip = gpiochip_get_data(c);
 	unsigned long flags;
 
 	spin_lock_irqsave(&chip->lock, flags);
@@ -254,7 +253,7 @@ static int chip_direction_input(struct gpio_chip *c, unsigned offset)
 
 static int chip_direction_output(struct gpio_chip *c, unsigned offset, int val)
 {
-	struct cs5535_gpio_chip *chip = (struct cs5535_gpio_chip *) c;
+	struct cs5535_gpio_chip *chip = gpiochip_get_data(c);
 	unsigned long flags;
 
 	spin_lock_irqsave(&chip->lock, flags);
@@ -282,29 +281,28 @@ static const char * const cs5535_gpio_names[] = {
 	"GPIO28", NULL, NULL, NULL,
 };
 
-static struct cs5535_gpio_chip cs5535_gpio_chip = {
-	.chip = {
-		.owner = THIS_MODULE,
-		.label = DRV_NAME,
-
-		.base = 0,
-		.ngpio = 32,
-		.names = cs5535_gpio_names,
-		.request = chip_gpio_request,
-
-		.get = chip_gpio_get,
-		.set = chip_gpio_set,
-
-		.direction_input = chip_direction_input,
-		.direction_output = chip_direction_output,
-	},
-};
-
 static int cs5535_gpio_probe(struct platform_device *pdev)
 {
+	struct cs5535_gpio_chip *priv;
+	struct gpio_chip *gc;
 	struct resource *res;
 	int err = -EIO;
 	ulong mask_orig = mask;
+
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
+	if (!priv)
+		return -ENOMEM;
+
+	gc = &priv->chip;
+	gc->owner = THIS_MODULE;
+	gc->label = DRV_NAME;
+	gc->ngpio = 32;
+	gc->names = cs5535_gpio_names;
+	gc->request = chip_gpio_request;
+	gc->get = chip_gpio_get;
+	gc->set = chip_gpio_set;
+	gc->direction_input = chip_direction_input;
+	gc->direction_output = chip_direction_output;
 
 	/* There are two ways to get the GPIO base address; one is by
 	 * fetching it from MSR_LBAR_GPIO, the other is by reading the
@@ -316,18 +314,19 @@ static int cs5535_gpio_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
 	if (!res) {
 		dev_err(&pdev->dev, "can't fetch device resource info\n");
-		goto done;
+		return err;
 	}
 
-	if (!request_region(res->start, resource_size(res), pdev->name)) {
+	if (!devm_request_region(&pdev->dev, res->start, resource_size(res),
+				 pdev->name)) {
 		dev_err(&pdev->dev, "can't request region\n");
-		goto done;
+		return err;
 	}
 
 	/* set up the driver-specific struct */
-	cs5535_gpio_chip.base = res->start;
-	cs5535_gpio_chip.pdev = pdev;
-	spin_lock_init(&cs5535_gpio_chip.lock);
+	priv->base = res->start;
+	priv->pdev = pdev;
+	spin_lock_init(&priv->lock);
 
 	dev_info(&pdev->dev, "reserved resource region %pR\n", res);
 
@@ -343,42 +342,14 @@ static int cs5535_gpio_probe(struct platform_device *pdev)
 				mask_orig, mask);
 
 	/* finally, register with the generic GPIO API */
-	err = gpiochip_add(&cs5535_gpio_chip.chip);
-	if (err)
-		goto release_region;
-
-	return 0;
-
-release_region:
-	release_region(res->start, resource_size(res));
-done:
-	return err;
-}
-
-static int cs5535_gpio_remove(struct platform_device *pdev)
-{
-	struct resource *r;
-	int err;
-
-	err = gpiochip_remove(&cs5535_gpio_chip.chip);
-	if (err) {
-		/* uhh? */
-		dev_err(&pdev->dev, "unable to remove gpio_chip?\n");
-		return err;
-	}
-
-	r = platform_get_resource(pdev, IORESOURCE_IO, 0);
-	release_region(r->start, resource_size(r));
-	return 0;
+	return devm_gpiochip_add_data(&pdev->dev, gc, priv);
 }
 
 static struct platform_driver cs5535_gpio_driver = {
 	.driver = {
 		.name = DRV_NAME,
-		.owner = THIS_MODULE,
 	},
 	.probe = cs5535_gpio_probe,
-	.remove = cs5535_gpio_remove,
 };
 
 module_platform_driver(cs5535_gpio_driver);

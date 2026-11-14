@@ -1,8 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * QLogic iSCSI HBA Driver
- * Copyright (c)  2003-2011 QLogic Corporation
- *
- * See LICENSE.qla4xxx for copyright and licensing details.
+ * Copyright (c)  2003-2013 QLogic Corporation
  */
 
 #include "ql4_def.h"
@@ -11,7 +10,7 @@
 
 static ssize_t
 qla4_8xxx_sysfs_read_fw_dump(struct file *filep, struct kobject *kobj,
-			     struct bin_attribute *ba, char *buf, loff_t off,
+			     const struct bin_attribute *ba, char *buf, loff_t off,
 			     size_t count)
 {
 	struct scsi_qla_host *ha = to_qla_host(dev_to_shost(container_of(kobj,
@@ -29,7 +28,7 @@ qla4_8xxx_sysfs_read_fw_dump(struct file *filep, struct kobject *kobj,
 
 static ssize_t
 qla4_8xxx_sysfs_write_fw_dump(struct file *filep, struct kobject *kobj,
-			      struct bin_attribute *ba, char *buf, loff_t off,
+			      const struct bin_attribute *ba, char *buf, loff_t off,
 			      size_t count)
 {
 	struct scsi_qla_host *ha = to_qla_host(dev_to_shost(container_of(kobj,
@@ -83,7 +82,7 @@ qla4_8xxx_sysfs_write_fw_dump(struct file *filep, struct kobject *kobj,
 			qla4_8xxx_wr_direct(ha, QLA8XXX_CRB_DEV_STATE,
 					    QLA8XXX_DEV_NEED_RESET);
 			if (is_qla8022(ha) ||
-			    (is_qla8032(ha) &&
+			    ((is_qla8032(ha) || is_qla8042(ha)) &&
 			     qla4_83xx_can_perform_reset(ha))) {
 				set_bit(AF_8XXX_RST_OWNER, &ha->flags);
 				set_bit(AF_FW_RECOVERY, &ha->flags);
@@ -105,7 +104,7 @@ qla4_8xxx_sysfs_write_fw_dump(struct file *filep, struct kobject *kobj,
 	return count;
 }
 
-static struct bin_attribute sysfs_fw_dump_attr = {
+static const struct bin_attribute sysfs_fw_dump_attr = {
 	.attr = {
 		.name = "fw_dump",
 		.mode = S_IRUSR | S_IWUSR,
@@ -117,7 +116,7 @@ static struct bin_attribute sysfs_fw_dump_attr = {
 
 static struct sysfs_entry {
 	char *name;
-	struct bin_attribute *attr;
+	const struct bin_attribute *attr;
 } bin_file_entries[] = {
 	{ "fw_dump", &sysfs_fw_dump_attr },
 	{ NULL },
@@ -158,14 +157,12 @@ qla4xxx_fw_version_show(struct device *dev,
 
 	if (is_qla80XX(ha))
 		return snprintf(buf, PAGE_SIZE, "%d.%02d.%02d (%x)\n",
-				ha->firmware_version[0],
-				ha->firmware_version[1],
-				ha->patch_number, ha->build_number);
+				ha->fw_info.fw_major, ha->fw_info.fw_minor,
+				ha->fw_info.fw_patch, ha->fw_info.fw_build);
 	else
 		return snprintf(buf, PAGE_SIZE, "%d.%02d.%02d.%02d\n",
-				ha->firmware_version[0],
-				ha->firmware_version[1],
-				ha->patch_number, ha->build_number);
+				ha->fw_info.fw_major, ha->fw_info.fw_minor,
+				ha->fw_info.fw_patch, ha->fw_info.fw_build);
 }
 
 static ssize_t
@@ -181,8 +178,8 @@ qla4xxx_iscsi_version_show(struct device *dev, struct device_attribute *attr,
 			   char *buf)
 {
 	struct scsi_qla_host *ha = to_qla_host(class_to_shost(dev));
-	return snprintf(buf, PAGE_SIZE, "%d.%02d\n", ha->iscsi_major,
-			ha->iscsi_minor);
+	return snprintf(buf, PAGE_SIZE, "%d.%02d\n", ha->fw_info.iscsi_major,
+			ha->fw_info.iscsi_minor);
 }
 
 static ssize_t
@@ -191,8 +188,8 @@ qla4xxx_optrom_version_show(struct device *dev, struct device_attribute *attr,
 {
 	struct scsi_qla_host *ha = to_qla_host(class_to_shost(dev));
 	return snprintf(buf, PAGE_SIZE, "%d.%02d.%02d.%02d\n",
-			ha->bootload_major, ha->bootload_minor,
-			ha->bootload_patch, ha->bootload_build);
+			ha->fw_info.bootload_major, ha->fw_info.bootload_minor,
+			ha->fw_info.bootload_patch, ha->fw_info.bootload_build);
 }
 
 static ssize_t
@@ -259,6 +256,63 @@ qla4xxx_hba_model_show(struct device *dev, struct device_attribute *attr,
 	return snprintf(buf, PAGE_SIZE, "%s\n", ha->model_name);
 }
 
+static ssize_t
+qla4xxx_fw_timestamp_show(struct device *dev, struct device_attribute *attr,
+			  char *buf)
+{
+	struct scsi_qla_host *ha = to_qla_host(class_to_shost(dev));
+	return snprintf(buf, PAGE_SIZE, "%s %s\n", ha->fw_info.fw_build_date,
+			ha->fw_info.fw_build_time);
+}
+
+static ssize_t
+qla4xxx_fw_build_user_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct scsi_qla_host *ha = to_qla_host(class_to_shost(dev));
+	return snprintf(buf, PAGE_SIZE, "%s\n", ha->fw_info.fw_build_user);
+}
+
+static ssize_t
+qla4xxx_fw_ext_timestamp_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	struct scsi_qla_host *ha = to_qla_host(class_to_shost(dev));
+	return snprintf(buf, PAGE_SIZE, "%s\n", ha->fw_info.extended_timestamp);
+}
+
+static ssize_t
+qla4xxx_fw_load_src_show(struct device *dev, struct device_attribute *attr,
+			 char *buf)
+{
+	struct scsi_qla_host *ha = to_qla_host(class_to_shost(dev));
+	char *load_src = NULL;
+
+	switch (ha->fw_info.fw_load_source) {
+	case 1:
+		load_src = "Flash Primary";
+		break;
+	case 2:
+		load_src = "Flash Secondary";
+		break;
+	case 3:
+		load_src = "Host Download";
+		break;
+	}
+
+	return snprintf(buf, PAGE_SIZE, "%s\n", load_src);
+}
+
+static ssize_t
+qla4xxx_fw_uptime_show(struct device *dev, struct device_attribute *attr,
+		       char *buf)
+{
+	struct scsi_qla_host *ha = to_qla_host(class_to_shost(dev));
+	qla4xxx_about_firmware(ha);
+	return snprintf(buf, PAGE_SIZE, "%u.%u secs\n", ha->fw_uptime_secs,
+			ha->fw_uptime_msecs);
+}
+
 static DEVICE_ATTR(fw_version, S_IRUGO, qla4xxx_fw_version_show, NULL);
 static DEVICE_ATTR(serial_num, S_IRUGO, qla4xxx_serial_num_show, NULL);
 static DEVICE_ATTR(iscsi_version, S_IRUGO, qla4xxx_iscsi_version_show, NULL);
@@ -269,17 +323,37 @@ static DEVICE_ATTR(phy_port_cnt, S_IRUGO, qla4xxx_phy_port_cnt_show, NULL);
 static DEVICE_ATTR(phy_port_num, S_IRUGO, qla4xxx_phy_port_num_show, NULL);
 static DEVICE_ATTR(iscsi_func_cnt, S_IRUGO, qla4xxx_iscsi_func_cnt_show, NULL);
 static DEVICE_ATTR(hba_model, S_IRUGO, qla4xxx_hba_model_show, NULL);
+static DEVICE_ATTR(fw_timestamp, S_IRUGO, qla4xxx_fw_timestamp_show, NULL);
+static DEVICE_ATTR(fw_build_user, S_IRUGO, qla4xxx_fw_build_user_show, NULL);
+static DEVICE_ATTR(fw_ext_timestamp, S_IRUGO, qla4xxx_fw_ext_timestamp_show,
+		   NULL);
+static DEVICE_ATTR(fw_load_src, S_IRUGO, qla4xxx_fw_load_src_show, NULL);
+static DEVICE_ATTR(fw_uptime, S_IRUGO, qla4xxx_fw_uptime_show, NULL);
 
-struct device_attribute *qla4xxx_host_attrs[] = {
-	&dev_attr_fw_version,
-	&dev_attr_serial_num,
-	&dev_attr_iscsi_version,
-	&dev_attr_optrom_version,
-	&dev_attr_board_id,
-	&dev_attr_fw_state,
-	&dev_attr_phy_port_cnt,
-	&dev_attr_phy_port_num,
-	&dev_attr_iscsi_func_cnt,
-	&dev_attr_hba_model,
+static struct attribute *qla4xxx_host_attrs[] = {
+	&dev_attr_fw_version.attr,
+	&dev_attr_serial_num.attr,
+	&dev_attr_iscsi_version.attr,
+	&dev_attr_optrom_version.attr,
+	&dev_attr_board_id.attr,
+	&dev_attr_fw_state.attr,
+	&dev_attr_phy_port_cnt.attr,
+	&dev_attr_phy_port_num.attr,
+	&dev_attr_iscsi_func_cnt.attr,
+	&dev_attr_hba_model.attr,
+	&dev_attr_fw_timestamp.attr,
+	&dev_attr_fw_build_user.attr,
+	&dev_attr_fw_ext_timestamp.attr,
+	&dev_attr_fw_load_src.attr,
+	&dev_attr_fw_uptime.attr,
 	NULL,
+};
+
+static const struct attribute_group qla4xxx_host_attr_group = {
+	.attrs = qla4xxx_host_attrs
+};
+
+const struct attribute_group *qla4xxx_host_groups[] = {
+	&qla4xxx_host_attr_group,
+	NULL
 };

@@ -22,22 +22,21 @@ struct jffs2_acl_entry_short {
 
 struct jffs2_acl_header {
 	jint32_t	a_version;
+	struct jffs2_acl_entry	a_entries[];
 };
 
 #ifdef CONFIG_JFFS2_FS_POSIX_ACL
 
-struct posix_acl *jffs2_get_acl(struct inode *inode, int type);
-extern int jffs2_acl_chmod(struct inode *);
+struct posix_acl *jffs2_get_acl(struct inode *inode, int type, bool rcu);
+int jffs2_set_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
+		  struct posix_acl *acl, int type);
 extern int jffs2_init_acl_pre(struct inode *, struct inode *, umode_t *);
 extern int jffs2_init_acl_post(struct inode *);
-
-extern const struct xattr_handler jffs2_acl_access_xattr_handler;
-extern const struct xattr_handler jffs2_acl_default_xattr_handler;
 
 #else
 
 #define jffs2_get_acl				(NULL)
-#define jffs2_acl_chmod(inode)			(0)
+#define jffs2_set_acl				(NULL)
 #define jffs2_init_acl_pre(dir_i,inode,mode)	(0)
 #define jffs2_init_acl_post(inode)		(0)
 

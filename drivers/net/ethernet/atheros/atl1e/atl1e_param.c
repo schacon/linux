@@ -1,25 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright(c) 2007 Atheros Corporation. All rights reserved.
  *
  * Derived from Intel e1000 driver
  * Copyright(c) 1999 - 2005 Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
 
 #include <linux/netdevice.h>
+#include <linux/stringify.h>
 
 #include "atl1e.h"
 
@@ -194,7 +182,7 @@ void atl1e_check_options(struct atl1e_adapter *adapter)
 			.type = range_option,
 			.name = "Transmit Ddescription Count",
 			.err  = "using default of "
-				__MODULE_STRING(ATL1E_DEFAULT_TX_DESC_CNT),
+				__stringify(ATL1E_DEFAULT_TX_DESC_CNT),
 			.def  = ATL1E_DEFAULT_TX_DESC_CNT,
 			.arg  = { .r = { .min = ATL1E_MIN_TX_DESC_CNT,
 					 .max = ATL1E_MAX_TX_DESC_CNT} }
@@ -213,7 +201,7 @@ void atl1e_check_options(struct atl1e_adapter *adapter)
 			.type = range_option,
 			.name = "Memory size of rx buffer(KB)",
 			.err  = "using default of "
-				__MODULE_STRING(ATL1E_DEFAULT_RX_MEM_SIZE),
+				__stringify(ATL1E_DEFAULT_RX_MEM_SIZE),
 			.def  = ATL1E_DEFAULT_RX_MEM_SIZE,
 			.arg  = { .r = { .min = ATL1E_MIN_RX_MEM_SIZE,
 					 .max = ATL1E_MAX_RX_MEM_SIZE} }
@@ -233,7 +221,7 @@ void atl1e_check_options(struct atl1e_adapter *adapter)
 			.type = range_option,
 			.name = "Interrupt Moderate Timer",
 			.err  = "using default of "
-				__MODULE_STRING(INT_MOD_DEFAULT_CNT),
+				__stringify(INT_MOD_DEFAULT_CNT),
 			.def  = INT_MOD_DEFAULT_CNT,
 			.arg  = { .r = { .min = INT_MOD_MIN_CNT,
 					 .max = INT_MOD_MAX_CNT} }
@@ -252,7 +240,7 @@ void atl1e_check_options(struct atl1e_adapter *adapter)
 			.type = range_option,
 			.name = "Speed/Duplex Selection",
 			.err  = "using default of "
-				__MODULE_STRING(MEDIA_TYPE_AUTO_SENSOR),
+				__stringify(MEDIA_TYPE_AUTO_SENSOR),
 			.def  = MEDIA_TYPE_AUTO_SENSOR,
 			.arg  = { .r = { .min = MEDIA_TYPE_AUTO_SENSOR,
 					 .max = MEDIA_TYPE_10M_HALF} }

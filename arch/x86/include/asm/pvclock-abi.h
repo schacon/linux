@@ -1,6 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_PVCLOCK_ABI_H
 #define _ASM_X86_PVCLOCK_ABI_H
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /*
  * These structs MUST NOT be changed.
@@ -41,5 +42,7 @@ struct pvclock_wall_clock {
 
 #define PVCLOCK_TSC_STABLE_BIT	(1 << 0)
 #define PVCLOCK_GUEST_STOPPED	(1 << 1)
-#endif /* __ASSEMBLY__ */
+/* PVCLOCK_COUNTS_FROM_ZERO broke ABI and can't be used anymore. */
+#define PVCLOCK_COUNTS_FROM_ZERO (1 << 2)
+#endif /* __ASSEMBLER__ */
 #endif /* _ASM_X86_PVCLOCK_ABI_H */

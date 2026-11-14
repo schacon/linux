@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Generic gameport layer
  *
@@ -5,16 +6,13 @@
  * Copyright (c) 2005 Dmitry Torokhov
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/export.h>
 #include <linux/stddef.h>
 #include <linux/module.h>
+#include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/gameport.h>
@@ -23,12 +21,15 @@
 #include <linux/workqueue.h>
 #include <linux/sched.h>	/* HZ */
 #include <linux/mutex.h>
-
-/*#include <asm/io.h>*/
+#include <linux/timekeeping.h>
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
 MODULE_DESCRIPTION("Generic gameport layer");
 MODULE_LICENSE("GPL");
+
+static bool use_ktime = true;
+module_param(use_ktime, bool, 0400);
+MODULE_PARM_DESC(use_ktime, "Use ktime for measuring I/O speed");
 
 /*
  * gameport_mutex protects entire gameport subsystem and is taken
@@ -38,7 +39,7 @@ static DEFINE_MUTEX(gameport_mutex);
 
 static LIST_HEAD(gameport_list);
 
-static struct bus_type gameport_bus;
+static const struct bus_type gameport_bus;
 
 static void gameport_add_port(struct gameport *gameport);
 static void gameport_attach_driver(struct gameport_driver *drv);
@@ -76,6 +77,38 @@ static unsigned int get_time_pit(void)
 
 static int gameport_measure_speed(struct gameport *gameport)
 {
+	unsigned int i, t, tx;
+	u64 t1, t2, t3;
+	unsigned long flags;
+
+	if (gameport_open(gameport, NULL, GAMEPORT_MODE_RAW))
+		return 0;
+
+	tx = ~0;
+
+	for (i = 0; i < 50; i++) {
+		local_irq_save(flags);
+		t1 = ktime_get_ns();
+		for (t = 0; t < 50; t++)
+			gameport_read(gameport);
+		t2 = ktime_get_ns();
+		t3 = ktime_get_ns();
+		local_irq_restore(flags);
+		udelay(i * 10);
+		t = (t2 - t1) - (t3 - t2);
+		if (t < tx)
+			tx = t;
+	}
+
+	gameport_close(gameport);
+	t = 1000000 * 50;
+	if (tx)
+		t /= tx;
+	return t;
+}
+
+static int old_gameport_measure_speed(struct gameport *gameport)
+{
 #if defined(__i386__)
 
 	unsigned int i, t, t1, t2, t3, tx;
@@ -112,9 +145,9 @@ static int gameport_measure_speed(struct gameport *gameport)
 
 	for(i = 0; i < 50; i++) {
 		local_irq_save(flags);
-		rdtscl(t1);
+		t1 = rdtsc();
 		for (t = 0; t < 50; t++) gameport_read(gameport);
-		rdtscl(t2);
+		t2 = rdtsc();
 		local_irq_restore(flags);
 		udelay(i * 10);
 		if (t2 - t1 < tx) tx = t2 - t1;
@@ -159,15 +192,16 @@ void gameport_stop_polling(struct gameport *gameport)
 	spin_lock(&gameport->timer_lock);
 
 	if (!--gameport->poll_cnt)
-		del_timer(&gameport->poll_timer);
+		timer_delete(&gameport->poll_timer);
 
 	spin_unlock(&gameport->timer_lock);
 }
 EXPORT_SYMBOL(gameport_stop_polling);
 
-static void gameport_run_poll_handler(unsigned long d)
+static void gameport_run_poll_handler(struct timer_list *t)
 {
-	struct gameport *gameport = (struct gameport *)d;
+	struct gameport *gameport = timer_container_of(gameport, t,
+						       poll_timer);
 
 	gameport->poll_handler(gameport);
 	if (gameport->poll_cnt)
@@ -340,7 +374,7 @@ static int gameport_queue_event(void *object, struct module *owner,
 		}
 	}
 
-	event = kmalloc(sizeof(struct gameport_event), GFP_ATOMIC);
+	event = kmalloc_obj(*event, GFP_ATOMIC);
 	if (!event) {
 		pr_err("Not enough memory to queue event %d\n", event_type);
 		retval = -ENOMEM;
@@ -348,8 +382,8 @@ static int gameport_queue_event(void *object, struct module *owner,
 	}
 
 	if (!try_module_get(owner)) {
-		pr_warning("Can't get module reference, dropping event %d\n",
-			   event_type);
+		pr_warn("Can't get module reference, dropping event %d\n",
+			event_type);
 		kfree(event);
 		retval = -EINVAL;
 		goto out;
@@ -422,14 +456,15 @@ static struct gameport *gameport_get_pending_child(struct gameport *parent)
  * Gameport port operations
  */
 
-static ssize_t gameport_show_description(struct device *dev, struct device_attribute *attr, char *buf)
+static ssize_t gameport_description_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct gameport *gameport = to_gameport_port(dev);
 
 	return sprintf(buf, "%s\n", gameport->name);
 }
+static DEVICE_ATTR(description, S_IRUGO, gameport_description_show, NULL);
 
-static ssize_t gameport_rebind_driver(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+static ssize_t drvctl_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct gameport *gameport = to_gameport_port(dev);
 	struct device_driver *drv;
@@ -457,12 +492,14 @@ static ssize_t gameport_rebind_driver(struct device *dev, struct device_attribut
 
 	return error ? error : count;
 }
+static DEVICE_ATTR_WO(drvctl);
 
-static struct device_attribute gameport_device_attrs[] = {
-	__ATTR(description, S_IRUGO, gameport_show_description, NULL),
-	__ATTR(drvctl, S_IWUSR, NULL, gameport_rebind_driver),
-	__ATTR_NULL
+static struct attribute *gameport_device_attrs[] = {
+	&dev_attr_description.attr,
+	&dev_attr_drvctl.attr,
+	NULL,
 };
+ATTRIBUTE_GROUPS(gameport_device);
 
 static void gameport_release_port(struct device *dev)
 {
@@ -482,29 +519,58 @@ void gameport_set_phys(struct gameport *gameport, const char *fmt, ...)
 }
 EXPORT_SYMBOL(gameport_set_phys);
 
+static void gameport_default_trigger(struct gameport *gameport)
+{
+#ifdef CONFIG_HAS_IOPORT
+	outb(0xff, gameport->io);
+#endif
+}
+
+static unsigned char gameport_default_read(struct gameport *gameport)
+{
+#ifdef CONFIG_HAS_IOPORT
+	return inb(gameport->io);
+#else
+	return 0xff;
+#endif
+}
+
+static void gameport_setup_default_handlers(struct gameport *gameport)
+{
+	if ((!gameport->trigger || !gameport->read) &&
+	    !IS_ENABLED(CONFIG_HAS_IOPORT))
+		dev_err(&gameport->dev,
+			"I/O port access is required for %s (%s) but is not available\n",
+			gameport->phys, gameport->name);
+
+	if (!gameport->trigger)
+		gameport->trigger = gameport_default_trigger;
+	if (!gameport->read)
+		gameport->read = gameport_default_read;
+}
+
 /*
  * Prepare gameport port for registration.
  */
 static void gameport_init_port(struct gameport *gameport)
 {
-	static atomic_t gameport_no = ATOMIC_INIT(0);
+	static atomic_t gameport_no = ATOMIC_INIT(-1);
 
 	__module_get(THIS_MODULE);
 
 	mutex_init(&gameport->drv_mutex);
 	device_initialize(&gameport->dev);
 	dev_set_name(&gameport->dev, "gameport%lu",
-			(unsigned long)atomic_inc_return(&gameport_no) - 1);
+			(unsigned long)atomic_inc_return(&gameport_no));
 	gameport->dev.bus = &gameport_bus;
 	gameport->dev.release = gameport_release_port;
 	if (gameport->parent)
 		gameport->dev.parent = &gameport->parent->dev;
 
+	gameport_setup_default_handlers(gameport);
 	INIT_LIST_HEAD(&gameport->node);
 	spin_lock_init(&gameport->timer_lock);
-	init_timer(&gameport->poll_timer);
-	gameport->poll_timer.function = gameport_run_poll_handler;
-	gameport->poll_timer.data = (unsigned long)gameport;
+	timer_setup(&gameport->poll_timer, gameport_run_poll_handler, 0);
 }
 
 /*
@@ -518,7 +584,9 @@ static void gameport_add_port(struct gameport *gameport)
 	if (gameport->parent)
 		gameport->parent->child = gameport;
 
-	gameport->speed = gameport_measure_speed(gameport);
+	gameport->speed = use_ktime ?
+		gameport_measure_speed(gameport) :
+		old_gameport_measure_speed(gameport);
 
 	list_add_tail(&gameport->node, &gameport_list);
 
@@ -639,16 +707,18 @@ EXPORT_SYMBOL(gameport_unregister_port);
  * Gameport driver operations
  */
 
-static ssize_t gameport_driver_show_description(struct device_driver *drv, char *buf)
+static ssize_t description_show(struct device_driver *drv, char *buf)
 {
 	struct gameport_driver *driver = to_gameport_driver(drv);
 	return sprintf(buf, "%s\n", driver->description ? driver->description : "(none)");
 }
+static DRIVER_ATTR_RO(description);
 
-static struct driver_attribute gameport_driver_attrs[] = {
-	__ATTR(description, S_IRUGO, gameport_driver_show_description, NULL),
-	__ATTR_NULL
+static struct attribute *gameport_driver_attrs[] = {
+	&driver_attr_description.attr,
+	NULL
 };
+ATTRIBUTE_GROUPS(gameport_driver);
 
 static int gameport_driver_probe(struct device *dev)
 {
@@ -659,13 +729,12 @@ static int gameport_driver_probe(struct device *dev)
 	return gameport->drv ? 0 : -ENODEV;
 }
 
-static int gameport_driver_remove(struct device *dev)
+static void gameport_driver_remove(struct device *dev)
 {
 	struct gameport *gameport = to_gameport_port(dev);
 	struct gameport_driver *drv = to_gameport_driver(dev->driver);
 
 	drv->disconnect(gameport);
-	return 0;
 }
 
 static void gameport_attach_driver(struct gameport_driver *drv)
@@ -739,17 +808,17 @@ start_over:
 }
 EXPORT_SYMBOL(gameport_unregister_driver);
 
-static int gameport_bus_match(struct device *dev, struct device_driver *drv)
+static int gameport_bus_match(struct device *dev, const struct device_driver *drv)
 {
-	struct gameport_driver *gameport_drv = to_gameport_driver(drv);
+	const struct gameport_driver *gameport_drv = to_gameport_driver(drv);
 
 	return !gameport_drv->ignore;
 }
 
-static struct bus_type gameport_bus = {
+static const struct bus_type gameport_bus = {
 	.name		= "gameport",
-	.dev_attrs	= gameport_device_attrs,
-	.drv_attrs	= gameport_driver_attrs,
+	.dev_groups	= gameport_device_groups,
+	.drv_groups	= gameport_driver_groups,
 	.match		= gameport_bus_match,
 	.probe		= gameport_driver_probe,
 	.remove		= gameport_driver_remove,
@@ -780,7 +849,7 @@ EXPORT_SYMBOL(gameport_open);
 
 void gameport_close(struct gameport *gameport)
 {
-	del_timer_sync(&gameport->poll_timer);
+	timer_delete_sync(&gameport->poll_timer);
 	gameport->poll_handler = NULL;
 	gameport->poll_interval = 0;
 	gameport_set_drv(gameport, NULL);

@@ -34,21 +34,16 @@
 #include <asm/page.h>
 #include <linux/of_fdt.h>		/* for OF_DT_HEADER */
 
-#ifdef CONFIG_MMU
 #include <asm/setup.h> /* COMMAND_LINE_SIZE */
 #include <asm/mmu.h>
 #include <asm/processor.h>
 
 .section .data
-.global empty_zero_page
+/* The MMU requires a page aligned page directory. */
 .align 12
-empty_zero_page:
-	.space	PAGE_SIZE
 .global swapper_pg_dir
 swapper_pg_dir:
 	.space	PAGE_SIZE
-
-#endif /* CONFIG_MMU */
 
 .section .rodata
 .align 4
@@ -64,6 +59,10 @@ real_start:
 #endif
 
 	mts	rmsr, r0
+/* Disable stack protection from bootloader */
+	mts	rslr, r0
+	addi	r8, r0, 0xFFFFFFFF
+	mts	rshr, r8
 /*
  * According to Xilinx, msrclr instruction behaves like 'mfs rX,rpc'
  * if the msrclr instruction is not enabled. We use this to detect
@@ -95,7 +94,7 @@ big_endian:
 _prepare_copy_fdt:
 	or	r11, r0, r0 /* incremment */
 	ori	r4, r0, TOPHYS(_fdt_start)
-	ori	r3, r0, (0x8000 - 4)
+	ori	r3, r0, (0x10000 - 4)
 _copy_fdt:
 	lw	r12, r7, r11 /* r12 = r7 + r11 */
 	sw	r12, r4, r11 /* addr[r4 + r11] = r12 */
@@ -103,8 +102,6 @@ _copy_fdt:
 	bgtid	r3, _copy_fdt /* loop for all entries */
 	addik	r3, r3, -4 /* descrement loop */
 no_fdt_arg:
-
-#ifdef CONFIG_MMU
 
 #ifndef CONFIG_CMDLINE_BOOL
 /*
@@ -117,10 +114,10 @@ no_fdt_arg:
 	tophys(r4,r4)			/* convert to phys address */
 	ori	r3, r0, COMMAND_LINE_SIZE - 1 /* number of loops */
 _copy_command_line:
-	/* r2=r5+r6 - r5 contain pointer to command line */
+	/* r2=r5+r11 - r5 contain pointer to command line */
 	lbu	r2, r5, r11
 	beqid	r2, skip		/* Skip if no data */
-	sb	r2, r4, r11		/* addr[r4+r6]= r2 */
+	sb	r2, r4, r11		/* addr[r4+r11]= r2 */
 	addik	r11, r11, 1		/* increment counting */
 	bgtid	r3, _copy_command_line	/* loop for all entries       */
 	addik	r3, r3, -1		/* decrement loop */
@@ -135,8 +132,8 @@ skip:
 	ori	r4, r0, TOPHYS(_bram_load_start)	/* save bram context */
 	ori	r3, r0, (LMB_SIZE - 4)
 _copy_bram:
-	lw	r7, r0, r11		/* r7 = r0 + r6 */
-	sw	r7, r4, r11		/* addr[r4 + r6] = r7 */
+	lw	r7, r0, r11		/* r7 = r0 + r11 */
+	sw	r7, r4, r11		/* addr[r4 + r11] = r7 */
 	addik	r11, r11, 4		/* increment counting */
 	bgtid	r3, _copy_bram		/* loop for all entries */
 	addik	r3, r3, -4		/* descrement loop */
@@ -176,7 +173,7 @@ _invalidate:
 	/* start to do TLB calculation */
 	addik	r12, r0, _end
 	rsub	r12, r3, r12
-	addik	r12, r12, CONFIG_KERNEL_PAD /* that's the pad */
+	addik	r12, r12, CONFIG_LOWMEM_SIZE >> PTE_SHIFT /* that's the pad */
 
 	or r9, r0, r0 /* TLB0 = 0 */
 	or r10, r0, r0 /* TLB1 = 0 */
@@ -201,7 +198,7 @@ GT4: /* r11 contains the rest - will be either 1 or 4 */
 GT16: /* TLB0 is 16MB */
 	addik	r9, r0, 0x1000000 /* means TLB0 is 16MB */
 TLB1:
-	/* must be used r2 because of substract if failed */
+	/* must be used r2 because of subtract if failed */
 	addik	r2, r11, -0x0400000
 	bgei	r2, GT20 /* size is greater than 16MB */
 	/* size is >16MB and <20MB */
@@ -325,7 +322,6 @@ turn_on_mmu:
 	nop
 
 start_here:
-#endif /* CONFIG_MMU */
 
 	/* Initialize small data anchors */
 	addik	r13, r0, _KERNEL_SDA_BASE_
@@ -337,20 +333,10 @@ start_here:
 	/* Initialize r31 with current task address */
 	addik	r31, r0, init_task
 
-	/*
-	 * Call platform dependent initialize function.
-	 * Please see $(ARCH)/mach-$(SUBARCH)/setup.c for
-	 * the function.
-	 */
 	addik	r11, r0, machine_early_init
 	brald	r15, r11
 	nop
 
-#ifndef CONFIG_MMU
-	addik	r15, r0, machine_halt
-	braid	start_kernel
-	nop
-#else
 	/*
 	 * Initialize the MMU.
 	 */
@@ -384,4 +370,3 @@ kernel_load_context:
 	nop
 	rted	r17, 0		/* enable MMU and jump to start_kernel */
 	nop
-#endif /* CONFIG_MMU */

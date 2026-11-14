@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ths7303/53- THS7303/53 Video Amplifier driver
  *
@@ -7,26 +8,16 @@
  * Author: Chaithrika U S <chaithrika@ti.com>
  *
  * Contributors:
- *     Hans Verkuil <hans.verkuil@cisco.com>
+ *     Hans Verkuil <hverkuil@kernel.org>
  *     Lad, Prabhakar <prabhakar.lad@ti.com>
  *     Martin Bugge <marbugge@cisco.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed .as is. WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 
-#include <media/ths7303.h>
-#include <media/v4l2-chip-ident.h>
+#include <media/i2c/ths7303.h>
 #include <media/v4l2-device.h>
 
 #define THS7303_CHANNEL_1	1
@@ -35,11 +26,10 @@
 
 struct ths7303_state {
 	struct v4l2_subdev		sd;
-	struct ths7303_platform_data	pdata;
+	const struct ths7303_platform_data *pdata;
 	struct v4l2_bt_timings		bt;
 	int std_id;
 	int stream_on;
-	int driver_data;
 };
 
 enum ths7303_filter_mode {
@@ -53,10 +43,6 @@ enum ths7303_filter_mode {
 MODULE_DESCRIPTION("TI THS7303 video amplifier driver");
 MODULE_AUTHOR("Chaithrika U S");
 MODULE_LICENSE("GPL");
-
-static int debug;
-module_param(debug, int, 0644);
-MODULE_PARM_DESC(debug, "Debug level 0-1");
 
 static inline struct ths7303_state *to_state(struct v4l2_subdev *sd)
 {
@@ -85,11 +71,12 @@ static int ths7303_write(struct v4l2_subdev *sd, u8 reg, u8 val)
 }
 
 /* following function is used to set ths7303 */
-int ths7303_setval(struct v4l2_subdev *sd, enum ths7303_filter_mode mode)
+static int ths7303_setval(struct v4l2_subdev *sd,
+			  enum ths7303_filter_mode mode)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
 	struct ths7303_state *state = to_state(sd);
-	struct ths7303_platform_data *pdata = &state->pdata;
+	const struct ths7303_platform_data *pdata = state->pdata;
 	u8 val, sel = 0;
 	int err, disable = 0;
 
@@ -198,8 +185,8 @@ static int ths7303_s_stream(struct v4l2_subdev *sd, int enable)
 }
 
 /* for setting filter for HD output */
-static int ths7303_s_dv_timings(struct v4l2_subdev *sd,
-			       struct v4l2_dv_timings *dv_timings)
+static int ths7303_s_dv_timings(struct v4l2_subdev *sd, unsigned int pad,
+				struct v4l2_dv_timings *dv_timings)
 {
 	struct ths7303_state *state = to_state(sd);
 
@@ -212,19 +199,9 @@ static int ths7303_s_dv_timings(struct v4l2_subdev *sd,
 	return ths7303_config(sd);
 }
 
-static int ths7303_g_chip_ident(struct v4l2_subdev *sd,
-				struct v4l2_dbg_chip_ident *chip)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ths7303_state *state = to_state(sd);
-
-	return v4l2_chip_ident_i2c_client(client, chip, state->driver_data, 0);
-}
-
 static const struct v4l2_subdev_video_ops ths7303_video_ops = {
 	.s_stream	= ths7303_s_stream,
 	.s_std_output	= ths7303_s_std_output,
-	.s_dv_timings   = ths7303_s_dv_timings,
 };
 
 #ifdef CONFIG_VIDEO_ADV_DEBUG
@@ -232,13 +209,6 @@ static const struct v4l2_subdev_video_ops ths7303_video_ops = {
 static int ths7303_g_register(struct v4l2_subdev *sd,
 			      struct v4l2_dbg_register *reg)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	if (!v4l2_chip_match_i2c_client(client, &reg->match))
-		return -EINVAL;
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	reg->size = 1;
 	reg->val = ths7303_read(sd, reg->reg);
 	return 0;
@@ -247,13 +217,6 @@ static int ths7303_g_register(struct v4l2_subdev *sd,
 static int ths7303_s_register(struct v4l2_subdev *sd,
 			      const struct v4l2_dbg_register *reg)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	if (!v4l2_chip_match_i2c_client(client, &reg->match))
-		return -EINVAL;
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	ths7303_write(sd, reg->reg, reg->val);
 	return 0;
 }
@@ -313,13 +276,11 @@ static int ths7303_log_status(struct v4l2_subdev *sd)
 	v4l2_info(sd, "stream %s\n", state->stream_on ? "On" : "Off");
 
 	if (state->bt.pixelclock) {
-		struct v4l2_bt_timings *bt = bt = &state->bt;
+		struct v4l2_bt_timings *bt = &state->bt;
 		u32 frame_width, frame_height;
 
-		frame_width = bt->width + bt->hfrontporch +
-			      bt->hsync + bt->hbackporch;
-		frame_height = bt->height + bt->vfrontporch +
-			       bt->vsync + bt->vbackporch;
+		frame_width = V4L2_DV_BT_FRAME_WIDTH(bt);
+		frame_height = V4L2_DV_BT_FRAME_HEIGHT(bt);
 		v4l2_info(sd,
 			  "timings: %dx%d%s%d (%dx%d). Pix freq. = %d Hz. Polarities = 0x%x\n",
 			  bt->width, bt->height, bt->interlaced ? "i" : "p",
@@ -340,7 +301,6 @@ static int ths7303_log_status(struct v4l2_subdev *sd)
 }
 
 static const struct v4l2_subdev_core_ops ths7303_core_ops = {
-	.g_chip_ident = ths7303_g_chip_ident,
 	.log_status = ths7303_log_status,
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 	.g_register = ths7303_g_register,
@@ -348,43 +308,26 @@ static const struct v4l2_subdev_core_ops ths7303_core_ops = {
 #endif
 };
 
-static const struct v4l2_subdev_ops ths7303_ops = {
-	.core	= &ths7303_core_ops,
-	.video 	= &ths7303_video_ops,
+static const struct v4l2_subdev_pad_ops ths7303_pad_ops = {
+	.s_dv_timings = ths7303_s_dv_timings,
 };
 
-static int ths7303_setup(struct v4l2_subdev *sd)
-{
-	struct ths7303_state *state = to_state(sd);
-	struct ths7303_platform_data *pdata = &state->pdata;
-	int ret;
-	u8 mask;
+static const struct v4l2_subdev_ops ths7303_ops = {
+	.core	= &ths7303_core_ops,
+	.video	= &ths7303_video_ops,
+	.pad	= &ths7303_pad_ops,
+};
 
-	state->stream_on = pdata->init_enable;
-
-	mask = state->stream_on ? 0xff : 0xf8;
-
-	ret = ths7303_write(sd, THS7303_CHANNEL_1, pdata->ch_1 & mask);
-	if (ret)
-		return ret;
-
-	ret = ths7303_write(sd, THS7303_CHANNEL_2, pdata->ch_2 & mask);
-	if (ret)
-		return ret;
-
-	ret = ths7303_write(sd, THS7303_CHANNEL_3, pdata->ch_3 & mask);
-	if (ret)
-		return ret;
-
-	return 0;
-}
-
-static int ths7303_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int ths7303_probe(struct i2c_client *client)
 {
 	struct ths7303_platform_data *pdata = client->dev.platform_data;
 	struct ths7303_state *state;
 	struct v4l2_subdev *sd;
+
+	if (pdata == NULL) {
+		dev_err(&client->dev, "No platform data\n");
+		return -EINVAL;
+	}
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -ENODEV;
@@ -392,50 +335,40 @@ static int ths7303_probe(struct i2c_client *client,
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	state = devm_kzalloc(&client->dev, sizeof(struct ths7303_state),
-			     GFP_KERNEL);
+	state = devm_kzalloc_obj(&client->dev, struct ths7303_state);
 	if (!state)
 		return -ENOMEM;
 
-	if (!pdata)
-		v4l_warn(client, "No platform data, using default data!\n");
-	else
-		state->pdata = *pdata;
-
+	state->pdata = pdata;
 	sd = &state->sd;
 	v4l2_i2c_subdev_init(sd, client, &ths7303_ops);
 
-	/* store the driver data to differntiate the chip */
-	state->driver_data = (int)id->driver_data;
-
-	if (ths7303_setup(sd) < 0) {
-		v4l_err(client, "init failed\n");
-		return -EIO;
+	/* set to default 480I_576I filter mode */
+	if (ths7303_setval(sd, THS7303_FILTER_MODE_480I_576I) < 0) {
+		v4l_err(client, "Setting to 480I_576I filter mode failed!\n");
+		return -EINVAL;
 	}
 
 	return 0;
 }
 
-static int ths7303_remove(struct i2c_client *client)
+static void ths7303_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_device_unregister_subdev(sd);
-
-	return 0;
 }
 
 static const struct i2c_device_id ths7303_id[] = {
-	{"ths7303", V4L2_IDENT_THS7303},
-	{"ths7353", V4L2_IDENT_THS7353},
-	{},
+	{ .name = "ths7303" },
+	{ .name = "ths7353" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, ths7303_id);
 
 static struct i2c_driver ths7303_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "ths73x3",
 	},
 	.probe		= ths7303_probe,

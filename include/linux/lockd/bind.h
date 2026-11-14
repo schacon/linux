@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/include/linux/lockd/bind.h
  *
@@ -9,27 +10,29 @@
 #ifndef LINUX_LOCKD_BIND_H
 #define LINUX_LOCKD_BIND_H
 
-#include <linux/lockd/nlm.h>
-/* need xdr-encoded error codes too, so... */
-#include <linux/lockd/xdr.h>
-#ifdef CONFIG_LOCKD_V4
-#include <linux/lockd/xdr4.h>
-#endif
-
-/* Dummy declarations */
+struct file_lock;
+struct nfs_fh;
 struct svc_rqst;
+struct rpc_task;
+struct rpc_clnt;
+struct super_block;
+struct module;
 
-/*
- * This is the set of functions for lockd->nfsd communication
+/**
+ * struct nlmsvc_binding - lockd -> nfsd callback table
+ * @owner:  module that provides this binding.
+ * @fopen:  open a file by NFS file handle on behalf of an NLM request.
+ * @fclose: close a file that was previously opened via @fopen.
+ *          Implementations MUST be semantically equivalent to fput().
  */
 struct nlmsvc_binding {
-	__be32			(*fopen)(struct svc_rqst *,
-						struct nfs_fh *,
-						struct file **);
-	void			(*fclose)(struct file *);
+	struct module	*owner;
+	int		(*fopen)(struct svc_rqst *rqstp, struct nfs_fh *f,
+				 struct file **filp, int flags);
+	void		(*fclose)(struct file *filp);
 };
 
-extern struct nlmsvc_binding *	nlmsvc_ops;
+extern const struct nlmsvc_binding __rcu *nlmsvc_ops;
 
 /*
  * Similar to nfs_client_initdata, but without the NFS-specific
@@ -43,6 +46,8 @@ struct nlmclnt_initdata {
 	u32			nfs_version;
 	int			noresvport;
 	struct net		*net;
+	const struct nlmclnt_operations	*nlmclnt_ops;
+	const struct cred	*cred;
 };
 
 /*
@@ -51,10 +56,36 @@ struct nlmclnt_initdata {
 
 extern struct nlm_host *nlmclnt_init(const struct nlmclnt_initdata *nlm_init);
 extern void	nlmclnt_done(struct nlm_host *host);
+extern struct rpc_clnt *nlmclnt_rpc_clnt(struct nlm_host *host);
+extern void	nlmclnt_shutdown_rpc_clnt(struct nlm_host *host);
 
-extern int	nlmclnt_proc(struct nlm_host *host, int cmd,
-					struct file_lock *fl);
-extern int	lockd_up(struct net *net);
+/*
+ * NLM client operations provide a means to modify RPC processing of NLM
+ * requests.  Callbacks receive a pointer to data passed into the call to
+ * nlmclnt_proc().
+ */
+struct nlmclnt_operations {
+	/* Called on successful allocation of nlm_rqst, use for allocation or
+	 * reference counting. */
+	void (*nlmclnt_alloc_call)(void *);
+
+	/* Called in rpc_task_prepare for unlock.  A return value of true
+	 * indicates the callback has put the task to sleep on a waitqueue
+	 * and NLM should not call rpc_call_start(). */
+	bool (*nlmclnt_unlock_prepare)(struct rpc_task*, void *);
+
+	/* Called when the nlm_rqst is freed, callbacks should clean up here */
+	void (*nlmclnt_release_call)(void *);
+};
+
+extern int	nlmclnt_proc(struct nlm_host *host, int cmd, struct file_lock *fl, void *data);
+extern int	lockd_up(struct net *net, const struct cred *cred);
 extern void	lockd_down(struct net *net);
+
+/*
+ * Cluster failover support
+ */
+int nlmsvc_unlock_all_by_sb(struct super_block *sb);
+int nlmsvc_unlock_all_by_ip(struct sockaddr *server_addr);
 
 #endif /* LINUX_LOCKD_BIND_H */

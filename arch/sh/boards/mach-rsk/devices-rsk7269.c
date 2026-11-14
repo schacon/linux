@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * RSK+SH7269 Support
  *
  * Copyright (C) 2012  Renesas Electronics Europe Ltd
  * Copyright (C) 2012  Phil Edworthy
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/types.h>
@@ -14,7 +11,6 @@
 #include <linux/interrupt.h>
 #include <linux/input.h>
 #include <linux/smsc911x.h>
-#include <linux/gpio.h>
 #include <asm/machvec.h>
 #include <asm/io.h>
 

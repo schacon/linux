@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ACPI_PMTMR_H_
 #define _ACPI_PMTMR_H_
 
@@ -24,6 +25,21 @@ static inline u32 acpi_pm_read_early(void)
 	/* mask the output to 24 bits */
 	return acpi_pm_read_verified() & ACPI_PM_MASK;
 }
+
+/**
+ * acpi_pmtmr_register_suspend_resume_callback - Register callback for
+ * suspend and resume event
+ *
+ * @cb: Callback triggered on suspend and resume
+ * @data: Data passed with the callback
+ */
+void acpi_pmtmr_register_suspend_resume_callback(void (*cb)(void *data, bool suspend), void *data);
+
+/**
+ * acpi_pmtmr_unregister_suspend_resume_callback - Remove registered callback
+ * for suspend and resume event
+ */
+void acpi_pmtmr_unregister_suspend_resume_callback(void);
 
 #else
 

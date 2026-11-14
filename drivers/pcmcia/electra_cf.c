@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2007 PA Semi, Inc
  *
  * Maintained by: Olof Johansson <olof@lixom.net>
  *
  * Based on drivers/pcmcia/omap_cf.c
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/module.h>
@@ -30,6 +17,8 @@
 #include <linux/interrupt.h>
 #include <linux/mm.h>
 #include <linux/vmalloc.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/slab.h>
 
@@ -46,14 +35,14 @@ struct electra_cf_socket {
 
 	struct platform_device	*ofdev;
 	unsigned long		mem_phys;
-	void __iomem *		mem_base;
+	void __iomem		*mem_base;
 	unsigned long		mem_size;
-	void __iomem *		io_virt;
+	void __iomem		*io_virt;
 	unsigned int		io_base;
 	unsigned int		io_size;
 	u_int			irq;
 	struct resource		iomem;
-	void __iomem *		gpio_base;
+	void __iomem		*gpio_base;
 	int			gpio_detect;
 	int			gpio_vsense;
 	int			gpio_3v;
@@ -77,9 +66,9 @@ static int electra_cf_ss_init(struct pcmcia_socket *s)
 }
 
 /* the timer is primarily to kick this socket's pccardd */
-static void electra_cf_timer(unsigned long _cf)
+static void electra_cf_timer(struct timer_list *t)
 {
-	struct electra_cf_socket *cf = (void *) _cf;
+	struct electra_cf_socket *cf = timer_container_of(cf, t, timer);
 	int present = electra_cf_present(cf);
 
 	if (present != cf->present) {
@@ -93,7 +82,9 @@ static void electra_cf_timer(unsigned long _cf)
 
 static irqreturn_t electra_cf_irq(int irq, void *_cf)
 {
-	electra_cf_timer((unsigned long)_cf);
+	struct electra_cf_socket *cf = _cf;
+
+	electra_cf_timer(&cf->timer);
 	return IRQ_HANDLED;
 }
 
@@ -187,10 +178,9 @@ static int electra_cf_probe(struct platform_device *ofdev)
 	struct device_node *np = ofdev->dev.of_node;
 	struct electra_cf_socket   *cf;
 	struct resource mem, io;
-	int status;
+	int status = -ENOMEM;
 	const unsigned int *prop;
 	int err;
-	struct vm_struct *area;
 
 	err = of_address_to_resource(np, 0, &mem);
 	if (err)
@@ -200,39 +190,30 @@ static int electra_cf_probe(struct platform_device *ofdev)
 	if (err)
 		return -EINVAL;
 
-	cf = kzalloc(sizeof *cf, GFP_KERNEL);
+	cf = kzalloc_obj(*cf);
 	if (!cf)
 		return -ENOMEM;
 
-	setup_timer(&cf->timer, electra_cf_timer, (unsigned long)cf);
-	cf->irq = NO_IRQ;
+	timer_setup(&cf->timer, electra_cf_timer, 0);
+	cf->irq = 0;
 
 	cf->ofdev = ofdev;
 	cf->mem_phys = mem.start;
 	cf->mem_size = PAGE_ALIGN(resource_size(&mem));
 	cf->mem_base = ioremap(cf->mem_phys, cf->mem_size);
+	if (!cf->mem_base)
+		goto out_free_cf;
 	cf->io_size = PAGE_ALIGN(resource_size(&io));
-
-	area = __get_vm_area(cf->io_size, 0, PHB_IO_BASE, PHB_IO_END);
-	if (area == NULL)
-		return -ENOMEM;
-
-	cf->io_virt = (void __iomem *)(area->addr);
+	cf->io_virt = ioremap_phb(io.start, cf->io_size);
+	if (!cf->io_virt)
+		goto out_unmap_mem;
 
 	cf->gpio_base = ioremap(0xfc103000, 0x1000);
+	if (!cf->gpio_base)
+		goto out_unmap_virt;
 	dev_set_drvdata(device, cf);
 
-	if (!cf->mem_base || !cf->io_virt || !cf->gpio_base ||
-	    (__ioremap_at(io.start, cf->io_virt, cf->io_size,
-		_PAGE_NO_CACHE | _PAGE_GUARDED) == NULL)) {
-		dev_err(device, "can't ioremap ranges\n");
-		status = -ENOMEM;
-		goto fail1;
-	}
-
-
 	cf->io_base = (unsigned long)cf->io_virt - VMALLOC_END;
-
 	cf->iomem.start = (unsigned long)cf->mem_base;
 	cf->iomem.end = (unsigned long)cf->mem_base + (mem.end - mem.start);
 	cf->iomem.flags = IORESOURCE_MEM;
@@ -247,6 +228,8 @@ static int electra_cf_probe(struct platform_device *ofdev)
 	}
 
 	cf->socket.pci_irq = cf->irq;
+
+	status = -EINVAL;
 
 	prop = of_get_property(np, "card-detect-gpio", NULL);
 	if (!prop)
@@ -301,7 +284,7 @@ static int electra_cf_probe(struct platform_device *ofdev)
 		 cf->mem_phys, io.start, cf->irq);
 
 	cf->active = 1;
-	electra_cf_timer((unsigned long)cf);
+	electra_cf_timer(&cf->timer);
 	return 0;
 
 fail3:
@@ -309,22 +292,22 @@ fail3:
 fail2:
 	release_mem_region(cf->mem_phys, cf->mem_size);
 fail1:
-	if (cf->irq != NO_IRQ)
+	if (cf->irq)
 		free_irq(cf->irq, cf);
 
-	if (cf->io_virt)
-		__iounmap_at(cf->io_virt, cf->io_size);
-	if (cf->mem_base)
-		iounmap(cf->mem_base);
-	if (cf->gpio_base)
-		iounmap(cf->gpio_base);
+	iounmap(cf->gpio_base);
+out_unmap_virt:
 	device_init_wakeup(&ofdev->dev, 0);
+	iounmap(cf->io_virt);
+out_unmap_mem:
+	iounmap(cf->mem_base);
+out_free_cf:
 	kfree(cf);
 	return status;
 
 }
 
-static int electra_cf_remove(struct platform_device *ofdev)
+static void electra_cf_remove(struct platform_device *ofdev)
 {
 	struct device *device = &ofdev->dev;
 	struct electra_cf_socket *cf;
@@ -334,17 +317,15 @@ static int electra_cf_remove(struct platform_device *ofdev)
 	cf->active = 0;
 	pcmcia_unregister_socket(&cf->socket);
 	free_irq(cf->irq, cf);
-	del_timer_sync(&cf->timer);
+	timer_shutdown_sync(&cf->timer);
 
-	__iounmap_at(cf->io_virt, cf->io_size);
+	iounmap(cf->io_virt);
 	iounmap(cf->mem_base);
 	iounmap(cf->gpio_base);
 	release_mem_region(cf->mem_phys, cf->mem_size);
 	release_region(cf->io_base, cf->io_size);
 
 	kfree(cf);
-
-	return 0;
 }
 
 static const struct of_device_id electra_cf_match[] = {
@@ -357,8 +338,7 @@ MODULE_DEVICE_TABLE(of, electra_cf_match);
 
 static struct platform_driver electra_cf_driver = {
 	.driver = {
-		.name = (char *)driver_name,
-		.owner = THIS_MODULE,
+		.name = driver_name,
 		.of_match_table = electra_cf_match,
 	},
 	.probe	  = electra_cf_probe,
@@ -368,5 +348,5 @@ static struct platform_driver electra_cf_driver = {
 module_platform_driver(electra_cf_driver);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR ("Olof Johansson <olof@lixom.net>");
+MODULE_AUTHOR("Olof Johansson <olof@lixom.net>");
 MODULE_DESCRIPTION("PA Semi Electra CF driver");

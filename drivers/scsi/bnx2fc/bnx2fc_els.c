@@ -1,9 +1,11 @@
 /*
- * bnx2fc_els.c: Broadcom NetXtreme II Linux FCoE offload driver.
+ * bnx2fc_els.c: QLogic Linux FCoE offload driver.
  * This file contains helper routines that handle ELS requests
  * and responses.
  *
- * Copyright (c) 2008 - 2013 Broadcom Corporation
+ * Copyright (c) 2008-2013 Broadcom Corporation
+ * Copyright (c) 2014-2016 QLogic Corporation
+ * Copyright (c) 2016-2017 Cavium Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,10 +22,12 @@ static void bnx2fc_flogi_resp(struct fc_seq *seq, struct fc_frame *fp,
 			      void *arg);
 static int bnx2fc_initiate_els(struct bnx2fc_rport *tgt, unsigned int op,
 			void *data, u32 data_len,
-			void (*cb_func)(struct bnx2fc_els_cb_arg *cb_arg),
+			void (*cb_func)(struct bnx2fc_rport *tgt,
+					struct bnx2fc_els_cb_arg *cb_arg),
 			struct bnx2fc_els_cb_arg *cb_arg, u32 timer_msec);
 
-static void bnx2fc_rrq_compl(struct bnx2fc_els_cb_arg *cb_arg)
+static void bnx2fc_rrq_compl(struct bnx2fc_rport *tgt,
+			     struct bnx2fc_els_cb_arg *cb_arg)
 {
 	struct bnx2fc_cmd *orig_io_req;
 	struct bnx2fc_cmd *rrq_req;
@@ -60,18 +64,25 @@ int bnx2fc_send_rrq(struct bnx2fc_cmd *aborted_io_req)
 
 	struct fc_els_rrq rrq;
 	struct bnx2fc_rport *tgt = aborted_io_req->tgt;
-	struct fc_lport *lport = tgt->rdata->local_port;
+	struct fc_lport *lport = NULL;
 	struct bnx2fc_els_cb_arg *cb_arg = NULL;
-	u32 sid = tgt->sid;
-	u32 r_a_tov = lport->r_a_tov;
+	u32 sid = 0;
+	u32 r_a_tov = 0;
 	unsigned long start = jiffies;
 	int rc;
+
+	if (!test_bit(BNX2FC_FLAG_SESSION_READY, &tgt->flags))
+		return -EINVAL;
+
+	lport = tgt->rdata->local_port;
+	sid = tgt->sid;
+	r_a_tov = lport->r_a_tov;
 
 	BNX2FC_ELS_DBG("Sending RRQ orig_xid = 0x%x\n",
 		   aborted_io_req->xid);
 	memset(&rrq, 0, sizeof(rrq));
 
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_NOIO);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_NOIO);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for RRQ\n");
 		rc = -ENOMEM;
@@ -110,10 +121,10 @@ rrq_err:
 	return rc;
 }
 
-static void bnx2fc_l2_els_compl(struct bnx2fc_els_cb_arg *cb_arg)
+static void bnx2fc_l2_els_compl(struct bnx2fc_rport *tgt,
+				struct bnx2fc_els_cb_arg *cb_arg)
 {
 	struct bnx2fc_cmd *els_req;
-	struct bnx2fc_rport *tgt;
 	struct bnx2fc_mp_req *mp_req;
 	struct fc_frame_header *fc_hdr;
 	unsigned char *buf;
@@ -141,7 +152,6 @@ static void bnx2fc_l2_els_compl(struct bnx2fc_els_cb_arg *cb_arg)
 		goto free_arg;
 	}
 
-	tgt = els_req->tgt;
 	mp_req = &(els_req->mp_req);
 	fc_hdr = &(mp_req->resp_fc_hdr);
 	resp_len = mp_req->resp_len;
@@ -180,7 +190,7 @@ int bnx2fc_send_adisc(struct bnx2fc_rport *tgt, struct fc_frame *fp)
 	int rc;
 
 	fh = fc_frame_header_get(fp);
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for ADISC\n");
 		return -ENOMEM;
@@ -208,7 +218,7 @@ int bnx2fc_send_logo(struct bnx2fc_rport *tgt, struct fc_frame *fp)
 	int rc;
 
 	fh = fc_frame_header_get(fp);
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for LOGO\n");
 		return -ENOMEM;
@@ -236,7 +246,7 @@ int bnx2fc_send_rls(struct bnx2fc_rport *tgt, struct fc_frame *fp)
 	int rc;
 
 	fh = fc_frame_header_get(fp);
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for LOGO\n");
 		return -ENOMEM;
@@ -253,7 +263,9 @@ int bnx2fc_send_rls(struct bnx2fc_rport *tgt, struct fc_frame *fp)
 	return rc;
 }
 
-void bnx2fc_srr_compl(struct bnx2fc_els_cb_arg *cb_arg)
+static void bnx2fc_srr_compl(struct bnx2fc_rport *tgt,
+			     struct bnx2fc_els_cb_arg *cb_arg)
+	__must_hold(&tgt->tgt_lock)
 {
 	struct bnx2fc_mp_req *mp_req;
 	struct fc_frame_header *fc_hdr, *fh;
@@ -287,7 +299,6 @@ void bnx2fc_srr_compl(struct bnx2fc_els_cb_arg *cb_arg)
 		}
 		orig_io_req->srr_retry++;
 		if (orig_io_req->srr_retry <= SRR_RETRY_COUNT) {
-			struct bnx2fc_rport *tgt = orig_io_req->tgt;
 			spin_unlock_bh(&tgt->tgt_lock);
 			rc = bnx2fc_send_srr(orig_io_req,
 					     orig_io_req->srr_offset,
@@ -363,7 +374,9 @@ srr_compl_done:
 	kref_put(&orig_io_req->refcount, bnx2fc_cmd_release);
 }
 
-void bnx2fc_rec_compl(struct bnx2fc_els_cb_arg *cb_arg)
+static void bnx2fc_rec_compl(struct bnx2fc_rport *tgt,
+			     struct bnx2fc_els_cb_arg *cb_arg)
+	__must_hold(&tgt->tgt_lock)
 {
 	struct bnx2fc_cmd *orig_io_req, *new_io_req;
 	struct bnx2fc_cmd *rec_req;
@@ -371,7 +384,6 @@ void bnx2fc_rec_compl(struct bnx2fc_els_cb_arg *cb_arg)
 	struct fc_frame_header *fc_hdr, *fh;
 	struct fc_els_ls_rjt *rjt;
 	struct fc_els_rec_acc *acc;
-	struct bnx2fc_rport *tgt;
 	struct fcoe_err_report_entry *err_entry;
 	struct scsi_cmnd *sc_cmd;
 	enum fc_rctl r_ctl;
@@ -390,7 +402,6 @@ void bnx2fc_rec_compl(struct bnx2fc_els_cb_arg *cb_arg)
 	rec_req = cb_arg->io_req;
 	orig_io_req = cb_arg->aborted_io_req;
 	BNX2FC_IO_DBG(rec_req, "rec_compl: orig xid = 0x%x", orig_io_req->xid);
-	tgt = orig_io_req->tgt;
 
 	/* Handle REC timeout case */
 	if (test_and_clear_bit(BNX2FC_FLAG_ELS_TIMEOUT, &rec_req->req_flags)) {
@@ -479,9 +490,7 @@ void bnx2fc_rec_compl(struct bnx2fc_els_cb_arg *cb_arg)
 			bnx2fc_initiate_cleanup(orig_io_req);
 			/* Post a new IO req with the same sc_cmd */
 			BNX2FC_IO_DBG(rec_req, "Post IO request again\n");
-			spin_unlock_bh(&tgt->tgt_lock);
 			rc = bnx2fc_post_io_req(tgt, new_io_req);
-			spin_lock_bh(&tgt->tgt_lock);
 			if (!rc)
 				goto free_frame;
 			BNX2FC_IO_DBG(rec_req, "REC: io post err\n");
@@ -585,7 +594,7 @@ int bnx2fc_send_rec(struct bnx2fc_cmd *orig_io_req)
 	BNX2FC_IO_DBG(orig_io_req, "Sending REC\n");
 	memset(&rec, 0, sizeof(rec));
 
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for REC\n");
 		rc = -ENOMEM;
@@ -603,7 +612,6 @@ int bnx2fc_send_rec(struct bnx2fc_cmd *orig_io_req)
 	rc = bnx2fc_initiate_els(tgt, ELS_REC, &rec, sizeof(rec),
 				 bnx2fc_rec_compl, cb_arg,
 				 r_a_tov);
-rec_err:
 	if (rc) {
 		BNX2FC_IO_DBG(orig_io_req, "REC failed - release\n");
 		spin_lock_bh(&tgt->tgt_lock);
@@ -611,6 +619,7 @@ rec_err:
 		spin_unlock_bh(&tgt->tgt_lock);
 		kfree(cb_arg);
 	}
+rec_err:
 	return rc;
 }
 
@@ -626,7 +635,7 @@ int bnx2fc_send_srr(struct bnx2fc_cmd *orig_io_req, u32 offset, u8 r_ctl)
 	BNX2FC_IO_DBG(orig_io_req, "Sending SRR\n");
 	memset(&srr, 0, sizeof(srr));
 
-	cb_arg = kzalloc(sizeof(struct bnx2fc_els_cb_arg), GFP_ATOMIC);
+	cb_arg = kzalloc_obj(struct bnx2fc_els_cb_arg, GFP_ATOMIC);
 	if (!cb_arg) {
 		printk(KERN_ERR PFX "Unable to allocate cb_arg for SRR\n");
 		rc = -ENOMEM;
@@ -647,7 +656,6 @@ int bnx2fc_send_srr(struct bnx2fc_cmd *orig_io_req, u32 offset, u8 r_ctl)
 	rc = bnx2fc_initiate_els(tgt, ELS_SRR, &srr, sizeof(srr),
 				 bnx2fc_srr_compl, cb_arg,
 				 r_a_tov);
-srr_err:
 	if (rc) {
 		BNX2FC_IO_DBG(orig_io_req, "SRR failed - release\n");
 		spin_lock_bh(&tgt->tgt_lock);
@@ -657,12 +665,14 @@ srr_err:
 	} else
 		set_bit(BNX2FC_FLAG_SRR_SENT, &orig_io_req->req_flags);
 
+srr_err:
 	return rc;
 }
 
 static int bnx2fc_initiate_els(struct bnx2fc_rport *tgt, unsigned int op,
 			void *data, u32 data_len,
-			void (*cb_func)(struct bnx2fc_els_cb_arg *cb_arg),
+			void (*cb_func)(struct bnx2fc_rport *tgt,
+					struct bnx2fc_els_cb_arg *cb_arg),
 			struct bnx2fc_els_cb_arg *cb_arg, u32 timer_msec)
 {
 	struct fcoe_port *port = tgt->port;
@@ -690,8 +700,7 @@ static int bnx2fc_initiate_els(struct bnx2fc_rport *tgt, unsigned int op,
 		rc = -EINVAL;
 		goto els_err;
 	}
-	if (!(test_bit(BNX2FC_FLAG_SESSION_READY, &tgt->flags)) ||
-	     (test_bit(BNX2FC_FLAG_EXPL_LOGO, &tgt->flags))) {
+	if (!(test_bit(BNX2FC_FLAG_SESSION_READY, &tgt->flags))) {
 		printk(KERN_ERR PFX "els 0x%x: tgt not ready\n", op);
 		rc = -EINVAL;
 		goto els_err;
@@ -708,6 +717,7 @@ static int bnx2fc_initiate_els(struct bnx2fc_rport *tgt, unsigned int op,
 	els_req->cb_func = cb_func;
 	cb_arg->io_req = els_req;
 	els_req->cb_arg = cb_arg;
+	els_req->data_xfer_len = data_len;
 
 	mp_req = (struct bnx2fc_mp_req *)&(els_req->mp_req);
 	rc = bnx2fc_init_mp_req(els_req);
@@ -840,40 +850,64 @@ void bnx2fc_process_els_compl(struct bnx2fc_cmd *els_req,
 
 	/* Parse ELS response */
 	if ((els_req->cb_func) && (els_req->cb_arg)) {
-		els_req->cb_func(els_req->cb_arg);
+		els_req->cb_func(els_req->tgt, els_req->cb_arg);
 		els_req->cb_arg = NULL;
 	}
 
 	kref_put(&els_req->refcount, bnx2fc_cmd_release);
 }
 
+#define		BNX2FC_FCOE_MAC_METHOD_GRANGED_MAC	1
+#define		BNX2FC_FCOE_MAC_METHOD_FCF_MAP		2
+#define		BNX2FC_FCOE_MAC_METHOD_FCOE_SET_MAC	3
 static void bnx2fc_flogi_resp(struct fc_seq *seq, struct fc_frame *fp,
 			      void *arg)
 {
 	struct fcoe_ctlr *fip = arg;
 	struct fc_exch *exch = fc_seq_exch(seq);
 	struct fc_lport *lport = exch->lp;
-	u8 *mac;
-	u8 op;
+
+	struct fc_frame_header *fh;
+	u8 *granted_mac;
+	u8 fcoe_mac[6];
+	u8 fc_map[3];
+	int method;
 
 	if (IS_ERR(fp))
 		goto done;
 
-	mac = fr_cb(fp)->granted_mac;
-	if (is_zero_ether_addr(mac)) {
-		op = fc_frame_payload_op(fp);
-		if (lport->vport) {
-			if (op == ELS_LS_RJT) {
-				printk(KERN_ERR PFX "bnx2fc_flogi_resp is LS_RJT\n");
-				fc_vport_terminate(lport->vport);
-				fc_frame_free(fp);
-				return;
-			}
-		}
-		fcoe_ctlr_recv_flogi(fip, lport, fp);
+	fh = fc_frame_header_get(fp);
+	granted_mac = fr_cb(fp)->granted_mac;
+
+	/*
+	 * We set the source MAC for FCoE traffic based on the Granted MAC
+	 * address from the switch.
+	 *
+	 * If granted_mac is non-zero, we use that.
+	 * If the granted_mac is zeroed out, create the FCoE MAC based on
+	 * the sel_fcf->fc_map and the d_id fo the FLOGI frame.
+	 * If sel_fcf->fc_map is 0, then we use the default FCF-MAC plus the
+	 * d_id of the FLOGI frame.
+	 */
+	if (!is_zero_ether_addr(granted_mac)) {
+		ether_addr_copy(fcoe_mac, granted_mac);
+		method = BNX2FC_FCOE_MAC_METHOD_GRANGED_MAC;
+	} else if (fip->sel_fcf && fip->sel_fcf->fc_map != 0) {
+		hton24(fc_map, fip->sel_fcf->fc_map);
+		fcoe_mac[0] = fc_map[0];
+		fcoe_mac[1] = fc_map[1];
+		fcoe_mac[2] = fc_map[2];
+		fcoe_mac[3] = fh->fh_d_id[0];
+		fcoe_mac[4] = fh->fh_d_id[1];
+		fcoe_mac[5] = fh->fh_d_id[2];
+		method = BNX2FC_FCOE_MAC_METHOD_FCF_MAP;
+	} else {
+		fc_fcoe_set_mac(fcoe_mac, fh->fh_d_id);
+		method = BNX2FC_FCOE_MAC_METHOD_FCOE_SET_MAC;
 	}
-	if (!is_zero_ether_addr(mac))
-		fip->update_mac(lport, mac);
+
+	BNX2FC_HBA_DBG(lport, "fcoe_mac=%pM method=%d\n", fcoe_mac, method);
+	fip->update_mac(lport, fcoe_mac);
 done:
 	fc_lport_flogi_resp(seq, fp, lport);
 }

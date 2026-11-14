@@ -1,14 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * soundbus generic definitions
  *
  * Copyright 2006 Johannes Berg <johannes@sipsolutions.net>
- *
- * GPL v2, can be found in COPYING.
  */
 #ifndef __SOUNDBUS_H
 #define __SOUNDBUS_H
 
-#include <linux/of_device.h>
+#include <linux/platform_device.h>
 #include <sound/pcm.h>
 #include <linux/list.h>
 
@@ -186,10 +185,8 @@ struct soundbus_driver {
 	/* we don't implement any matching at all */
 
 	int	(*probe)(struct soundbus_dev* dev);
-	int	(*remove)(struct soundbus_dev* dev);
+	void	(*remove)(struct soundbus_dev *dev);
 
-	int	(*suspend)(struct soundbus_dev* dev, pm_message_t state);
-	int	(*resume)(struct soundbus_dev* dev);
 	int	(*shutdown)(struct soundbus_dev* dev);
 
 	struct device_driver driver;
@@ -199,6 +196,6 @@ struct soundbus_driver {
 extern int soundbus_register_driver(struct soundbus_driver *drv);
 extern void soundbus_unregister_driver(struct soundbus_driver *drv);
 
-extern struct device_attribute soundbus_dev_attrs[];
+extern struct attribute *soundbus_dev_attrs[];
 
 #endif /* __SOUNDBUS_H */

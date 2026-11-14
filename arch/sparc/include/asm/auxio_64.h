@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * auxio.h:  Definitions and code for the Auxiliary I/O registers.
  *
@@ -73,9 +74,7 @@
 #define AUXIO_PCIO_CPWR_OFF	0x02 /* Courtesy Power Off	*/
 #define AUXIO_PCIO_SPWR_OFF	0x01 /* System Power Off	*/
 
-#ifndef __ASSEMBLY__
-
-extern void __iomem *auxio_register;
+#ifndef __ASSEMBLER__
 
 #define AUXIO_LTE_ON	1
 #define AUXIO_LTE_OFF	0
@@ -84,7 +83,7 @@ extern void __iomem *auxio_register;
  *
  * on - AUXIO_LTE_ON or AUXIO_LTE_OFF
  */
-extern void auxio_set_lte(int on);
+void auxio_set_lte(int on);
 
 #define AUXIO_LED_ON	1
 #define AUXIO_LED_OFF	0
@@ -93,8 +92,8 @@ extern void auxio_set_lte(int on);
  *
  * on - AUXIO_LED_ON or AUXIO_LED_OFF
  */
-extern void auxio_set_led(int on);
+void auxio_set_led(int on);
 
-#endif /* ifndef __ASSEMBLY__ */
+#endif /* ifndef __ASSEMBLER__ */
 
 #endif /* !(_SPARC64_AUXIO_H) */

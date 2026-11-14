@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  mxl111sf-tuner.c - driver for the MaxLinear MXL111SF CMOS tuner
  *
- *  Copyright (C) 2010 Michael Krufky <mkrufky@kernellabs.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *  Copyright (C) 2010-2014 Michael Krufky <mkrufky@linuxtv.org>
  */
 
 #include "mxl111sf-tuner.h"
@@ -31,14 +18,12 @@ MODULE_PARM_DESC(debug, "set debugging level (1=info (or-able)).");
 	if (mxl111sf_tuner_debug) \
 		mxl_printk(KERN_DEBUG, fmt, ##arg)
 
-#define err pr_err
-
 /* ------------------------------------------------------------------------ */
 
 struct mxl111sf_tuner_state {
 	struct mxl111sf_state *mxl_state;
 
-	struct mxl111sf_tuner_config *cfg;
+	const struct mxl111sf_tuner_config *cfg;
 
 	enum mxl_if_freq if_freq;
 
@@ -113,7 +98,7 @@ static struct mxl111sf_reg_ctrl_info *mxl111sf_calc_phy_tune_regs(u32 freq,
 		filt_bw = 63;
 		break;
 	default:
-		err("%s: invalid bandwidth setting!", __func__);
+		pr_err("%s: invalid bandwidth setting!", __func__);
 		return NULL;
 	}
 
@@ -304,12 +289,12 @@ static int mxl111sf_tuner_set_params(struct dvb_frontend *fe)
 			bw = 8;
 			break;
 		default:
-			err("%s: bandwidth not set!", __func__);
+			pr_err("%s: bandwidth not set!", __func__);
 			return -EINVAL;
 		}
 		break;
 	default:
-		err("%s: modulation type not supported!", __func__);
+		pr_err("%s: modulation type not supported!", __func__);
 		return -EINVAL;
 	}
 	ret = mxl1x1sf_tune_rf(fe, c->frequency, bw);
@@ -457,24 +442,23 @@ static int mxl111sf_tuner_get_if_frequency(struct dvb_frontend *fe,
 	return 0;
 }
 
-static int mxl111sf_tuner_release(struct dvb_frontend *fe)
+static void mxl111sf_tuner_release(struct dvb_frontend *fe)
 {
 	struct mxl111sf_tuner_state *state = fe->tuner_priv;
 	mxl_dbg("()");
 	kfree(state);
 	fe->tuner_priv = NULL;
-	return 0;
 }
 
 /* ------------------------------------------------------------------------- */
 
-static struct dvb_tuner_ops mxl111sf_tuner_tuner_ops = {
+static const struct dvb_tuner_ops mxl111sf_tuner_tuner_ops = {
 	.info = {
 		.name = "MaxLinear MxL111SF",
 #if 0
-		.frequency_min  = ,
-		.frequency_max  = ,
-		.frequency_step = ,
+		.frequency_min_hz  = ,
+		.frequency_max_hz  = ,
+		.frequency_step_hz = ,
 #endif
 	},
 #if 0
@@ -491,14 +475,14 @@ static struct dvb_tuner_ops mxl111sf_tuner_tuner_ops = {
 };
 
 struct dvb_frontend *mxl111sf_tuner_attach(struct dvb_frontend *fe,
-					   struct mxl111sf_state *mxl_state,
-					   struct mxl111sf_tuner_config *cfg)
+				struct mxl111sf_state *mxl_state,
+				const struct mxl111sf_tuner_config *cfg)
 {
 	struct mxl111sf_tuner_state *state = NULL;
 
 	mxl_dbg("()");
 
-	state = kzalloc(sizeof(struct mxl111sf_tuner_state), GFP_KERNEL);
+	state = kzalloc_obj(struct mxl111sf_tuner_state);
 	if (state == NULL)
 		return NULL;
 
@@ -514,14 +498,6 @@ struct dvb_frontend *mxl111sf_tuner_attach(struct dvb_frontend *fe,
 EXPORT_SYMBOL_GPL(mxl111sf_tuner_attach);
 
 MODULE_DESCRIPTION("MaxLinear MxL111SF CMOS tuner driver");
-MODULE_AUTHOR("Michael Krufky <mkrufky@kernellabs.com>");
+MODULE_AUTHOR("Michael Krufky <mkrufky@linuxtv.org>");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("0.1");
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-basic-offset: 8
- * End:
- */

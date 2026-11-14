@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  arch/m68k/mvme16x/config.c
  *
@@ -8,10 +9,6 @@
  *  linux/amiga/config.c
  *
  *  Copyright (C) 1993 Hamish Macdonald
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file README.legal in the main directory of this archive
- * for more details.
  */
 
 #include <linux/types.h>
@@ -19,50 +16,42 @@
 #include <linux/mm.h>
 #include <linux/seq_file.h>
 #include <linux/tty.h>
+#include <linux/clocksource.h>
 #include <linux/console.h>
 #include <linux/linkage.h>
 #include <linux/init.h>
 #include <linux/major.h>
-#include <linux/genhd.h>
-#include <linux/rtc.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/platform_device.h>
+#include <linux/rtc/m48t59.h>
 
 #include <asm/bootinfo.h>
-#include <asm/pgtable.h>
+#include <asm/bootinfo-vme.h>
+#include <asm/byteorder.h>
 #include <asm/setup.h>
 #include <asm/irq.h>
 #include <asm/traps.h>
-#include <asm/rtc.h>
 #include <asm/machdep.h>
 #include <asm/mvme16xhw.h>
+#include <asm/config.h>
+
+#include "mvme16x.h"
 
 extern t_bdid mvme_bdid;
 
-static MK48T08ptr_t volatile rtc = (MK48T08ptr_t)MVME_RTC_BASE;
-
 static void mvme16x_get_model(char *model);
-extern void mvme16x_sched_init(irq_handler_t handler);
-extern u32 mvme16x_gettimeoffset(void);
-extern int mvme16x_hwclk (int, struct rtc_time *);
-extern int mvme16x_set_clock_mmss (unsigned long);
+extern void mvme16x_sched_init(void);
 extern void mvme16x_reset (void);
-
-int bcd2int (unsigned char b);
-
-/* Save tick handler routine pointer, will point to xtime_update() in
- * kernel/time/timekeeping.c, called via mvme16x_process_int() */
-
-static irq_handler_t tick_handler;
-
 
 unsigned short mvme16x_config;
 EXPORT_SYMBOL(mvme16x_config);
 
 
-int mvme16x_parse_bootinfo(const struct bi_record *bi)
+int __init mvme16x_parse_bootinfo(const struct bi_record *bi)
 {
-	if (bi->tag == BI_VME_TYPE || bi->tag == BI_VME_BRDINFO)
+	uint16_t tag = be16_to_cpu(bi->tag);
+	if (tag == BI_VME_TYPE || tag == BI_VME_BRDINFO)
 		return 0;
 	else
 		return 1;
@@ -70,8 +59,8 @@ int mvme16x_parse_bootinfo(const struct bi_record *bi)
 
 void mvme16x_reset(void)
 {
-	printk ("\r\n\nCalled mvme16x_reset\r\n"
-			"\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r");
+	pr_info("\r\n\nCalled mvme16x_reset\r\n"
+		"\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r\r");
 	/* The string of returns is to delay the reset until the whole
 	 * message is output.  Assert reset bit in GCSR */
 	*(volatile char *)0xfff40107 = 0x80;
@@ -87,15 +76,15 @@ static void mvme16x_get_model(char *model)
     suf[3] = '\0';
     suf[0] = suf[1] ? '-' : '\0';
 
-    sprintf(model, "Motorola MVME%x%s", p->brdno, suf);
+    sprintf(model, "Motorola MVME%x%s", be16_to_cpu(p->brdno), suf);
 }
 
 
 static void mvme16x_get_hardware_list(struct seq_file *m)
 {
-    p_bdid p = &mvme_bdid;
+    uint16_t brdno = be16_to_cpu(mvme_bdid.brdno);
 
-    if (p->brdno == 0x0162 || p->brdno == 0x0172)
+    if (brdno == 0x0162 || brdno == 0x0172)
     {
 	unsigned char rev = *(unsigned char *)MVME162_VERSION_REG;
 
@@ -119,11 +108,11 @@ static void __init mvme16x_init_IRQ (void)
 	m68k_setup_user_interrupt(VEC_USER, 192);
 }
 
-#define pcc2chip	((volatile u_char *)0xfff42000)
-#define PccSCCMICR	0x1d
-#define PccSCCTICR	0x1e
-#define PccSCCRICR	0x1f
-#define PccTPIACKR	0x25
+#define PCC2CHIP   (0xfff42000)
+#define PCCSCCMICR (PCC2CHIP + 0x1d)
+#define PCCSCCTICR (PCC2CHIP + 0x1e)
+#define PCCSCCRICR (PCC2CHIP + 0x1f)
+#define PCCTPIACKR (PCC2CHIP + 0x25)
 
 #ifdef CONFIG_EARLY_PRINTK
 
@@ -210,10 +199,9 @@ static void __init mvme16x_init_IRQ (void)
 #define CySCRH		(0x22)
 #define CyTFTC		(0x80)
 
-static void cons_write(struct console *co, const char *str, unsigned count)
+void mvme16x_cons_write(struct console *co, const char *str, unsigned count)
 {
 	volatile unsigned char *base_addr = (u_char *)CD2401_ADDR;
-	volatile u_char sink;
 	u_char ier;
 	int port;
 	u_char do_lf = 0;
@@ -231,10 +219,10 @@ static void cons_write(struct console *co, const char *str, unsigned count)
 	base_addr[CyIER] = CyTxMpty;
 
 	while (1) {
-		if (pcc2chip[PccSCCTICR] & 0x20)
+		if (in_8(PCCSCCTICR) & 0x20)
 		{
 			/* We have a Tx int. Acknowledge it */
-			sink = pcc2chip[PccTPIACKR];
+			in_8(PCCTPIACKR);
 			if ((base_addr[CyLICR] >> 2) == port) {
 				if (i == count) {
 					/* Last char of string is now output */
@@ -265,33 +253,16 @@ static void cons_write(struct console *co, const char *str, unsigned count)
 	base_addr[CyIER] = ier;
 }
 
-static struct console cons_info =
-{
-	.name	= "sercon",
-	.write	= cons_write,
-	.flags	= CON_PRINTBUFFER | CON_BOOT,
-	.index	= -1,
-};
-
-static void __init mvme16x_early_console(void)
-{
-	register_console(&cons_info);
-
-	printk(KERN_INFO "MVME16x: early console registered\n");
-}
 #endif
 
 void __init config_mvme16x(void)
 {
     p_bdid p = &mvme_bdid;
     char id[40];
+    uint16_t brdno = be16_to_cpu(p->brdno);
 
-    mach_max_dma_address = 0xffffffff;
     mach_sched_init      = mvme16x_sched_init;
     mach_init_IRQ        = mvme16x_init_IRQ;
-    arch_gettimeoffset   = mvme16x_gettimeoffset;
-    mach_hwclk           = mvme16x_hwclk;
-    mach_set_clock_mmss	 = mvme16x_set_clock_mmss;
     mach_reset		 = mvme16x_reset;
     mach_get_model       = mvme16x_get_model;
     mach_get_hardware_list = mvme16x_get_hardware_list;
@@ -300,59 +271,71 @@ void __init config_mvme16x(void)
 
     if (strncmp("BDID", p->bdid, 4))
     {
-	printk ("\n\nBug call .BRD_ID returned garbage - giving up\n\n");
+	pr_crit("Bug call .BRD_ID returned garbage - giving up\n");
 	while (1)
 		;
     }
     /* Board type is only set by newer versions of vmelilo/tftplilo */
     if (vme_brdtype == 0)
-	vme_brdtype = p->brdno;
+	vme_brdtype = brdno;
 
     mvme16x_get_model(id);
-    printk ("\nBRD_ID: %s   BUG %x.%x %02x/%02x/%02x\n", id, p->rev>>4,
-					p->rev&0xf, p->yr, p->mth, p->day);
-    if (p->brdno == 0x0162 || p->brdno == 0x172)
+    pr_info("BRD_ID: %s   BUG %x.%x %02x/%02x/%02x\n", id, p->rev >> 4,
+	    p->rev & 0xf, p->yr, p->mth, p->day);
+    if (brdno == 0x0162 || brdno == 0x172)
     {
 	unsigned char rev = *(unsigned char *)MVME162_VERSION_REG;
 
 	mvme16x_config = rev | MVME16x_CONFIG_GOT_SCCA;
 
-	printk ("MVME%x Hardware status:\n", p->brdno);
-	printk ("    CPU Type           68%s040\n",
-			rev & MVME16x_CONFIG_GOT_FPU ? "" : "LC");
-	printk ("    CPU clock          %dMHz\n",
-			rev & MVME16x_CONFIG_SPEED_32 ? 32 : 25);
-	printk ("    VMEchip2           %spresent\n",
-			rev & MVME16x_CONFIG_NO_VMECHIP2 ? "NOT " : "");
-	printk ("    SCSI interface     %spresent\n",
-			rev & MVME16x_CONFIG_NO_SCSICHIP ? "NOT " : "");
-	printk ("    Ethernet interface %spresent\n",
-			rev & MVME16x_CONFIG_NO_ETHERNET ? "NOT " : "");
+	pr_info("MVME%x Hardware status:\n", brdno);
+	pr_info("    CPU Type           68%s040\n",
+		rev & MVME16x_CONFIG_GOT_FPU ? "" : "LC");
+	pr_info("    CPU clock          %dMHz\n",
+		rev & MVME16x_CONFIG_SPEED_32 ? 32 : 25);
+	pr_info("    VMEchip2           %spresent\n",
+		rev & MVME16x_CONFIG_NO_VMECHIP2 ? "NOT " : "");
+	pr_info("    SCSI interface     %spresent\n",
+		rev & MVME16x_CONFIG_NO_SCSICHIP ? "NOT " : "");
+	pr_info("    Ethernet interface %spresent\n",
+		rev & MVME16x_CONFIG_NO_ETHERNET ? "NOT " : "");
     }
     else
     {
 	mvme16x_config = MVME16x_CONFIG_GOT_LP | MVME16x_CONFIG_GOT_CD2401;
-
-	/* Dont allow any interrupts from the CD2401 until the interrupt */
-	/* handlers are installed					 */
-
-	pcc2chip[PccSCCMICR] = 0x10;
-	pcc2chip[PccSCCTICR] = 0x10;
-	pcc2chip[PccSCCRICR] = 0x10;
-#ifdef CONFIG_EARLY_PRINTK
-	mvme16x_early_console();
-#endif
     }
 }
 
+static struct resource m48t59_rsrc[] = {
+	DEFINE_RES_MEM(MVME_RTC_BASE, 0x2000),
+};
+
+static struct m48t59_plat_data m48t59_data = {
+	.type = M48T59RTC_TYPE_M48T08,
+	.yy_offset = 70,
+};
+
+static int __init mvme16x_platform_init(void)
+{
+	if (!MACH_IS_MVME16x)
+		return 0;
+
+	platform_device_register_resndata(NULL, "rtc-m48t59", -1,
+					  m48t59_rsrc, ARRAY_SIZE(m48t59_rsrc),
+					  &m48t59_data, sizeof(m48t59_data));
+	return 0;
+}
+
+arch_initcall(mvme16x_platform_init);
+
 static irqreturn_t mvme16x_abort_int (int irq, void *dev_id)
 {
-	p_bdid p = &mvme_bdid;
 	unsigned long *new = (unsigned long *)vectors;
 	unsigned long *old = (unsigned long *)0xffe00000;
 	volatile unsigned char uc, *ucp;
+	uint16_t brdno = be16_to_cpu(mvme_bdid.brdno);
 
-	if (p->brdno == 0x0162 || p->brdno == 0x172)
+	if (brdno == 0x0162 || brdno == 0x172)
 	{
 		ucp = (volatile unsigned char *)0xfff42043;
 		uc = *ucp | 8;
@@ -366,35 +349,73 @@ static irqreturn_t mvme16x_abort_int (int irq, void *dev_id)
 	*(new+9) = *(old+9);		/* Trace */
 	*(new+47) = *(old+47);		/* Trap #15 */
 
-	if (p->brdno == 0x0162 || p->brdno == 0x172)
+	if (brdno == 0x0162 || brdno == 0x172)
 		*(new+0x5e) = *(old+0x5e);	/* ABORT switch */
 	else
 		*(new+0x6e) = *(old+0x6e);	/* ABORT switch */
 	return IRQ_HANDLED;
 }
 
+static u64 mvme16x_read_clk(struct clocksource *cs);
+
+static struct clocksource mvme16x_clk = {
+	.name   = "pcc",
+	.rating = 250,
+	.read   = mvme16x_read_clk,
+	.mask   = CLOCKSOURCE_MASK(32),
+	.flags  = CLOCK_SOURCE_IS_CONTINUOUS,
+};
+
+static u32 clk_total;
+
+#define PCC_TIMER_CLOCK_FREQ 1000000
+#define PCC_TIMER_CYCLES     (PCC_TIMER_CLOCK_FREQ / HZ)
+
+#define PCCTCMP1             (PCC2CHIP + 0x04)
+#define PCCTCNT1             (PCC2CHIP + 0x08)
+#define PCCTOVR1             (PCC2CHIP + 0x17)
+#define PCCTIC1              (PCC2CHIP + 0x1b)
+
+#define PCCTOVR1_TIC_EN      0x01
+#define PCCTOVR1_COC_EN      0x02
+#define PCCTOVR1_OVR_CLR     0x04
+
+#define PCCTIC1_INT_LEVEL    6
+#define PCCTIC1_INT_CLR      0x08
+#define PCCTIC1_INT_EN       0x10
+
 static irqreturn_t mvme16x_timer_int (int irq, void *dev_id)
 {
-    *(volatile unsigned char *)0xfff4201b |= 8;
-    return tick_handler(irq, dev_id);
+	unsigned long flags;
+
+	local_irq_save(flags);
+	out_8(PCCTOVR1, PCCTOVR1_OVR_CLR | PCCTOVR1_TIC_EN | PCCTOVR1_COC_EN);
+	out_8(PCCTIC1, PCCTIC1_INT_EN | PCCTIC1_INT_CLR | PCCTIC1_INT_LEVEL);
+	clk_total += PCC_TIMER_CYCLES;
+	legacy_timer_tick(1);
+	local_irq_restore(flags);
+
+	return IRQ_HANDLED;
 }
 
-void mvme16x_sched_init (irq_handler_t timer_routine)
+void mvme16x_sched_init(void)
 {
-    p_bdid p = &mvme_bdid;
+    uint16_t brdno = be16_to_cpu(mvme_bdid.brdno);
     int irq;
 
-    tick_handler = timer_routine;
     /* Using PCCchip2 or MC2 chip tick timer 1 */
-    *(volatile unsigned long *)0xfff42008 = 0;
-    *(volatile unsigned long *)0xfff42004 = 10000;	/* 10ms */
-    *(volatile unsigned char *)0xfff42017 |= 3;
-    *(volatile unsigned char *)0xfff4201b = 0x16;
-    if (request_irq(MVME16x_IRQ_TIMER, mvme16x_timer_int, 0,
-				"timer", mvme16x_timer_int))
+    if (request_irq(MVME16x_IRQ_TIMER, mvme16x_timer_int, IRQF_TIMER, "timer",
+                    NULL))
 	panic ("Couldn't register timer int");
 
-    if (p->brdno == 0x0162 || p->brdno == 0x172)
+    out_be32(PCCTCNT1, 0);
+    out_be32(PCCTCMP1, PCC_TIMER_CYCLES);
+    out_8(PCCTOVR1, PCCTOVR1_OVR_CLR | PCCTOVR1_TIC_EN | PCCTOVR1_COC_EN);
+    out_8(PCCTIC1, PCCTIC1_INT_EN | PCCTIC1_INT_CLR | PCCTIC1_INT_LEVEL);
+
+    clocksource_register_hz(&mvme16x_clk, PCC_TIMER_CLOCK_FREQ);
+
+    if (brdno == 0x0162 || brdno == 0x172)
 	irq = MVME162_IRQ_ABORT;
     else
         irq = MVME167_IRQ_ABORT;
@@ -403,36 +424,21 @@ void mvme16x_sched_init (irq_handler_t timer_routine)
 	panic ("Couldn't register abort int");
 }
 
-
-/* This is always executed with interrupts disabled.  */
-u32 mvme16x_gettimeoffset(void)
+static u64 mvme16x_read_clk(struct clocksource *cs)
 {
-    return (*(volatile u32 *)0xfff42008) * 1000;
-}
+	unsigned long flags;
+	u8 overflow, tmp;
+	u32 ticks;
 
-int bcd2int (unsigned char b)
-{
-	return ((b>>4)*10 + (b&15));
-}
+	local_irq_save(flags);
+	tmp = in_8(PCCTOVR1) >> 4;
+	ticks = in_be32(PCCTCNT1);
+	overflow = in_8(PCCTOVR1) >> 4;
+	if (overflow != tmp)
+		ticks = in_be32(PCCTCNT1);
+	ticks += overflow * PCC_TIMER_CYCLES;
+	ticks += clk_total;
+	local_irq_restore(flags);
 
-int mvme16x_hwclk(int op, struct rtc_time *t)
-{
-#warning check me!
-	if (!op) {
-		rtc->ctrl = RTC_READ;
-		t->tm_year = bcd2int (rtc->bcd_year);
-		t->tm_mon  = bcd2int (rtc->bcd_mth);
-		t->tm_mday = bcd2int (rtc->bcd_dom);
-		t->tm_hour = bcd2int (rtc->bcd_hr);
-		t->tm_min  = bcd2int (rtc->bcd_min);
-		t->tm_sec  = bcd2int (rtc->bcd_sec);
-		rtc->ctrl = 0;
-	}
-	return 0;
+	return ticks;
 }
-
-int mvme16x_set_clock_mmss (unsigned long nowtime)
-{
-	return 0;
-}
-

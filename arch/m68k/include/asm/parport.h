@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * parport.h: platform-specific PC-style parport initialisation
  *
@@ -11,6 +12,8 @@
 #ifndef _ASM_M68K_PARPORT_H
 #define _ASM_M68K_PARPORT_H 1
 
+#undef insl
+#undef outsl
 #define insl(port,buf,len)   isa_insb(port,buf,(len)<<2)
 #define outsl(port,buf,len)  isa_outsb(port,buf,(len)<<2)
 

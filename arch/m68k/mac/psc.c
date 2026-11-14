@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	Apple Peripheral System Controller (PSC)
  *
@@ -21,15 +22,16 @@
 #include <linux/irq.h>
 
 #include <asm/traps.h>
-#include <asm/bootinfo.h>
 #include <asm/macintosh.h>
 #include <asm/macints.h>
 #include <asm/mac_psc.h>
 
+#include "mac.h"
+
 #define DEBUG_PSC
 
-int psc_present;
 volatile __u8 *psc;
+EXPORT_SYMBOL_GPL(psc);
 
 /*
  * Debugging dump, used in various places to see what's going on.
@@ -39,9 +41,11 @@ static void psc_debug_dump(void)
 {
 	int	i;
 
-	if (!psc_present) return;
+	if (!psc)
+		return;
+
 	for (i = 0x30 ; i < 0x70 ; i += 0x10) {
-		printk("PSC #%d:  IFR = 0x%02X IER = 0x%02X\n",
+		printk(KERN_DEBUG "PSC #%d:  IFR = 0x%02X IER = 0x%02X\n",
 			i >> 4,
 			(int) psc_read_byte(pIFRbase + i),
 			(int) psc_read_byte(pIERbase + i));
@@ -54,18 +58,16 @@ static void psc_debug_dump(void)
  * expanded to cover what I think are the other 7 channels.
  */
 
-static void psc_dma_die_die_die(void)
+static __init void psc_dma_die_die_die(void)
 {
 	int i;
 
-	printk("Killing all PSC DMA channels...");
 	for (i = 0 ; i < 9 ; i++) {
 		psc_write_word(PSC_CTL_BASE + (i << 4), 0x8800);
 		psc_write_word(PSC_CTL_BASE + (i << 4), 0x1000);
 		psc_write_word(PSC_CMD_BASE + (i << 5), 0x1100);
 		psc_write_word(PSC_CMD_BASE + (i << 5) + 0x10, 0x1100);
 	}
-	printk("done!\n");
 }
 
 /*
@@ -81,7 +83,6 @@ void __init psc_init(void)
 	 && macintosh_config->ident != MAC_MODEL_Q840)
 	{
 		psc = NULL;
-		psc_present = 0;
 		return;
 	}
 
@@ -91,9 +92,8 @@ void __init psc_init(void)
 	 */
 
 	psc = (void *) PSC_BASE;
-	psc_present = 1;
 
-	printk("PSC detected at %p\n", psc);
+	pr_debug("PSC detected at %p\n", psc);
 
 	psc_dma_die_die_die();
 
@@ -114,18 +114,14 @@ void __init psc_init(void)
  * PSC interrupt handler. It's a lot like the VIA interrupt handler.
  */
 
-static void psc_irq(unsigned int irq, struct irq_desc *desc)
+static void psc_irq(struct irq_desc *desc)
 {
 	unsigned int offset = (unsigned int)irq_desc_get_handler_data(desc);
+	unsigned int irq = irq_desc_get_irq(desc);
 	int pIFR	= pIFRbase + offset;
 	int pIER	= pIERbase + offset;
 	int irq_num;
 	unsigned char irq_bit, events;
-
-#ifdef DEBUG_IRQS
-	printk("psc_irq: irq %u pIFR = 0x%02X pIER = 0x%02X\n",
-		irq, (int) psc_read_byte(pIFR), (int) psc_read_byte(pIER));
-#endif
 
 	events = psc_read_byte(pIFR) & psc_read_byte(pIER) & 0xF;
 	if (!events)
@@ -149,14 +145,10 @@ static void psc_irq(unsigned int irq, struct irq_desc *desc)
 
 void __init psc_register_interrupts(void)
 {
-	irq_set_chained_handler(IRQ_AUTO_3, psc_irq);
-	irq_set_handler_data(IRQ_AUTO_3, (void *)0x30);
-	irq_set_chained_handler(IRQ_AUTO_4, psc_irq);
-	irq_set_handler_data(IRQ_AUTO_4, (void *)0x40);
-	irq_set_chained_handler(IRQ_AUTO_5, psc_irq);
-	irq_set_handler_data(IRQ_AUTO_5, (void *)0x50);
-	irq_set_chained_handler(IRQ_AUTO_6, psc_irq);
-	irq_set_handler_data(IRQ_AUTO_6, (void *)0x60);
+	irq_set_chained_handler_and_data(IRQ_AUTO_3, psc_irq, (void *)0x30);
+	irq_set_chained_handler_and_data(IRQ_AUTO_4, psc_irq, (void *)0x40);
+	irq_set_chained_handler_and_data(IRQ_AUTO_5, psc_irq, (void *)0x50);
+	irq_set_chained_handler_and_data(IRQ_AUTO_6, psc_irq, (void *)0x60);
 }
 
 void psc_irq_enable(int irq) {
@@ -164,9 +156,6 @@ void psc_irq_enable(int irq) {
 	int irq_idx	= IRQ_IDX(irq);
 	int pIER	= pIERbase + (irq_src << 4);
 
-#ifdef DEBUG_IRQUSE
-	printk("psc_irq_enable(%d)\n", irq);
-#endif
 	psc_write_byte(pIER, (1 << irq_idx) | 0x80);
 }
 
@@ -175,8 +164,5 @@ void psc_irq_disable(int irq) {
 	int irq_idx	= IRQ_IDX(irq);
 	int pIER	= pIERbase + (irq_src << 4);
 
-#ifdef DEBUG_IRQUSE
-	printk("psc_irq_disable(%d)\n", irq);
-#endif
 	psc_write_byte(pIER, 1 << irq_idx);
 }

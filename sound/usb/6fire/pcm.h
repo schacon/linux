@@ -1,14 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Linux driver for TerraTec DMX 6Fire USB
  *
  * Author:	Torsten Schenk <torsten.schenk@zoho.com>
  * Created:	Jan 01, 2011
  * Copyright:	(C) Torsten Schenk
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #ifndef USB6FIRE_PCM_H
@@ -28,11 +24,8 @@ enum /* settings for pcm */
 struct pcm_urb {
 	struct sfire_chip *chip;
 
-	/* BEGIN DO NOT SEPARATE */
-	struct urb instance;
-	struct usb_iso_packet_descriptor packets[PCM_N_PACKETS_PER_URB];
-	/* END DO NOT SEPARATE */
-	u8 buffer[PCM_N_PACKETS_PER_URB * PCM_MAX_PACKET_SIZE];
+	struct urb *instance;
+	u8 *buffer;
 
 	struct pcm_urb *peer;
 };
@@ -60,7 +53,12 @@ struct pcm_runtime {
 	int in_packet_size;
 	int out_packet_size;
 	int in_n_analog; /* number of analog channels soundcard sends */
-	int out_n_analog; /* number of analog channels soundcard receives */
+	int out_n_slots; /* 32-bit slots per frame the soundcard receives */
+	bool spdif_switch; /* "IEC958 Playback Switch" */
+	bool spdif_on; /* copy of spdif_switch, read at the start of each block */
+	unsigned int spdif_frame; /* position in the channel status block */
+	u8 spdif_status[24]; /* IEC 60958 channel status of the S/PDIF output */
+	u32 spdif_bits; /* status bytes 0 and 1, "IEC958 Playback Default" */
 
 	struct mutex stream_mutex;
 	u8 stream_state; /* one of STREAM_XXX (pcm.c) */

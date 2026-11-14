@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * MFD driver for twl4030 audio submodule, which contains an audio codec, and
  * the vibra control.
@@ -5,21 +6,6 @@
  * Author: Peter Ujfalusi <peter.ujfalusi@ti.com>
  *
  * Copyright:   (C) 2009 Nokia Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 
 #include <linux/module.h>
@@ -30,7 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
-#include <linux/i2c/twl.h>
+#include <linux/mfd/twl.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/twl4030-audio.h>
 
@@ -159,13 +145,18 @@ unsigned int twl4030_audio_get_mclk(void)
 EXPORT_SYMBOL_GPL(twl4030_audio_get_mclk);
 
 static bool twl4030_audio_has_codec(struct twl4030_audio_data *pdata,
-			      struct device_node *node)
+			      struct device_node *parent)
 {
+	struct device_node *node;
+
 	if (pdata && pdata->codec)
 		return true;
 
-	if (of_find_node_by_name(node, "codec"))
+	node = of_get_child_by_name(parent, "codec");
+	if (node) {
+		of_node_put(node);
 		return true;
+	}
 
 	return false;
 }
@@ -187,7 +178,7 @@ static bool twl4030_audio_has_vibra(struct twl4030_audio_data *pdata,
 static int twl4030_audio_probe(struct platform_device *pdev)
 {
 	struct twl4030_audio *audio;
-	struct twl4030_audio_data *pdata = pdev->dev.platform_data;
+	struct twl4030_audio_data *pdata = dev_get_platdata(&pdev->dev);
 	struct device_node *node = pdev->dev.of_node;
 	struct mfd_cell *cell = NULL;
 	int ret, childs = 0;
@@ -198,8 +189,7 @@ static int twl4030_audio_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	audio = devm_kzalloc(&pdev->dev, sizeof(struct twl4030_audio),
-			     GFP_KERNEL);
+	audio = devm_kzalloc_obj(&pdev->dev, struct twl4030_audio);
 	if (!audio)
 		return -ENOMEM;
 
@@ -261,21 +251,16 @@ static int twl4030_audio_probe(struct platform_device *pdev)
 		ret = -ENODEV;
 	}
 
-	if (ret) {
-		platform_set_drvdata(pdev, NULL);
+	if (ret)
 		twl4030_audio_dev = NULL;
-	}
 
 	return ret;
 }
 
-static int twl4030_audio_remove(struct platform_device *pdev)
+static void twl4030_audio_remove(struct platform_device *pdev)
 {
 	mfd_remove_devices(&pdev->dev);
-	platform_set_drvdata(pdev, NULL);
 	twl4030_audio_dev = NULL;
-
-	return 0;
 }
 
 static const struct of_device_id twl4030_audio_of_match[] = {
@@ -286,7 +271,6 @@ MODULE_DEVICE_TABLE(of, twl4030_audio_of_match);
 
 static struct platform_driver twl4030_audio_driver = {
 	.driver		= {
-		.owner	= THIS_MODULE,
 		.name	= "twl4030-audio",
 		.of_match_table = twl4030_audio_of_match,
 	},
@@ -298,5 +282,4 @@ module_platform_driver(twl4030_audio_driver);
 
 MODULE_AUTHOR("Peter Ujfalusi <peter.ujfalusi@ti.com>");
 MODULE_DESCRIPTION("TWL4030 audio block MFD driver");
-MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:twl4030-audio");

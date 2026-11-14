@@ -583,7 +583,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_macceltic(void)
@@ -599,4 +598,5 @@ static void __exit exit_nls_macceltic(void)
 module_init(init_nls_macceltic)
 module_exit(exit_nls_macceltic)
 
+MODULE_DESCRIPTION("NLS Codepage macceltic");
 MODULE_LICENSE("Dual BSD/GPL");

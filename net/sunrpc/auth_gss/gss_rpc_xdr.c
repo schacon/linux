@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * GSS Proxy upcall module
  *
  *  Copyright (C) 2012 Simo Sorce <simo@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/sunrpc/svcauth.h>
@@ -44,7 +31,7 @@ static int gssx_dec_bool(struct xdr_stream *xdr, u32 *v)
 }
 
 static int gssx_enc_buffer(struct xdr_stream *xdr,
-			   gssx_buffer *buf)
+			   const gssx_buffer *buf)
 {
 	__be32 *p;
 
@@ -56,7 +43,7 @@ static int gssx_enc_buffer(struct xdr_stream *xdr,
 }
 
 static int gssx_enc_in_token(struct xdr_stream *xdr,
-			     struct gssp_in_token *in)
+			     const struct gssp_in_token *in)
 {
 	__be32 *p;
 
@@ -130,7 +117,7 @@ static int gssx_dec_option(struct xdr_stream *xdr,
 }
 
 static int dummy_enc_opt_array(struct xdr_stream *xdr,
-				struct gssx_option_array *oa)
+				const struct gssx_option_array *oa)
 {
 	__be32 *p;
 
@@ -166,14 +153,15 @@ static int dummy_dec_opt_array(struct xdr_stream *xdr,
 	return 0;
 }
 
-static int get_s32(void **p, void *max, s32 *res)
+static int get_host_u32(struct xdr_stream *xdr, u32 *res)
 {
-	void *base = *p;
-	void *next = (void *)((char *)base + sizeof(s32));
-	if (unlikely(next > max || next < base))
+	__be32 *p;
+
+	p = xdr_inline_decode(xdr, 4);
+	if (!p)
 		return -EINVAL;
-	memcpy(res, base, sizeof(s32));
-	*p = next;
+	/* Contents of linux creds are all host-endian: */
+	memcpy(res, p, sizeof(u32));
 	return 0;
 }
 
@@ -182,9 +170,9 @@ static int gssx_dec_linux_creds(struct xdr_stream *xdr,
 {
 	u32 length;
 	__be32 *p;
-	void *q, *end;
-	s32 tmp;
-	int N, i, err;
+	u32 tmp;
+	u32 N;
+	int i, err;
 
 	p = xdr_inline_decode(xdr, 4);
 	if (unlikely(p == NULL))
@@ -192,33 +180,28 @@ static int gssx_dec_linux_creds(struct xdr_stream *xdr,
 
 	length = be32_to_cpup(p);
 
-	/* FIXME: we do not want to use the scratch buffer for this one
-	 * may need to use functions that allows us to access an io vector
-	 * directly */
-	p = xdr_inline_decode(xdr, length);
-	if (unlikely(p == NULL))
+	if (length > (3 + NGROUPS_MAX) * sizeof(u32))
 		return -ENOSPC;
 
-	q = p;
-	end = q + length;
-
 	/* uid */
-	err = get_s32(&q, end, &tmp);
+	err = get_host_u32(xdr, &tmp);
 	if (err)
 		return err;
 	creds->cr_uid = make_kuid(&init_user_ns, tmp);
 
 	/* gid */
-	err = get_s32(&q, end, &tmp);
+	err = get_host_u32(xdr, &tmp);
 	if (err)
 		return err;
 	creds->cr_gid = make_kgid(&init_user_ns, tmp);
 
 	/* number of additional gid's */
-	err = get_s32(&q, end, &tmp);
+	err = get_host_u32(xdr, &tmp);
 	if (err)
 		return err;
 	N = tmp;
+	if ((3 + N) * sizeof(u32) != length)
+		return -EINVAL;
 	creds->cr_group_info = groups_alloc(N);
 	if (creds->cr_group_info == NULL)
 		return -ENOMEM;
@@ -226,19 +209,21 @@ static int gssx_dec_linux_creds(struct xdr_stream *xdr,
 	/* gid's */
 	for (i = 0; i < N; i++) {
 		kgid_t kgid;
-		err = get_s32(&q, end, &tmp);
+		err = get_host_u32(xdr, &tmp);
 		if (err)
 			goto out_free_groups;
 		err = -EINVAL;
 		kgid = make_kgid(&init_user_ns, tmp);
 		if (!gid_valid(kgid))
 			goto out_free_groups;
-		GROUP_AT(creds->cr_group_info, i) = kgid;
+		creds->cr_group_info->gid[i] = kgid;
 	}
+	groups_sort(creds->cr_group_info);
 
 	return 0;
 out_free_groups:
-	groups_free(creds->cr_group_info);
+	put_group_info(creds->cr_group_info);
+	creds->cr_group_info = NULL;
 	return err;
 }
 
@@ -246,6 +231,7 @@ static int gssx_dec_option_array(struct xdr_stream *xdr,
 				 struct gssx_option_array *oa)
 {
 	struct svc_cred *creds;
+	bool creds_decoded = false;
 	u32 count, i;
 	__be32 *p;
 	int err;
@@ -258,16 +244,16 @@ static int gssx_dec_option_array(struct xdr_stream *xdr,
 		return 0;
 
 	/* we recognize only 1 currently: CREDS_VALUE */
-	oa->count = 1;
-
-	oa->data = kmalloc(sizeof(struct gssx_option), GFP_KERNEL);
+	oa->data = kmalloc_obj(struct gssx_option);
 	if (!oa->data)
 		return -ENOMEM;
 
-	creds = kmalloc(sizeof(struct svc_cred), GFP_KERNEL);
+	oa->count = 1;
+
+	creds = kzalloc_obj(struct svc_cred);
 	if (!creds) {
-		kfree(oa->data);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto free_oa;
 	}
 
 	oa->data[0].option.data = CREDS_VALUE;
@@ -281,29 +267,47 @@ static int gssx_dec_option_array(struct xdr_stream *xdr,
 
 		/* option buffer */
 		p = xdr_inline_decode(xdr, 4);
-		if (unlikely(p == NULL))
-			return -ENOSPC;
+		if (unlikely(p == NULL)) {
+			err = -ENOSPC;
+			goto free_creds;
+		}
 
 		length = be32_to_cpup(p);
 		p = xdr_inline_decode(xdr, length);
-		if (unlikely(p == NULL))
-			return -ENOSPC;
+		if (unlikely(p == NULL)) {
+			err = -ENOSPC;
+			goto free_creds;
+		}
 
 		if (length == sizeof(CREDS_VALUE) &&
 		    memcmp(p, CREDS_VALUE, sizeof(CREDS_VALUE)) == 0) {
 			/* We have creds here. parse them */
+			if (creds_decoded) {
+				err = -EINVAL;
+				goto free_creds;
+			}
 			err = gssx_dec_linux_creds(xdr, creds);
 			if (err)
-				return err;
+				goto free_creds;
+			creds_decoded = true;
 			oa->data[0].value.len = 1; /* presence */
 		} else {
 			/* consume uninteresting buffer */
 			err = gssx_dec_buffer(xdr, &dummy);
 			if (err)
-				return err;
+				goto free_creds;
 		}
 	}
 	return 0;
+
+free_creds:
+	free_svc_cred(creds);
+	kfree(creds);
+free_oa:
+	oa->count = 0;
+	kfree(oa->data);
+	oa->data = NULL;
+	return err;
 }
 
 static int gssx_dec_status(struct xdr_stream *xdr,
@@ -325,34 +329,52 @@ static int gssx_dec_status(struct xdr_stream *xdr,
 
 	/* status->minor_status */
 	p = xdr_inline_decode(xdr, 8);
-	if (unlikely(p == NULL))
-		return -ENOSPC;
+	if (unlikely(p == NULL)) {
+		err = -ENOSPC;
+		goto out_free_mech;
+	}
 	p = xdr_decode_hyper(p, &status->minor_status);
 
 	/* status->major_status_string */
 	err = gssx_dec_buffer(xdr, &status->major_status_string);
 	if (err)
-		return err;
+		goto out_free_mech;
 
 	/* status->minor_status_string */
 	err = gssx_dec_buffer(xdr, &status->minor_status_string);
 	if (err)
-		return err;
+		goto out_free_major_status_string;
 
 	/* status->server_ctx */
 	err = gssx_dec_buffer(xdr, &status->server_ctx);
 	if (err)
-		return err;
+		goto out_free_minor_status_string;
 
 	/* we assume we have no options for now, so simply consume them */
 	/* status->options */
 	err = dummy_dec_opt_array(xdr, &status->options);
+	if (err)
+		goto out_free_server_ctx;
 
+	return 0;
+
+out_free_server_ctx:
+	kfree(status->server_ctx.data);
+	status->server_ctx.data = NULL;
+out_free_minor_status_string:
+	kfree(status->minor_status_string.data);
+	status->minor_status_string.data = NULL;
+out_free_major_status_string:
+	kfree(status->major_status_string.data);
+	status->major_status_string.data = NULL;
+out_free_mech:
+	kfree(status->mech.data);
+	status->mech.data = NULL;
 	return err;
 }
 
 static int gssx_enc_call_ctx(struct xdr_stream *xdr,
-			     struct gssx_call_ctx *ctx)
+			     const struct gssx_call_ctx *ctx)
 {
 	struct gssx_option opt;
 	__be32 *p;
@@ -430,7 +452,7 @@ static int dummy_enc_nameattr_array(struct xdr_stream *xdr,
 static int dummy_dec_nameattr_array(struct xdr_stream *xdr,
 				    struct gssx_name_attr_array *naa)
 {
-	struct gssx_name_attr dummy;
+	struct gssx_name_attr dummy = { .attr = {.len = 0} };
 	u32 count, i;
 	__be32 *p;
 
@@ -493,12 +515,13 @@ static int gssx_enc_name(struct xdr_stream *xdr,
 	return err;
 }
 
+
 static int gssx_dec_name(struct xdr_stream *xdr,
 			 struct gssx_name *name)
 {
-	struct xdr_netobj dummy_netobj;
-	struct gssx_name_attr_array dummy_name_attr_array;
-	struct gssx_option_array dummy_option_array;
+	struct xdr_netobj dummy_netobj = { .len = 0 };
+	struct gssx_name_attr_array dummy_name_attr_array = { .count = 0 };
+	struct gssx_option_array dummy_option_array = { .count = 0 };
 	int err;
 
 	/* name->display_name */
@@ -509,28 +532,35 @@ static int gssx_dec_name(struct xdr_stream *xdr,
 	/* name->name_type */
 	err = gssx_dec_buffer(xdr, &dummy_netobj);
 	if (err)
-		return err;
+		goto out_free_display_name;
 
 	/* name->exported_name */
 	err = gssx_dec_buffer(xdr, &dummy_netobj);
 	if (err)
-		return err;
+		goto out_free_display_name;
 
 	/* name->exported_composite_name */
 	err = gssx_dec_buffer(xdr, &dummy_netobj);
 	if (err)
-		return err;
+		goto out_free_display_name;
 
 	/* we assume we have no attributes for now, so simply consume them */
 	/* name->name_attributes */
 	err = dummy_dec_nameattr_array(xdr, &dummy_name_attr_array);
 	if (err)
-		return err;
+		goto out_free_display_name;
 
 	/* we assume we have no options for now, so simply consume them */
 	/* name->extensions */
 	err = dummy_dec_opt_array(xdr, &dummy_option_array);
+	if (err)
+		goto out_free_display_name;
 
+	return 0;
+
+out_free_display_name:
+	kfree(name->display_name.data);
+	name->display_name.data = NULL;
 	return err;
 }
 
@@ -562,6 +592,8 @@ static int gssx_enc_cred(struct xdr_stream *xdr,
 
 	/* cred->elements */
 	err = dummy_enc_credel_array(xdr, &cred->elements);
+	if (err)
+		return err;
 
 	/* cred->cred_handle_reference */
 	err = gssx_enc_buffer(xdr, &cred->cred_handle_reference);
@@ -651,32 +683,34 @@ static int gssx_dec_ctx(struct xdr_stream *xdr,
 	/* ctx->state */
 	err = gssx_dec_buffer(xdr, &ctx->state);
 	if (err)
-		return err;
+		goto out_free_exported_context_token;
 
 	/* ctx->need_release */
 	err = gssx_dec_bool(xdr, &ctx->need_release);
 	if (err)
-		return err;
+		goto out_free_state;
 
 	/* ctx->mech */
 	err = gssx_dec_buffer(xdr, &ctx->mech);
 	if (err)
-		return err;
+		goto out_free_state;
 
 	/* ctx->src_name */
 	err = gssx_dec_name(xdr, &ctx->src_name);
 	if (err)
-		return err;
+		goto out_free_mech;
 
 	/* ctx->targ_name */
 	err = gssx_dec_name(xdr, &ctx->targ_name);
 	if (err)
-		return err;
+		goto out_free_src_name;
 
 	/* ctx->lifetime */
 	p = xdr_inline_decode(xdr, 8+8);
-	if (unlikely(p == NULL))
-		return -ENOSPC;
+	if (unlikely(p == NULL)) {
+		err = -ENOSPC;
+		goto out_free_targ_name;
+	}
 	p = xdr_decode_hyper(p, &ctx->lifetime);
 
 	/* ctx->ctx_flags */
@@ -685,17 +719,36 @@ static int gssx_dec_ctx(struct xdr_stream *xdr,
 	/* ctx->locally_initiated */
 	err = gssx_dec_bool(xdr, &ctx->locally_initiated);
 	if (err)
-		return err;
+		goto out_free_targ_name;
 
 	/* ctx->open */
 	err = gssx_dec_bool(xdr, &ctx->open);
 	if (err)
-		return err;
+		goto out_free_targ_name;
 
 	/* we assume we have no options for now, so simply consume them */
 	/* ctx->options */
 	err = dummy_dec_opt_array(xdr, &ctx->options);
+	if (err)
+		goto out_free_targ_name;
 
+	return 0;
+
+out_free_targ_name:
+	kfree(ctx->targ_name.display_name.data);
+	ctx->targ_name.display_name.data = NULL;
+out_free_src_name:
+	kfree(ctx->src_name.display_name.data);
+	ctx->src_name.display_name.data = NULL;
+out_free_mech:
+	kfree(ctx->mech.data);
+	ctx->mech.data = NULL;
+out_free_state:
+	kfree(ctx->state.data);
+	ctx->state.data = NULL;
+out_free_exported_context_token:
+	kfree(ctx->exported_context_token.data);
+	ctx->exported_context_token.data = NULL;
 	return err;
 }
 
@@ -734,8 +787,9 @@ static int gssx_enc_cb(struct xdr_stream *xdr, struct gssx_cb *cb)
 
 void gssx_enc_accept_sec_context(struct rpc_rqst *req,
 				 struct xdr_stream *xdr,
-				 struct gssx_arg_accept_sec_context *arg)
+				 const void *data)
 {
+	const struct gssx_arg_accept_sec_context *arg = data;
 	int err;
 
 	err = gssx_enc_call_ctx(xdr, &arg->call_ctx);
@@ -743,22 +797,20 @@ void gssx_enc_accept_sec_context(struct rpc_rqst *req,
 		goto done;
 
 	/* arg->context_handle */
-	if (arg->context_handle) {
+	if (arg->context_handle)
 		err = gssx_enc_ctx(xdr, arg->context_handle);
-		if (err)
-			goto done;
-	} else {
+	else
 		err = gssx_enc_bool(xdr, 0);
-	}
+	if (err)
+		goto done;
 
 	/* arg->cred_handle */
-	if (arg->cred_handle) {
+	if (arg->cred_handle)
 		err = gssx_enc_cred(xdr, arg->cred_handle);
-		if (err)
-			goto done;
-	} else {
+	else
 		err = gssx_enc_bool(xdr, 0);
-	}
+	if (err)
+		goto done;
 
 	/* arg->input_token */
 	err = gssx_enc_in_token(xdr, &arg->input_token);
@@ -766,13 +818,12 @@ void gssx_enc_accept_sec_context(struct rpc_rqst *req,
 		goto done;
 
 	/* arg->input_cb */
-	if (arg->input_cb) {
+	if (arg->input_cb)
 		err = gssx_enc_cb(xdr, arg->input_cb);
-		if (err)
-			goto done;
-	} else {
+	else
 		err = gssx_enc_bool(xdr, 0);
-	}
+	if (err)
+		goto done;
 
 	err = gssx_enc_bool(xdr, arg->ret_deleg_cred);
 	if (err)
@@ -783,6 +834,9 @@ void gssx_enc_accept_sec_context(struct rpc_rqst *req,
 	/* arg->options */
 	err = dummy_enc_opt_array(xdr, &arg->options);
 
+	xdr_inline_pages(&req->rq_rcv_buf,
+		PAGE_SIZE/2 /* pretty arbitrary */,
+		arg->pages, 0 /* page base */, arg->npages * PAGE_SIZE);
 done:
 	if (err)
 		dprintk("RPC:       gssx_enc_accept_sec_context: %d\n", err);
@@ -790,24 +844,31 @@ done:
 
 int gssx_dec_accept_sec_context(struct rpc_rqst *rqstp,
 				struct xdr_stream *xdr,
-				struct gssx_res_accept_sec_context *res)
+				void *data)
 {
+	struct gssx_res_accept_sec_context *res = data;
 	u32 value_follows;
 	int err;
+	struct folio *scratch;
+
+	scratch = folio_alloc(GFP_KERNEL, 0);
+	if (!scratch)
+		return -ENOMEM;
+	xdr_set_scratch_folio(xdr, scratch);
 
 	/* res->status */
 	err = gssx_dec_status(xdr, &res->status);
 	if (err)
-		return err;
+		goto out_free;
 
 	/* res->context_handle */
 	err = gssx_dec_bool(xdr, &value_follows);
 	if (err)
-		return err;
+		goto out_free;
 	if (value_follows) {
 		err = gssx_dec_ctx(xdr, res->context_handle);
 		if (err)
-			return err;
+			goto out_free;
 	} else {
 		res->context_handle = NULL;
 	}
@@ -815,11 +876,11 @@ int gssx_dec_accept_sec_context(struct rpc_rqst *rqstp,
 	/* res->output_token */
 	err = gssx_dec_bool(xdr, &value_follows);
 	if (err)
-		return err;
+		goto out_free;
 	if (value_follows) {
 		err = gssx_dec_buffer(xdr, res->output_token);
 		if (err)
-			return err;
+			goto out_free;
 	} else {
 		res->output_token = NULL;
 	}
@@ -827,14 +888,17 @@ int gssx_dec_accept_sec_context(struct rpc_rqst *rqstp,
 	/* res->delegated_cred_handle */
 	err = gssx_dec_bool(xdr, &value_follows);
 	if (err)
-		return err;
+		goto out_free;
 	if (value_follows) {
 		/* we do not support upcall servers sending this data. */
-		return -EINVAL;
+		err = -EINVAL;
+		goto out_free;
 	}
 
 	/* res->options */
 	err = gssx_dec_option_array(xdr, &res->options);
 
+out_free:
+	folio_put(scratch);
 	return err;
 }

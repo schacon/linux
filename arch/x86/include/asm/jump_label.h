@@ -1,42 +1,61 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_JUMP_LABEL_H
 #define _ASM_X86_JUMP_LABEL_H
 
-#ifdef __KERNEL__
+#define HAVE_JUMP_LABEL_BATCH
 
-#include <linux/types.h>
-#include <asm/nops.h>
 #include <asm/asm.h>
+#include <asm/nops.h>
 
-#define JUMP_LABEL_NOP_SIZE 5
+#ifndef __ASSEMBLER__
 
-#define STATIC_KEY_INITIAL_NOP ".byte 0xe9 \n\t .long 0\n\t"
+#include <linux/stringify.h>
+#include <linux/types.h>
 
-static __always_inline bool arch_static_branch(struct static_key *key)
+#define JUMP_TABLE_ENTRY(key, label)			\
+	".pushsection __jump_table,  \"aw\" \n\t"	\
+	_ASM_ALIGN "\n\t"				\
+	ANNOTATE_DATA_SPECIAL "\n"			\
+	".long 1b - . \n\t"				\
+	".long " label " - . \n\t"			\
+	_ASM_PTR " " key " - . \n\t"			\
+	".popsection \n\t"
+
+/* This macro is also expanded on the Rust side. */
+#ifdef CONFIG_HAVE_JUMP_LABEL_HACK
+#define ARCH_STATIC_BRANCH_ASM(key, label)		\
+	"1: jmp " label " # objtool NOPs this \n\t"	\
+	JUMP_TABLE_ENTRY(key " + 2", label)
+#else /* !CONFIG_HAVE_JUMP_LABEL_HACK */
+#define ARCH_STATIC_BRANCH_ASM(key, label)		\
+	"1: .byte " __stringify(BYTES_NOP5) "\n\t"	\
+	JUMP_TABLE_ENTRY(key, label)
+#endif /* CONFIG_HAVE_JUMP_LABEL_HACK */
+
+static __always_inline bool arch_static_branch(struct static_key * const key, const bool branch)
 {
-	asm goto("1:"
-		STATIC_KEY_INITIAL_NOP
-		".pushsection __jump_table,  \"aw\" \n\t"
-		_ASM_ALIGN "\n\t"
-		_ASM_PTR "1b, %l[l_yes], %c0 \n\t"
-		".popsection \n\t"
-		: :  "i" (key) : : l_yes);
+	asm goto(ARCH_STATIC_BRANCH_ASM("%c0 + %c1", "%l[l_yes]")
+		: :  "i" (key), "i" (branch) : : l_yes);
+
 	return false;
 l_yes:
 	return true;
 }
 
-#endif /* __KERNEL__ */
+static __always_inline bool arch_static_branch_jump(struct static_key * const key, const bool branch)
+{
+	asm goto("1:"
+		"jmp %l[l_yes]\n\t"
+		JUMP_TABLE_ENTRY("%c0 + %c1", "%l[l_yes]")
+		: :  "i" (key), "i" (branch) : : l_yes);
 
-#ifdef CONFIG_X86_64
-typedef u64 jump_label_t;
-#else
-typedef u32 jump_label_t;
-#endif
+	return false;
+l_yes:
+	return true;
+}
 
-struct jump_entry {
-	jump_label_t code;
-	jump_label_t target;
-	jump_label_t key;
-};
+extern int arch_jump_entry_size(struct jump_entry *entry);
+
+#endif	/* __ASSEMBLER__ */
 
 #endif

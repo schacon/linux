@@ -1,7 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) ST-Ericsson SA 2010
- *
- * License Terms: GNU General Public License v2
  *
  * Authors: Bengt Jonsson <bengt.g.jonsson@stericsson.com>
  *
@@ -16,24 +15,80 @@
 #include <linux/kernel.h>
 #include <linux/err.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
+#include <linux/regulator/of_regulator.h>
 #include <linux/mfd/abx500.h>
 #include <linux/mfd/abx500/ab8500.h>
-#include <linux/regulator/ab8500.h>
+
+/* AB8500 external regulators */
+enum ab8500_ext_regulator_id {
+	AB8500_EXT_SUPPLY1,
+	AB8500_EXT_SUPPLY2,
+	AB8500_EXT_SUPPLY3,
+	AB8500_NUM_EXT_REGULATORS,
+};
+
+struct ab8500_ext_regulator_cfg {
+	bool hwreq; /* requires hw mode or high power mode */
+};
+
+/* supply for VextSupply3 */
+static struct regulator_consumer_supply ab8500_ext_supply3_consumers[] = {
+	/* SIM supply for 3 V SIM cards */
+	REGULATOR_SUPPLY("vinvsim", "sim-detect.0"),
+};
+
+/*
+ * AB8500 external regulators
+ */
+static struct regulator_init_data ab8500_ext_regulators[] = {
+	/* fixed Vbat supplies VSMPS1_EXT_1V8 */
+	[AB8500_EXT_SUPPLY1] = {
+		.constraints = {
+			.name = "ab8500-ext-supply1",
+			.min_uV = 1800000,
+			.max_uV = 1800000,
+			.initial_mode = REGULATOR_MODE_IDLE,
+			.boot_on = 1,
+			.always_on = 1,
+		},
+	},
+	/* fixed Vbat supplies VSMPS2_EXT_1V36 and VSMPS5_EXT_1V15 */
+	[AB8500_EXT_SUPPLY2] = {
+		.constraints = {
+			.name = "ab8500-ext-supply2",
+			.min_uV = 1360000,
+			.max_uV = 1360000,
+		},
+	},
+	/* fixed Vbat supplies VSMPS3_EXT_3V4 and VSMPS4_EXT_3V4 */
+	[AB8500_EXT_SUPPLY3] = {
+		.constraints = {
+			.name = "ab8500-ext-supply3",
+			.min_uV = 3400000,
+			.max_uV = 3400000,
+			.valid_ops_mask = REGULATOR_CHANGE_STATUS,
+			.boot_on = 1,
+		},
+		.num_consumer_supplies =
+			ARRAY_SIZE(ab8500_ext_supply3_consumers),
+		.consumer_supplies = ab8500_ext_supply3_consumers,
+	},
+};
 
 /**
  * struct ab8500_ext_regulator_info - ab8500 regulator information
  * @dev: device pointer
  * @desc: regulator description
- * @rdev: regulator device
  * @cfg: regulator configuration (extension of regulator FW configuration)
  * @update_bank: bank to control on/off
  * @update_reg: register to control on/off
  * @update_mask: mask to enable/disable and set mode of regulator
  * @update_val: bits holding the regulator current mode
- * @update_val_hp: bits to set EN pin active (LPn pin deactive)
+ * @update_val_hp: bits to set EN pin active (LPn pin deactivate)
  *                 normally this means high power mode
  * @update_val_lp: bits to set EN pin active and LPn pin active
  *                 normally this means low power mode
@@ -43,7 +98,6 @@
 struct ab8500_ext_regulator_info {
 	struct device *dev;
 	struct regulator_desc desc;
-	struct regulator_dev *rdev;
 	struct ab8500_ext_regulator_cfg *cfg;
 	u8 update_bank;
 	u8 update_reg;
@@ -78,7 +132,7 @@ static int ab8500_ext_regulator_enable(struct regulator_dev *rdev)
 		info->update_bank, info->update_reg,
 		info->update_mask, regval);
 	if (ret < 0) {
-		dev_err(rdev_get_dev(info->rdev),
+		dev_err(rdev_get_dev(rdev),
 			"couldn't set enable bits for regulator\n");
 		return ret;
 	}
@@ -114,7 +168,7 @@ static int ab8500_ext_regulator_disable(struct regulator_dev *rdev)
 		info->update_bank, info->update_reg,
 		info->update_mask, regval);
 	if (ret < 0) {
-		dev_err(rdev_get_dev(info->rdev),
+		dev_err(rdev_get_dev(rdev),
 			"couldn't set disable bits for regulator\n");
 		return ret;
 	}
@@ -229,6 +283,28 @@ static unsigned int ab8500_ext_regulator_get_mode(struct regulator_dev *rdev)
 	return ret;
 }
 
+static int ab8500_ext_set_voltage(struct regulator_dev *rdev, int min_uV,
+				  int max_uV, unsigned *selector)
+{
+	struct regulation_constraints *regu_constraints = rdev->constraints;
+
+	if (!regu_constraints) {
+		dev_err(rdev_get_dev(rdev), "No regulator constraints\n");
+		return -EINVAL;
+	}
+
+	if (regu_constraints->min_uV == min_uV &&
+	    regu_constraints->max_uV == max_uV)
+		return 0;
+
+	dev_err(rdev_get_dev(rdev),
+		"Requested min %duV max %duV != constrained min %duV max %duV\n",
+		min_uV, max_uV,
+		regu_constraints->min_uV, regu_constraints->max_uV);
+
+	return -EINVAL;
+}
+
 static int ab8500_ext_list_voltage(struct regulator_dev *rdev,
 				   unsigned selector)
 {
@@ -246,12 +322,13 @@ static int ab8500_ext_list_voltage(struct regulator_dev *rdev,
 	return -EINVAL;
 }
 
-static struct regulator_ops ab8500_ext_regulator_ops = {
+static const struct regulator_ops ab8500_ext_regulator_ops = {
 	.enable			= ab8500_ext_regulator_enable,
 	.disable		= ab8500_ext_regulator_disable,
 	.is_enabled		= ab8500_ext_regulator_is_enabled,
 	.set_mode		= ab8500_ext_regulator_set_mode,
 	.get_mode		= ab8500_ext_regulator_get_mode,
+	.set_voltage		= ab8500_ext_set_voltage,
 	.list_voltage		= ab8500_ext_list_voltage,
 };
 
@@ -260,6 +337,7 @@ static struct ab8500_ext_regulator_info
 	[AB8500_EXT_SUPPLY1] = {
 		.desc = {
 			.name		= "VEXTSUPPLY1",
+			.of_match	= of_match_ptr("ab8500_ext1"),
 			.ops		= &ab8500_ext_regulator_ops,
 			.type		= REGULATOR_VOLTAGE,
 			.id		= AB8500_EXT_SUPPLY1,
@@ -277,6 +355,7 @@ static struct ab8500_ext_regulator_info
 	[AB8500_EXT_SUPPLY2] = {
 		.desc = {
 			.name		= "VEXTSUPPLY2",
+			.of_match	= of_match_ptr("ab8500_ext2"),
 			.ops		= &ab8500_ext_regulator_ops,
 			.type		= REGULATOR_VOLTAGE,
 			.id		= AB8500_EXT_SUPPLY2,
@@ -294,6 +373,7 @@ static struct ab8500_ext_regulator_info
 	[AB8500_EXT_SUPPLY3] = {
 		.desc = {
 			.name		= "VEXTSUPPLY3",
+			.of_match	= of_match_ptr("ab8500_ext3"),
 			.ops		= &ab8500_ext_regulator_ops,
 			.type		= REGULATOR_VOLTAGE,
 			.id		= AB8500_EXT_SUPPLY3,
@@ -310,33 +390,15 @@ static struct ab8500_ext_regulator_info
 	},
 };
 
-int ab8500_ext_regulator_init(struct platform_device *pdev)
+static int ab8500_ext_regulator_probe(struct platform_device *pdev)
 {
 	struct ab8500 *ab8500 = dev_get_drvdata(pdev->dev.parent);
-	struct ab8500_platform_data *ppdata;
-	struct ab8500_regulator_platform_data *pdata;
 	struct regulator_config config = { };
-	int i, err;
+	struct regulator_dev *rdev;
+	int i;
 
 	if (!ab8500) {
 		dev_err(&pdev->dev, "null mfd parent\n");
-		return -EINVAL;
-	}
-	ppdata = dev_get_platdata(ab8500->dev);
-	if (!ppdata) {
-		dev_err(&pdev->dev, "null parent pdata\n");
-		return -EINVAL;
-	}
-
-	pdata = ppdata->regulator;
-	if (!pdata) {
-		dev_err(&pdev->dev, "null pdata\n");
-		return -EINVAL;
-	}
-
-	/* make sure the platform data has the correct size */
-	if (pdata->num_ext_regulator != ARRAY_SIZE(ab8500_ext_regulator_info)) {
-		dev_err(&pdev->dev, "Configuration error: size mismatch.\n");
 		return -EINVAL;
 	}
 
@@ -359,47 +421,52 @@ int ab8500_ext_regulator_init(struct platform_device *pdev)
 		info = &ab8500_ext_regulator_info[i];
 		info->dev = &pdev->dev;
 		info->cfg = (struct ab8500_ext_regulator_cfg *)
-			pdata->ext_regulator[i].driver_data;
+			ab8500_ext_regulators[i].driver_data;
 
 		config.dev = &pdev->dev;
-		config.init_data = &pdata->ext_regulator[i];
 		config.driver_data = info;
+		config.init_data = &ab8500_ext_regulators[i];
 
 		/* register regulator with framework */
-		info->rdev = regulator_register(&info->desc, &config);
-		if (IS_ERR(info->rdev)) {
-			err = PTR_ERR(info->rdev);
+		rdev = devm_regulator_register(&pdev->dev, &info->desc,
+					       &config);
+		if (IS_ERR(rdev)) {
 			dev_err(&pdev->dev, "failed to register regulator %s\n",
 					info->desc.name);
-			/* when we fail, un-register all earlier regulators */
-			while (--i >= 0) {
-				info = &ab8500_ext_regulator_info[i];
-				regulator_unregister(info->rdev);
-			}
-			return err;
+			return PTR_ERR(rdev);
 		}
 
-		dev_dbg(rdev_get_dev(info->rdev),
-			"%s-probed\n", info->desc.name);
+		dev_dbg(&pdev->dev, "%s-probed\n", info->desc.name);
 	}
 
 	return 0;
 }
 
-void ab8500_ext_regulator_exit(struct platform_device *pdev)
+static struct platform_driver ab8500_ext_regulator_driver = {
+	.probe = ab8500_ext_regulator_probe,
+	.driver         = {
+		.name   = "ab8500-ext-regulator",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+	},
+};
+
+static int __init ab8500_ext_regulator_init(void)
 {
-	int i;
+	int ret;
 
-	for (i = 0; i < ARRAY_SIZE(ab8500_ext_regulator_info); i++) {
-		struct ab8500_ext_regulator_info *info = NULL;
-		info = &ab8500_ext_regulator_info[i];
+	ret = platform_driver_register(&ab8500_ext_regulator_driver);
+	if (ret)
+		pr_err("Failed to register ab8500 ext regulator: %d\n", ret);
 
-		dev_vdbg(rdev_get_dev(info->rdev),
-			"%s-remove\n", info->desc.name);
-
-		regulator_unregister(info->rdev);
-	}
+	return ret;
 }
+subsys_initcall(ab8500_ext_regulator_init);
+
+static void __exit ab8500_ext_regulator_exit(void)
+{
+	platform_driver_unregister(&ab8500_ext_regulator_driver);
+}
+module_exit(ab8500_ext_regulator_exit);
 
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Bengt Jonsson <bengt.g.jonsson@stericsson.com>");

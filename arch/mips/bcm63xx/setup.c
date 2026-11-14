@@ -9,9 +9,10 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/ioport.h>
 #include <linux/pm.h>
+#include <asm/bmips.h>
 #include <asm/bootinfo.h>
 #include <asm/time.h>
 #include <asm/reboot.h>
@@ -20,10 +21,18 @@
 #include <bcm63xx_cpu.h>
 #include <bcm63xx_regs.h>
 #include <bcm63xx_io.h>
+#include <bcm63xx_gpio.h>
+
+/*
+ * CBR addr doesn't change and we can cache it.
+ * For broken SoC/Bootloader CBR addr might also be provided via DT
+ * with "brcm,bmips-cbr-reg" in the "cpus" node.
+ */
+void __iomem *bmips_cbr_addr __read_mostly;
 
 void bcm63xx_machine_halt(void)
 {
-	printk(KERN_INFO "System halted\n");
+	pr_info("System halted\n");
 	while (1)
 		;
 }
@@ -33,7 +42,7 @@ static void bcm6348_a1_reboot(void)
 	u32 reg;
 
 	/* soft reset all blocks */
-	printk(KERN_INFO "soft-resetting all blocks ...\n");
+	pr_info("soft-resetting all blocks ...\n");
 	reg = bcm_perf_readl(PERF_SOFTRESET_REG);
 	reg &= ~SOFTRESET_6348_ALL;
 	bcm_perf_writel(reg, PERF_SOFTRESET_REG);
@@ -45,7 +54,7 @@ static void bcm6348_a1_reboot(void)
 	mdelay(10);
 
 	/* Jump to the power on address. */
-	printk(KERN_INFO "jumping to reset vector.\n");
+	pr_info("jumping to reset vector.\n");
 	/* set high vectors (base at 0xbfc00000 */
 	set_c0_status(ST0_BEV | ST0_ERL);
 	/* run uncached in kseg0 */
@@ -68,6 +77,9 @@ void bcm63xx_machine_reboot(void)
 
 	/* mask and clear all external irq */
 	switch (bcm63xx_get_cpu_id()) {
+	case BCM3368_CPU_ID:
+		perf_regs[0] = PERF_EXTIRQ_CFG_REG_3368;
+		break;
 	case BCM6328_CPU_ID:
 		perf_regs[0] = PERF_EXTIRQ_CFG_REG_6328;
 		break;
@@ -106,7 +118,7 @@ void bcm63xx_machine_reboot(void)
 	if (BCMCPU_IS_6348() && (bcm63xx_get_cpu_rev() == 0xa1))
 		bcm6348_a1_reboot();
 
-	printk(KERN_INFO "triggering watchdog soft-reset...\n");
+	pr_info("triggering watchdog soft-reset...\n");
 	if (BCMCPU_IS_6328()) {
 		bcm_wdt_writel(1, WDT_SOFTRESET_REG);
 	} else {
@@ -142,7 +154,7 @@ void __init plat_time_init(void)
 
 void __init plat_mem_setup(void)
 {
-	add_memory_region(0, bcm63xx_get_memory_size(), BOOT_MEM_RAM);
+	memblock_add(0, bcm63xx_get_memory_size());
 
 	_machine_halt = bcm63xx_machine_halt;
 	_machine_restart = __bcm63xx_machine_reboot;
@@ -155,8 +167,11 @@ void __init plat_mem_setup(void)
 	board_setup();
 }
 
-int __init bcm63xx_register_devices(void)
+static int __init bcm63xx_register_devices(void)
 {
+	/* register gpiochip */
+	bcm63xx_gpio_init();
+
 	return board_register_devices();
 }
 

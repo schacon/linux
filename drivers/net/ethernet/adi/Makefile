@@ -1,5 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause
 #
-# Makefile for the Blackfin device drivers.
+# Makefile for the Analog Devices network device drivers.
 #
 
-obj-$(CONFIG_BFIN_MAC) += bfin_mac.o
+obj-$(CONFIG_ADIN1110) += adin1110.o
+obj-$(CONFIG_ADIN1140) += adin1140.o

@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for the CS5535/CS5536 Multi-Function General Purpose Timers (MFGPT)
  *
  * Copyright (C) 2006, Advanced Micro Devices, Inc.
  * Copyright (C) 2007  Andres Salomon <dilinger@debian.org>
  * Copyright (C) 2009  Andres Salomon <dilinger@collabora.co.uk>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public License
- * as published by the Free Software Foundation.
  *
  * The MFGPTs are documented in AMD Geode CS5536 Companion Device Data Book.
  */
@@ -19,6 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/cs5535.h>
 #include <linux/slab.h>
+#include <asm/msr.h>
 
 #define DRV_NAME "cs5535-mfgpt"
 
@@ -47,7 +45,8 @@ static struct cs5535_mfgpt_chip {
 int cs5535_mfgpt_toggle_event(struct cs5535_mfgpt_timer *timer, int cmp,
 		int event, int enable)
 {
-	uint32_t msr, mask, value, dummy;
+	uint32_t msr, mask;
+	struct msr val;
 	int shift = (cmp == MFGPT_CMP1) ? 0 : 8;
 
 	if (!timer) {
@@ -84,14 +83,14 @@ int cs5535_mfgpt_toggle_event(struct cs5535_mfgpt_timer *timer, int cmp,
 		return -EIO;
 	}
 
-	rdmsr(msr, value, dummy);
+	rdmsrq(msr, val.q);
 
 	if (enable)
-		value |= mask;
+		val.l |= mask;
 	else
-		value &= ~mask;
+		val.l &= ~mask;
 
-	wrmsr(msr, value, dummy);
+	wrmsrq(msr, val.q);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(cs5535_mfgpt_toggle_event);
@@ -99,7 +98,7 @@ EXPORT_SYMBOL_GPL(cs5535_mfgpt_toggle_event);
 int cs5535_mfgpt_set_irq(struct cs5535_mfgpt_timer *timer, int cmp, int *irq,
 		int enable)
 {
-	uint32_t zsel, lpc, dummy;
+	struct msr zsel, lpc;
 	int shift;
 
 	if (!timer) {
@@ -115,30 +114,31 @@ int cs5535_mfgpt_set_irq(struct cs5535_mfgpt_timer *timer, int cmp, int *irq,
 	 * IRQ of the 1st. This can only happen if forcing an IRQ, calling this
 	 * with *irq==0 is safe. Currently there _are_ no 2 drivers.
 	 */
-	rdmsr(MSR_PIC_ZSEL_LOW, zsel, dummy);
+	rdmsrq(MSR_PIC_ZSEL_LOW, zsel.q);
 	shift = ((cmp == MFGPT_CMP1 ? 0 : 4) + timer->nr % 4) * 4;
-	if (((zsel >> shift) & 0xF) == 2)
+	if (((zsel.l >> shift) & 0xF) == 2)
 		return -EIO;
 
 	/* Choose IRQ: if none supplied, keep IRQ already set or use default */
 	if (!*irq)
-		*irq = (zsel >> shift) & 0xF;
+		*irq = (zsel.l >> shift) & 0xF;
 	if (!*irq)
 		*irq = CONFIG_CS5535_MFGPT_DEFAULT_IRQ;
 
 	/* Can't use IRQ if it's 0 (=disabled), 2, or routed to LPC */
 	if (*irq < 1 || *irq == 2 || *irq > 15)
 		return -EIO;
-	rdmsr(MSR_PIC_IRQM_LPC, lpc, dummy);
-	if (lpc & (1 << *irq))
+	rdmsrq(MSR_PIC_IRQM_LPC, lpc.q);
+	if (lpc.l & (1 << *irq))
 		return -EIO;
 
 	/* All chosen and checked - go for it */
 	if (cs5535_mfgpt_toggle_event(timer, cmp, MFGPT_EVENT_IRQ, enable))
 		return -EIO;
 	if (enable) {
-		zsel = (zsel & ~(0xF << shift)) | (*irq << shift);
-		wrmsr(MSR_PIC_ZSEL_LOW, zsel, dummy);
+		zsel.l = (zsel.l & ~(0xF << shift)) | (*irq << shift);
+		zsel.h = lpc.h;
+		wrmsrq(MSR_PIC_ZSEL_LOW, zsel.q);
 	}
 
 	return 0;
@@ -189,7 +189,7 @@ struct cs5535_mfgpt_timer *cs5535_mfgpt_alloc_timer(int timer_nr, int domain)
 	if (timer_nr < 0)
 		goto done;
 
-	timer = kmalloc(sizeof(*timer), GFP_KERNEL);
+	timer = kmalloc_obj(*timer);
 	if (!timer) {
 		/* aw hell */
 		spin_lock_irqsave(&mfgpt->lock, flags);
@@ -251,11 +251,8 @@ EXPORT_SYMBOL_GPL(cs5535_mfgpt_write);
  */
 static void reset_all_timers(void)
 {
-	uint32_t val, dummy;
-
 	/* The following undocumented bit resets the MFGPT timers */
-	val = 0xFF; dummy = 0;
-	wrmsr(MSR_MFGPT_SETUP, val, dummy);
+	wrmsrq(MSR_MFGPT_SETUP, 0xff);
 }
 
 /*
@@ -365,7 +362,6 @@ done:
 static struct platform_driver cs5535_mfgpt_driver = {
 	.driver = {
 		.name = DRV_NAME,
-		.owner = THIS_MODULE,
 	},
 	.probe = cs5535_mfgpt_probe,
 };

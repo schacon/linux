@@ -1,12 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Sclp "store data in absolut storage"
+ * SCLP "store data in absolute storage"
  *
- * Copyright IBM Corp. 2003, 2007
+ * Copyright IBM Corp. 2003, 2013
  * Author(s): Michael Holzheu
  */
 
-#define KMSG_COMPONENT "sclp_sdias"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "sclp_sdias: " fmt
 
 #include <linux/completion.h>
 #include <linux/sched.h>
@@ -14,22 +14,13 @@
 #include <asm/debug.h>
 #include <asm/ipl.h>
 
+#include "sclp_sdias.h"
 #include "sclp.h"
 #include "sclp_rw.h"
 
 #define TRACE(x...) debug_sprintf_event(sdias_dbf, 1, x)
 
 #define SDIAS_RETRIES 300
-#define SDIAS_SLEEP_TICKS 50
-
-#define EQ_STORE_DATA	0x0
-#define EQ_SIZE		0x1
-#define DI_FCP_DUMP	0x0
-#define ASA_SIZE_32	0x0
-#define ASA_SIZE_64	0x1
-#define EVSTATE_ALL_STORED	0x0
-#define EVSTATE_NO_DATA		0x3
-#define EVSTATE_PART_STORED	0x10
 
 static struct debug_info *sdias_dbf;
 
@@ -37,32 +28,7 @@ static struct sclp_register sclp_sdias_register = {
 	.send_mask = EVTYP_SDIAS_MASK,
 };
 
-struct sdias_evbuf {
-	struct	evbuf_header hdr;
-	u8	event_qual;
-	u8	data_id;
-	u64	reserved2;
-	u32	event_id;
-	u16	reserved3;
-	u8	asa_size;
-	u8	event_status;
-	u32	reserved4;
-	u32	blk_cnt;
-	u64	asa;
-	u32	reserved5;
-	u32	fbn;
-	u32	reserved6;
-	u32	lbn;
-	u16	reserved7;
-	u16	dbs;
-} __attribute__((packed));
-
-struct sdias_sccb {
-	struct sccb_header  hdr;
-	struct sdias_evbuf  evbuf;
-} __attribute__((packed));
-
-static struct sdias_sccb sccb __attribute__((aligned(4096)));
+static struct sdias_sccb *sclp_sdias_sccb;
 static struct sdias_evbuf sdias_evbuf;
 
 static DECLARE_COMPLETION(evbuf_accepted);
@@ -91,6 +57,7 @@ static void sdias_callback(struct sclp_req *request, void *data)
 
 static int sdias_sclp_send(struct sclp_req *req)
 {
+	struct sdias_sccb *sccb = sclp_sdias_sccb;
 	int retries;
 	int rc;
 
@@ -101,7 +68,7 @@ static int sdias_sclp_send(struct sclp_req *req)
 			/* not initiated, wait some time and retry */
 			set_current_state(TASK_INTERRUPTIBLE);
 			TRACE("add request failed: rc = %i\n",rc);
-			schedule_timeout(SDIAS_SLEEP_TICKS);
+			schedule_timeout(msecs_to_jiffies(500));
 			continue;
 		}
 		/* initiated, wait for completion of service call */
@@ -111,16 +78,16 @@ static int sdias_sclp_send(struct sclp_req *req)
 			continue;
 		}
 		/* if not accepted, retry */
-		if (!(sccb.evbuf.hdr.flags & 0x80)) {
+		if (!(sccb->evbuf.hdr.flags & 0x80)) {
 			TRACE("sclp request failed: flags=%x\n",
-			      sccb.evbuf.hdr.flags);
+			      sccb->evbuf.hdr.flags);
 			continue;
 		}
 		/*
 		 * for the sync interface the response is in the initial sccb
 		 */
 		if (!sclp_sdias_register.receiver_fn) {
-			memcpy(&sdias_evbuf, &sccb.evbuf, sizeof(sdias_evbuf));
+			memcpy(&sdias_evbuf, &sccb->evbuf, sizeof(sdias_evbuf));
 			TRACE("sync request done\n");
 			return 0;
 		}
@@ -137,23 +104,24 @@ static int sdias_sclp_send(struct sclp_req *req)
  */
 int sclp_sdias_blk_count(void)
 {
+	struct sdias_sccb *sccb = sclp_sdias_sccb;
 	struct sclp_req request;
 	int rc;
 
 	mutex_lock(&sdias_mutex);
 
-	memset(&sccb, 0, sizeof(sccb));
+	memset(sccb, 0, sizeof(*sccb));
 	memset(&request, 0, sizeof(request));
 
-	sccb.hdr.length = sizeof(sccb);
-	sccb.evbuf.hdr.length = sizeof(struct sdias_evbuf);
-	sccb.evbuf.hdr.type = EVTYP_SDIAS;
-	sccb.evbuf.event_qual = EQ_SIZE;
-	sccb.evbuf.data_id = DI_FCP_DUMP;
-	sccb.evbuf.event_id = 4712;
-	sccb.evbuf.dbs = 1;
+	sccb->hdr.length = sizeof(*sccb);
+	sccb->evbuf.hdr.length = sizeof(struct sdias_evbuf);
+	sccb->evbuf.hdr.type = EVTYP_SDIAS;
+	sccb->evbuf.event_qual = SDIAS_EQ_SIZE;
+	sccb->evbuf.data_id = SDIAS_DI_FCP_DUMP;
+	sccb->evbuf.event_id = 4712;
+	sccb->evbuf.dbs = 1;
 
-	request.sccb = &sccb;
+	request.sccb = sccb;
 	request.command = SCLP_CMDW_WRITE_EVENT_DATA;
 	request.status = SCLP_REQ_FILLED;
 	request.callback = sdias_callback;
@@ -163,8 +131,8 @@ int sclp_sdias_blk_count(void)
 		pr_err("sclp_send failed for get_nr_blocks\n");
 		goto out;
 	}
-	if (sccb.hdr.response_code != 0x0020) {
-		TRACE("send failed: %x\n", sccb.hdr.response_code);
+	if (sccb->hdr.response_code != 0x0020) {
+		TRACE("send failed: %x\n", sccb->hdr.response_code);
 		rc = -EIO;
 		goto out;
 	}
@@ -196,34 +164,31 @@ out:
  */
 int sclp_sdias_copy(void *dest, int start_blk, int nr_blks)
 {
+	struct sdias_sccb *sccb = sclp_sdias_sccb;
 	struct sclp_req request;
 	int rc;
 
 	mutex_lock(&sdias_mutex);
 
-	memset(&sccb, 0, sizeof(sccb));
+	memset(sccb, 0, sizeof(*sccb));
 	memset(&request, 0, sizeof(request));
 
-	sccb.hdr.length = sizeof(sccb);
-	sccb.evbuf.hdr.length = sizeof(struct sdias_evbuf);
-	sccb.evbuf.hdr.type = EVTYP_SDIAS;
-	sccb.evbuf.hdr.flags = 0;
-	sccb.evbuf.event_qual = EQ_STORE_DATA;
-	sccb.evbuf.data_id = DI_FCP_DUMP;
-	sccb.evbuf.event_id = 4712;
-#ifdef CONFIG_64BIT
-	sccb.evbuf.asa_size = ASA_SIZE_64;
-#else
-	sccb.evbuf.asa_size = ASA_SIZE_32;
-#endif
-	sccb.evbuf.event_status = 0;
-	sccb.evbuf.blk_cnt = nr_blks;
-	sccb.evbuf.asa = (unsigned long)dest;
-	sccb.evbuf.fbn = start_blk;
-	sccb.evbuf.lbn = 0;
-	sccb.evbuf.dbs = 1;
+	sccb->hdr.length = sizeof(*sccb);
+	sccb->evbuf.hdr.length = sizeof(struct sdias_evbuf);
+	sccb->evbuf.hdr.type = EVTYP_SDIAS;
+	sccb->evbuf.hdr.flags = 0;
+	sccb->evbuf.event_qual = SDIAS_EQ_STORE_DATA;
+	sccb->evbuf.data_id = SDIAS_DI_FCP_DUMP;
+	sccb->evbuf.event_id = 4712;
+	sccb->evbuf.asa_size = SDIAS_ASA_SIZE_64;
+	sccb->evbuf.event_status = 0;
+	sccb->evbuf.blk_cnt = nr_blks;
+	sccb->evbuf.asa = __pa(dest);
+	sccb->evbuf.fbn = start_blk;
+	sccb->evbuf.lbn = 0;
+	sccb->evbuf.dbs = 1;
 
-	request.sccb	 = &sccb;
+	request.sccb	 = sccb;
 	request.command  = SCLP_CMDW_WRITE_EVENT_DATA;
 	request.status	 = SCLP_REQ_FILLED;
 	request.callback = sdias_callback;
@@ -233,27 +198,26 @@ int sclp_sdias_copy(void *dest, int start_blk, int nr_blks)
 		pr_err("sclp_send failed: %x\n", rc);
 		goto out;
 	}
-	if (sccb.hdr.response_code != 0x0020) {
-		TRACE("copy failed: %x\n", sccb.hdr.response_code);
+	if (sccb->hdr.response_code != 0x0020) {
+		TRACE("copy failed: %x\n", sccb->hdr.response_code);
 		rc = -EIO;
 		goto out;
 	}
 
 	switch (sdias_evbuf.event_status) {
-		case EVSTATE_ALL_STORED:
-			TRACE("all stored\n");
-			break;
-		case EVSTATE_PART_STORED:
-			TRACE("part stored: %i\n", sdias_evbuf.blk_cnt);
-			break;
-		case EVSTATE_NO_DATA:
-			TRACE("no data\n");
-			/* fall through */
-		default:
-			pr_err("Error from SCLP while copying hsa. "
-			       "Event status = %x\n",
-			       sdias_evbuf.event_status);
-			rc = -EIO;
+	case SDIAS_EVSTATE_ALL_STORED:
+		TRACE("all stored\n");
+		break;
+	case SDIAS_EVSTATE_PART_STORED:
+		TRACE("part stored: %i\n", sdias_evbuf.blk_cnt);
+		break;
+	case SDIAS_EVSTATE_NO_DATA:
+		TRACE("no data\n");
+		fallthrough;
+	default:
+		pr_err("Error from SCLP while copying hsa. Event status = %x\n",
+		       sdias_evbuf.event_status);
+		rc = -EIO;
 	}
 out:
 	mutex_unlock(&sdias_mutex);
@@ -292,8 +256,10 @@ static int __init sclp_sdias_init_async(void)
 
 int __init sclp_sdias_init(void)
 {
-	if (ipl_info.type != IPL_TYPE_FCP_DUMP)
+	if (!is_ipl_type_dump())
 		return 0;
+	sclp_sdias_sccb = (void *) __get_free_page(GFP_KERNEL | GFP_DMA);
+	BUG_ON(!sclp_sdias_sccb);
 	sdias_dbf = debug_register("dump_sdias", 4, 1, 4 * sizeof(long));
 	debug_register_view(sdias_dbf, &debug_sprintf_view);
 	debug_set_level(sdias_dbf, 6);
@@ -302,14 +268,9 @@ int __init sclp_sdias_init(void)
 	if (sclp_sdias_init_async() == 0)
 		goto out;
 	TRACE("init failed\n");
+	free_page((unsigned long) sclp_sdias_sccb);
 	return -ENODEV;
 out:
 	TRACE("init done\n");
 	return 0;
-}
-
-void __exit sclp_sdias_exit(void)
-{
-	debug_unregister(sdias_dbf);
-	sclp_unregister(&sclp_sdias_register);
 }

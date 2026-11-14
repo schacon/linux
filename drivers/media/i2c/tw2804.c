@@ -1,18 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2005-2006 Micronas USA Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License (Version 2) as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
  */
 
 #include <linux/module.h>
@@ -23,7 +11,6 @@
 #include <linux/slab.h>
 #include <media/v4l2-subdev.h>
 #include <media/v4l2-device.h>
-#include <media/v4l2-chip-ident.h>
 #include <media/v4l2-ctrls.h>
 
 #define TW2804_REG_AUTOGAIN		0x02
@@ -343,12 +330,12 @@ static const struct v4l2_ctrl_ops tw2804_ctrl_ops = {
 };
 
 static const struct v4l2_subdev_video_ops tw2804_video_ops = {
+	.s_std = tw2804_s_std,
 	.s_routing = tw2804_s_video_routing,
 };
 
 static const struct v4l2_subdev_core_ops tw2804_core_ops = {
 	.log_status = tw2804_log_status,
-	.s_std = tw2804_s_std,
 };
 
 static const struct v4l2_subdev_ops tw2804_ops = {
@@ -356,8 +343,7 @@ static const struct v4l2_subdev_ops tw2804_ops = {
 	.video = &tw2804_video_ops,
 };
 
-static int tw2804_probe(struct i2c_client *client,
-			    const struct i2c_device_id *id)
+static int tw2804_probe(struct i2c_client *client)
 {
 	struct i2c_adapter *adapter = client->adapter;
 	struct tw2804 *state;
@@ -368,8 +354,7 @@ static int tw2804_probe(struct i2c_client *client,
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -ENODEV;
 
-	state = kzalloc(sizeof(struct tw2804), GFP_KERNEL);
-
+	state = devm_kzalloc_obj(&client->dev, *state);
 	if (state == NULL)
 		return -ENOMEM;
 	sd = &state->sd;
@@ -410,7 +395,6 @@ static int tw2804_probe(struct i2c_client *client,
 	err = state->hdl.error;
 	if (err) {
 		v4l2_ctrl_handler_free(&state->hdl);
-		kfree(state);
 		return err;
 	}
 
@@ -420,19 +404,17 @@ static int tw2804_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int tw2804_remove(struct i2c_client *client)
+static void tw2804_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct tw2804 *state = to_state(sd);
 
 	v4l2_device_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(&state->hdl);
-	kfree(state);
-	return 0;
 }
 
 static const struct i2c_device_id tw2804_id[] = {
-	{ "tw2804", 0 },
+	{ .name = "tw2804" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tw2804_id);

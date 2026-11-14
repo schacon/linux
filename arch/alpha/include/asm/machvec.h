@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ALPHA_MACHVEC_H
 #define __ALPHA_MACHVEC_H 1
 
@@ -33,6 +34,7 @@ struct alpha_machine_vector
 
 	int nr_irqs;
 	int rtc_port;
+	int rtc_boot_cpu_only;
 	unsigned int max_asn;
 	unsigned long max_isa_dma_address;
 	unsigned long irq_probe_mask;
@@ -44,13 +46,15 @@ struct alpha_machine_vector
 	void (*mv_pci_tbi)(struct pci_controller *hose,
 			   dma_addr_t start, dma_addr_t end);
 
-	unsigned int (*mv_ioread8)(void __iomem *);
-	unsigned int (*mv_ioread16)(void __iomem *);
-	unsigned int (*mv_ioread32)(void __iomem *);
+	u8 (*mv_ioread8)(const void __iomem *);
+	u16 (*mv_ioread16)(const void __iomem *);
+	u32 (*mv_ioread32)(const void __iomem *);
+	u64 (*mv_ioread64)(const void __iomem *);
 
 	void (*mv_iowrite8)(u8, void __iomem *);
 	void (*mv_iowrite16)(u16, void __iomem *);
 	void (*mv_iowrite32)(u32, void __iomem *);
+	void (*mv_iowrite64)(u64, void __iomem *);
 
 	u8 (*mv_readb)(const volatile void __iomem *);
 	u16 (*mv_readw)(const volatile void __iomem *);
@@ -67,15 +71,6 @@ struct alpha_machine_vector
 	void (*mv_iounmap)(volatile void __iomem *);
 	int (*mv_is_ioaddr)(unsigned long);
 	int (*mv_is_mmio)(const volatile void __iomem *);
-
-	void (*mv_switch_mm)(struct mm_struct *, struct mm_struct *,
-			     struct task_struct *);
-	void (*mv_activate_mm)(struct mm_struct *, struct mm_struct *);
-
-	void (*mv_flush_tlb_current)(struct mm_struct *);
-	void (*mv_flush_tlb_current_page)(struct mm_struct * mm,
-					  struct vm_area_struct *vma,
-					  unsigned long addr);
 
 	void (*update_irq_hw)(unsigned long, unsigned long, int);
 	void (*ack_irq)(unsigned long);
@@ -95,16 +90,7 @@ struct alpha_machine_vector
 
 	struct _alpha_agp_info *(*agp_info)(void);
 
-	unsigned int (*rtc_get_time)(struct rtc_time *);
-	int (*rtc_set_time)(struct rtc_time *);
-
 	const char *vector_name;
-
-	/* NUMA information */
-	int (*pa_to_nid)(unsigned long);
-	int (*cpuid_to_nid)(int);
-	unsigned long (*node_mem_start)(int);
-	unsigned long (*node_mem_size)(int);
 
 	/* System specific parameters.  */
 	union {
@@ -126,13 +112,19 @@ extern struct alpha_machine_vector alpha_mv;
 
 #ifdef CONFIG_ALPHA_GENERIC
 extern int alpha_using_srm;
+extern int alpha_using_qemu;
 #else
-#ifdef CONFIG_ALPHA_SRM
-#define alpha_using_srm 1
-#else
-#define alpha_using_srm 0
-#endif
+# ifdef CONFIG_ALPHA_SRM
+#  define alpha_using_srm 1
+# else
+#  define alpha_using_srm 0
+# endif
+# ifdef CONFIG_ALPHA_QEMU
+#  define alpha_using_qemu 1
+# else
+#  define alpha_using_qemu 0
+# endif
 #endif /* GENERIC */
 
-#endif
+#endif /* __KERNEL__ */
 #endif /* __ALPHA_MACHVEC_H */

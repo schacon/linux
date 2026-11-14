@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/drivers/mtd/maps/pci.c
  *
  *  Copyright (C) 2001 Russell King, All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Generic PCI memory map driver.  We support the following boards:
  *  - Intel IQ80310 ATU.
@@ -14,7 +11,6 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 
 #include <linux/mtd/mtd.h>
@@ -94,11 +90,11 @@ intel_iq80310_init(struct pci_dev *dev, struct map_pci_info *map)
 	u32 win_base;
 
 	map->map.bankwidth = 1;
-	map->map.read = mtd_pci_read8,
-	map->map.write = mtd_pci_write8,
+	map->map.read = mtd_pci_read8;
+	map->map.write = mtd_pci_write8;
 
 	map->map.size     = 0x00800000;
-	map->base         = ioremap_nocache(pci_resource_start(dev, 0),
+	map->base         = ioremap(pci_resource_start(dev, 0),
 					    pci_resource_len(dev, 0));
 
 	if (!map->base)
@@ -189,10 +185,10 @@ intel_dc21285_init(struct pci_dev *dev, struct map_pci_info *map)
 		return -ENXIO;
 
 	map->map.bankwidth = 4;
-	map->map.read = mtd_pci_read32,
-	map->map.write = mtd_pci_write32,
+	map->map.read = mtd_pci_read32;
+	map->map.write = mtd_pci_write32;
 	map->map.size     = len;
-	map->base         = ioremap_nocache(base, len);
+	map->base         = ioremap(base, len);
 
 	if (!map->base)
 		return -ENOMEM;
@@ -229,24 +225,18 @@ static struct mtd_pci_info intel_dc21285_info = {
  * PCI device ID table
  */
 
-static struct pci_device_id mtd_pci_ids[] = {
+static const struct pci_device_id mtd_pci_ids[] = {
 	{
-		.vendor =	PCI_VENDOR_ID_INTEL,
-		.device =	0x530d,
-		.subvendor =	PCI_ANY_ID,
-		.subdevice =	PCI_ANY_ID,
+		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x530d),
 		.class =	PCI_CLASS_MEMORY_OTHER << 8,
 		.class_mask =	0xffff00,
 		.driver_data =	(unsigned long)&intel_iq80310_info,
-	},
-	{
-		.vendor =	PCI_VENDOR_ID_DEC,
-		.device =	PCI_DEVICE_ID_DEC_21285,
-		.subvendor =	0,	/* DC21285 defaults to 0 on reset */
-		.subdevice =	0,	/* DC21285 defaults to 0 on reset */
+	}, {
+		/* DC21285 defaults to 0 for .subvendor and .subdevice on reset */
+		PCI_DEVICE_SUB(PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_21285, 0, 0),
 		.driver_data =	(unsigned long)&intel_dc21285_info,
 	},
-	{ 0, }
+	{ }
 };
 
 /*
@@ -260,7 +250,7 @@ static int mtd_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	struct mtd_info *mtd = NULL;
 	int err;
 
-	err = pci_enable_device(dev);
+	err = pcim_enable_device(dev);
 	if (err)
 		goto out;
 
@@ -268,7 +258,7 @@ static int mtd_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	if (err)
 		goto out;
 
-	map = kmalloc(sizeof(*map), GFP_KERNEL);
+	map = kmalloc_obj(*map);
 	err = -ENOMEM;
 	if (!map)
 		goto release;
@@ -316,7 +306,6 @@ static void mtd_pci_remove(struct pci_dev *dev)
 	map->exit(dev, map);
 	kfree(map);
 
-	pci_set_drvdata(dev, NULL);
 	pci_release_regions(dev);
 }
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * if_addrlabel.h - netlink interface for address labels
  *
@@ -7,8 +8,8 @@
  *	YOSHIFUJI Hideaki @ USAGI/WIDE <yoshfuji@linux-ipv6.org>
  */
 
-#ifndef __LINUX_IF_ADDRLABEL_H
-#define __LINUX_IF_ADDRLABEL_H
+#ifndef _UAPI__LINUX_IF_ADDRLABEL_H
+#define _UAPI__LINUX_IF_ADDRLABEL_H
 
 #include <linux/types.h>
 

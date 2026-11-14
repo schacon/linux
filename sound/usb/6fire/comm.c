@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Linux driver for TerraTec DMX 6Fire USB
  *
@@ -6,11 +7,6 @@
  * Author:	Torsten Schenk <torsten.schenk@zoho.com>
  * Created:	Jan 01, 2011
  * Copyright:	(C) Torsten Schenk
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include "comm.h"
@@ -25,7 +21,6 @@ enum {
 static void usb6fire_comm_init_urb(struct comm_runtime *rt, struct urb *urb,
 		u8 *buffer, void *context, void(*handler)(struct urb *urb))
 {
-	usb_init_urb(urb);
 	urb->transfer_buffer = buffer;
 	urb->pipe = usb_sndintpipe(rt->chip->dev, COMM_EP);
 	urb->complete = handler;
@@ -40,18 +35,21 @@ static void usb6fire_comm_receiver_handler(struct urb *urb)
 	struct midi_runtime *midi_rt = rt->chip->midi;
 
 	if (!urb->status) {
-		if (rt->receiver_buffer[0] == 0x10) /* midi in event */
+		u8 len = rt->receiver_buffer[1];
+
+		if (rt->receiver_buffer[0] == 0x10 && /* midi in event */
+		    len <= COMM_RECEIVER_BUFSIZE - 2 &&
+		    urb->actual_length >= len + 2)
 			if (midi_rt)
 				midi_rt->in_received(midi_rt,
-						rt->receiver_buffer + 2,
-						rt->receiver_buffer[1]);
+						rt->receiver_buffer + 2, len);
 	}
 
 	if (!rt->chip->shutdown) {
 		urb->status = 0;
 		urb->actual_length = 0;
 		if (usb_submit_urb(urb, GFP_ATOMIC) < 0)
-			snd_printk(KERN_WARNING PREFIX
+			dev_warn(&urb->dev->dev,
 					"comm data receiver aborted.\n");
 	}
 }
@@ -99,7 +97,7 @@ static int usb6fire_comm_send_buffer(u8 *buffer, struct usb_device *dev)
 	int actual_len;
 
 	ret = usb_interrupt_msg(dev, usb_sndintpipe(dev, COMM_EP),
-			buffer, buffer[1] + 2, &actual_len, HZ);
+			buffer, buffer[1] + 2, &actual_len, 1000);
 	if (ret < 0)
 		return ret;
 	else if (actual_len != buffer[1] + 2)
@@ -110,35 +108,75 @@ static int usb6fire_comm_send_buffer(u8 *buffer, struct usb_device *dev)
 static int usb6fire_comm_write8(struct comm_runtime *rt, u8 request,
 		u8 reg, u8 value)
 {
-	u8 buffer[13]; /* 13: maximum length of message */
+	u8 *buffer;
+	int ret;
+
+	/* 13: maximum length of message */
+	buffer = kmalloc(13, GFP_KERNEL);
+	if (!buffer)
+		return -ENOMEM;
 
 	usb6fire_comm_init_buffer(buffer, 0x00, request, reg, value, 0x00);
-	return usb6fire_comm_send_buffer(buffer, rt->chip->dev);
+	ret = usb6fire_comm_send_buffer(buffer, rt->chip->dev);
+
+	kfree(buffer);
+	return ret;
 }
 
 static int usb6fire_comm_write16(struct comm_runtime *rt, u8 request,
 		u8 reg, u8 vl, u8 vh)
 {
-	u8 buffer[13]; /* 13: maximum length of message */
+	u8 *buffer;
+	int ret;
+
+	/* 13: maximum length of message */
+	buffer = kmalloc(13, GFP_KERNEL);
+	if (!buffer)
+		return -ENOMEM;
 
 	usb6fire_comm_init_buffer(buffer, 0x00, request, reg, vl, vh);
-	return usb6fire_comm_send_buffer(buffer, rt->chip->dev);
+	ret = usb6fire_comm_send_buffer(buffer, rt->chip->dev);
+
+	kfree(buffer);
+	return ret;
+}
+
+static void usb6fire_comm_free(struct comm_runtime *rt)
+{
+	if (!rt)
+		return;
+
+	if (rt->chip)
+		rt->chip->comm = NULL;
+
+	usb_free_urb(rt->receiver);
+	kfree(rt->receiver_buffer);
+	kfree(rt);
 }
 
 int usb6fire_comm_init(struct sfire_chip *chip)
 {
-	struct comm_runtime *rt = kzalloc(sizeof(struct comm_runtime),
-			GFP_KERNEL);
+	struct comm_runtime *rt = kzalloc_obj(struct comm_runtime);
 	struct urb *urb;
 	int ret;
 
 	if (!rt)
 		return -ENOMEM;
 
-	urb = &rt->receiver;
+	rt->receiver_buffer = kzalloc(COMM_RECEIVER_BUFSIZE, GFP_KERNEL);
+	if (!rt->receiver_buffer) {
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	urb = usb_alloc_urb(0, GFP_KERNEL);
+	if (!urb) {
+		ret = -ENOMEM;
+		goto error;
+	}
+	rt->receiver = urb;
 	rt->serial = 1;
 	rt->chip = chip;
-	usb_init_urb(urb);
 	rt->init_urb = usb6fire_comm_init_urb;
 	rt->write8 = usb6fire_comm_write8;
 	rt->write16 = usb6fire_comm_write16;
@@ -153,12 +191,15 @@ int usb6fire_comm_init(struct sfire_chip *chip)
 	urb->interval = 1;
 	ret = usb_submit_urb(urb, GFP_KERNEL);
 	if (ret < 0) {
-		kfree(rt);
-		snd_printk(KERN_ERR PREFIX "cannot create comm data receiver.");
-		return ret;
+		dev_err(&chip->dev->dev, "cannot create comm data receiver.");
+		goto error;
 	}
 	chip->comm = rt;
 	return 0;
+
+ error:
+	usb6fire_comm_free(rt);
+	return ret;
 }
 
 void usb6fire_comm_abort(struct sfire_chip *chip)
@@ -166,11 +207,10 @@ void usb6fire_comm_abort(struct sfire_chip *chip)
 	struct comm_runtime *rt = chip->comm;
 
 	if (rt)
-		usb_poison_urb(&rt->receiver);
+		usb_poison_urb(rt->receiver);
 }
 
 void usb6fire_comm_destroy(struct sfire_chip *chip)
 {
-	kfree(chip->comm);
-	chip->comm = NULL;
+	usb6fire_comm_free(chip->comm);
 }

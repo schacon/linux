@@ -1,14 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) ST-Ericsson SA 2012
  *
  * Author: Ola Lilja <ola.o.lilja@stericsson.com>,
  *         for ST-Ericsson.
- *
- * License terms:
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
  */
 
 
@@ -16,8 +11,6 @@
 #define UX500_MSP_I2S_H
 
 #include <linux/platform_device.h>
-
-#define MSP_INPUT_FREQ_APB 48000000
 
 /*** Stereo mode. Used for APB data accesses as 16 bits accesses (mono),
  *   32 bits accesses (stereo).
@@ -69,6 +62,7 @@ enum msp_direction {
 #define MSP_SRG		0x10
 #define MSP_FLR		0x14
 #define MSP_DMACR	0x18
+#define MSP_WMRK	0x1c
 
 #define MSP_IMSC	0x20
 #define MSP_RIS		0x24
@@ -153,8 +147,8 @@ enum msp_direction {
 #define RCKPOL_MASK		BIT(0)
 #define TCKPOL_MASK		BIT(0)
 #define SPICKM_MASK		(BIT(1) | BIT(0))
-#define MSP_RX_CLKPOL_BIT(n)     ((n & RCKPOL_MASK) << RCKPOL_SHIFT)
-#define MSP_TX_CLKPOL_BIT(n)     ((n & TCKPOL_MASK) << TCKPOL_SHIFT)
+#define MSP_RX_CLKPOL_BIT(n)     (((n) & RCKPOL_MASK) << RCKPOL_SHIFT)
+#define MSP_TX_CLKPOL_BIT(n)     (((n) & TCKPOL_MASK) << TCKPOL_SHIFT)
 
 #define P1ELEN_SHIFT		0
 #define P1FLEN_SHIFT		3
@@ -234,6 +228,10 @@ enum msp_direction {
 
 #define RDMAE_SHIFT		0
 #define TDMAE_SHIFT		1
+
+/* FIFO watermark register */
+#define MSP_WMRK_RX_4_ELEMENTS	BIT(0)
+#define MSP_WMRK_TX_4_ELEMENTS	BIT(3)
 
 /* Interrupt Register */
 #define RX_SERVICE_INT		BIT(0)
@@ -341,11 +339,6 @@ enum msp_compress_mode {
 	MSP_COMPRESS_MODE_A_LAW = 3
 };
 
-enum msp_spi_burst_mode {
-	MSP_SPI_BURST_MODE_DISABLE = 0,
-	MSP_SPI_BURST_MODE_ENABLE = 1
-};
-
 enum msp_expand_mode {
 	MSP_EXPAND_MODE_LINEAR = 0,
 	MSP_EXPAND_MODE_LINEAR_SIGNED = 1,
@@ -369,13 +362,6 @@ enum msp_protocol {
  * suspend resume
  */
 #define MAX_MSP_BACKUP_REGS 36
-
-enum enum_i2s_controller {
-	MSP_0_I2S_CONTROLLER = 0,
-	MSP_1_I2S_CONTROLLER,
-	MSP_2_I2S_CONTROLLER,
-	MSP_3_I2S_CONTROLLER,
-};
 
 enum i2s_direction_t {
 	MSP_DIR_TX = 0x01,
@@ -454,32 +440,6 @@ struct msp_protdesc {
 	u32 clocks_per_frame;
 };
 
-struct i2s_message {
-	enum i2s_direction_t i2s_direction;
-	void *txdata;
-	void *rxdata;
-	size_t txbytes;
-	size_t rxbytes;
-	int dma_flag;
-	int tx_offset;
-	int rx_offset;
-	bool cyclic_dma;
-	dma_addr_t buf_addr;
-	size_t buf_len;
-	size_t period_len;
-};
-
-struct i2s_controller {
-	struct module *owner;
-	unsigned int id;
-	unsigned int class;
-	const struct i2s_algorithm *algo; /* the algorithm to access the bus */
-	void *data;
-	struct mutex bus_lock;
-	struct device dev; /* the controller device */
-	char name[48];
-};
-
 struct ux500_msp_config {
 	unsigned int f_inputclk;
 	unsigned int rx_clk_sel;
@@ -491,8 +451,6 @@ struct ux500_msp_config {
 	unsigned int tx_fsync_sel;
 	unsigned int rx_fifo_config;
 	unsigned int tx_fifo_config;
-	unsigned int spi_clk_mode;
-	unsigned int spi_burst_mode;
 	unsigned int loopback_enable;
 	unsigned int tx_data_enable;
 	unsigned int default_protdesc;
@@ -502,49 +460,30 @@ struct ux500_msp_config {
 	unsigned int direction;
 	unsigned int protocol;
 	unsigned int frame_freq;
-	unsigned int frame_size;
 	enum msp_data_size data_size;
 	unsigned int def_elem_len;
 	unsigned int iodelay;
-	void (*handler) (void *data);
-	void *tx_callback_data;
-	void *rx_callback_data;
+	bool clock_provider;
+	bool bclk_inverted;
 };
 
 struct ux500_msp {
-	enum enum_i2s_controller id;
+	int id;
 	void __iomem *registers;
 	struct device *dev;
-	struct i2s_controller *i2s_cont;
-	struct stedma40_chan_cfg *dma_cfg_rx;
-	struct stedma40_chan_cfg *dma_cfg_tx;
-	struct dma_chan *tx_pipeid;
-	struct dma_chan *rx_pipeid;
+	dma_addr_t tx_rx_addr;
 	enum msp_state msp_state;
-	int (*transfer) (struct ux500_msp *msp, struct i2s_message *message);
-	struct timer_list notify_timer;
 	int def_elem_len;
 	unsigned int dir_busy;
+	unsigned int dir_running;
 	int loopback_enable;
-	u32 backup_regs[MAX_MSP_BACKUP_REGS];
 	unsigned int f_bitclk;
-	/* Pin modes */
-	struct pinctrl *pinctrl_p;
-	struct pinctrl_state *pinctrl_def;
-	struct pinctrl_state *pinctrl_sleep;
-	/* Reference Count */
-	int pinctrl_rxtx_ref;
+	bool clock_provider;
+	struct ux500_msp_config config;
 };
 
-struct ux500_msp_dma_params {
-	unsigned int data_size;
-	struct stedma40_chan_cfg *dma_cfg;
-};
-
-struct msp_i2s_platform_data;
 int ux500_msp_i2s_init_msp(struct platform_device *pdev,
-			struct ux500_msp **msp_p,
-			struct msp_i2s_platform_data *platform_data);
+			struct ux500_msp **msp_p);
 void ux500_msp_i2s_cleanup_msp(struct platform_device *pdev,
 			struct ux500_msp *msp);
 int ux500_msp_i2s_open(struct ux500_msp *msp, struct ux500_msp_config *config);

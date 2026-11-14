@@ -1,9 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _MATRIX_KEYPAD_H
 #define _MATRIX_KEYPAD_H
 
 #include <linux/types.h>
-#include <linux/input.h>
-#include <linux/of.h>
+
+struct device;
+struct input_dev;
 
 #define MATRIX_MAX_ROWS		32
 #define MATRIX_MAX_COLS		32
@@ -32,72 +34,12 @@ struct matrix_keymap_data {
 	unsigned int	keymap_size;
 };
 
-/**
- * struct matrix_keypad_platform_data - platform-dependent keypad data
- * @keymap_data: pointer to &matrix_keymap_data
- * @row_gpios: pointer to array of gpio numbers representing rows
- * @col_gpios: pointer to array of gpio numbers reporesenting colums
- * @num_row_gpios: actual number of row gpios used by device
- * @num_col_gpios: actual number of col gpios used by device
- * @col_scan_delay_us: delay, measured in microseconds, that is
- *	needed before we can keypad after activating column gpio
- * @debounce_ms: debounce interval in milliseconds
- * @clustered_irq: may be specified if interrupts of all row/column GPIOs
- *	are bundled to one single irq
- * @clustered_irq_flags: flags that are needed for the clustered irq
- * @active_low: gpio polarity
- * @wakeup: controls whether the device should be set up as wakeup
- *	source
- * @no_autorepeat: disable key autorepeat
- *
- * This structure represents platform-specific data that use used by
- * matrix_keypad driver to perform proper initialization.
- */
-struct matrix_keypad_platform_data {
-	const struct matrix_keymap_data *keymap_data;
-
-	const unsigned int *row_gpios;
-	const unsigned int *col_gpios;
-
-	unsigned int	num_row_gpios;
-	unsigned int	num_col_gpios;
-
-	unsigned int	col_scan_delay_us;
-
-	/* key debounce interval in milli-second */
-	unsigned int	debounce_ms;
-
-	unsigned int	clustered_irq;
-	unsigned int	clustered_irq_flags;
-
-	bool		active_low;
-	bool		wakeup;
-	bool		no_autorepeat;
-};
-
 int matrix_keypad_build_keymap(const struct matrix_keymap_data *keymap_data,
 			       const char *keymap_name,
 			       unsigned int rows, unsigned int cols,
 			       unsigned short *keymap,
 			       struct input_dev *input_dev);
-
-#ifdef CONFIG_OF
-/**
- * matrix_keypad_parse_of_params() - Read parameters from matrix-keypad node
- *
- * @dev: Device containing of_node
- * @rows: Returns number of matrix rows
- * @cols: Returns number of matrix columns
- * @return 0 if OK, <0 on error
- */
-int matrix_keypad_parse_of_params(struct device *dev,
-				  unsigned int *rows, unsigned int *cols);
-#else
-static inline int matrix_keypad_parse_of_params(struct device *dev,
-				  unsigned int *rows, unsigned int *cols)
-{
-	return -ENOSYS;
-}
-#endif /* CONFIG_OF */
+int matrix_keypad_parse_properties(struct device *dev,
+				   unsigned int *rows, unsigned int *cols);
 
 #endif /* _MATRIX_KEYPAD_H */

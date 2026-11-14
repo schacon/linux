@@ -135,6 +135,24 @@ do {								\
     else							\
       {								\
 	/* we've got a denormalized number */			\
+	int _FP_PACK_CANONICAL_is_tiny = 1;			\
+	if (_FP_TININESS_AFTER_ROUNDING && X##_e == 0)		\
+	  {							\
+	    /* Architectures that detect tininess after rounding	\
+	       only signal underflow if the result is still		\
+	       subnormal once rounded as if the exponent range	\
+	       were unbounded.  Round a copy to find out.  */	\
+	    FP_DECL_##fs(_FP_PACK_CANONICAL_T);			\
+	    /* The class field is not used by the rounding below,	\
+	       and is unused entirely where this block is dead.  */	\
+	    (void)_FP_PACK_CANONICAL_T##_c;			\
+	    _FP_FRAC_COPY_##wc(_FP_PACK_CANONICAL_T, X);	\
+	    _FP_PACK_CANONICAL_T##_s = X##_s;			\
+	    _FP_PACK_CANONICAL_T##_e = X##_e;			\
+	    _FP_ROUND(wc, _FP_PACK_CANONICAL_T);		\
+	    if (_FP_FRAC_OVERP_##wc(fs, _FP_PACK_CANONICAL_T))	\
+	      _FP_PACK_CANONICAL_is_tiny = 0;			\
+	  }							\
 	X##_e = -X##_e + 1;					\
 	if (X##_e <= _FP_WFRACBITS_##fs)			\
 	  {							\
@@ -161,8 +179,9 @@ do {								\
 		    _FP_FRAC_SRL_##wc(X, _FP_WORKBITS);		\
 		  }						\
 	      }							\
-	    if ((FP_CUR_EXCEPTIONS & FP_EX_INEXACT) ||		\
-		(FP_TRAPPING_EXCEPTIONS & FP_EX_UNDERFLOW))	\
+	    if (_FP_PACK_CANONICAL_is_tiny			\
+		&& ((FP_CUR_EXCEPTIONS & FP_EX_INEXACT) ||	\
+		    (FP_TRAPPING_EXCEPTIONS & FP_EX_UNDERFLOW)))	\
 		FP_SET_EXCEPTION(FP_EX_UNDERFLOW);		\
 	  }							\
 	else							\
@@ -308,6 +327,7 @@ do {									     \
 									     \
   case _FP_CLS_COMBINE(FP_CLS_NORMAL,FP_CLS_ZERO):			     \
     R##_e = X##_e;							     \
+	fallthrough;							     \
   case _FP_CLS_COMBINE(FP_CLS_NAN,FP_CLS_NORMAL):			     \
   case _FP_CLS_COMBINE(FP_CLS_NAN,FP_CLS_INF):				     \
   case _FP_CLS_COMBINE(FP_CLS_NAN,FP_CLS_ZERO):				     \
@@ -318,6 +338,7 @@ do {									     \
 									     \
   case _FP_CLS_COMBINE(FP_CLS_ZERO,FP_CLS_NORMAL):			     \
     R##_e = Y##_e;							     \
+	fallthrough;							     \
   case _FP_CLS_COMBINE(FP_CLS_NORMAL,FP_CLS_NAN):			     \
   case _FP_CLS_COMBINE(FP_CLS_INF,FP_CLS_NAN):				     \
   case _FP_CLS_COMBINE(FP_CLS_ZERO,FP_CLS_NAN):				     \
@@ -336,7 +357,7 @@ do {									     \
 	FP_SET_EXCEPTION(FP_EX_INVALID | FP_EX_INVALID_ISI);		     \
 	break;								     \
       }									     \
-    /* FALLTHRU */							     \
+    fallthrough;							     \
 									     \
   case _FP_CLS_COMBINE(FP_CLS_INF,FP_CLS_NORMAL):			     \
   case _FP_CLS_COMBINE(FP_CLS_INF,FP_CLS_ZERO):				     \
@@ -415,6 +436,7 @@ do {							\
   case _FP_CLS_COMBINE(FP_CLS_NAN,FP_CLS_INF):		\
   case _FP_CLS_COMBINE(FP_CLS_NAN,FP_CLS_ZERO):		\
     R##_s = X##_s;					\
+	  fallthrough;					\
 							\
   case _FP_CLS_COMBINE(FP_CLS_INF,FP_CLS_INF):		\
   case _FP_CLS_COMBINE(FP_CLS_INF,FP_CLS_NORMAL):	\
@@ -428,6 +450,7 @@ do {							\
   case _FP_CLS_COMBINE(FP_CLS_INF,FP_CLS_NAN):		\
   case _FP_CLS_COMBINE(FP_CLS_ZERO,FP_CLS_NAN):		\
     R##_s = Y##_s;					\
+	  fallthrough;					\
 							\
   case _FP_CLS_COMBINE(FP_CLS_NORMAL,FP_CLS_INF):	\
   case _FP_CLS_COMBINE(FP_CLS_NORMAL,FP_CLS_ZERO):	\
@@ -493,6 +516,7 @@ do {							\
 							\
   case _FP_CLS_COMBINE(FP_CLS_NORMAL,FP_CLS_ZERO):	\
     FP_SET_EXCEPTION(FP_EX_DIVZERO);			\
+	fallthrough;					\
   case _FP_CLS_COMBINE(FP_CLS_INF,FP_CLS_ZERO):		\
   case _FP_CLS_COMBINE(FP_CLS_INF,FP_CLS_NORMAL):	\
     R##_c = FP_CLS_INF;					\
@@ -657,12 +681,14 @@ do {									\
 	if (X##_e < 0)								\
 	  {									\
 	    FP_SET_EXCEPTION(FP_EX_INEXACT);					\
+	    fallthrough;							\
 	  case FP_CLS_ZERO:							\
 	    r = 0;								\
 	  }									\
 	else if (X##_e >= rsize - (rsigned > 0 || X##_s)			\
 		 || (!rsigned && X##_s))					\
 	  {	/* overflow */							\
+	    fallthrough;							\
 	  case FP_CLS_NAN:                                                      \
 	  case FP_CLS_INF:							\
 	    if (rsigned == 2)							\
@@ -685,7 +711,7 @@ do {									\
 	    else								\
 	      {									\
 		r = 0;								\
-		if (X##_s)							\
+		if (!X##_s)							\
 		  r = ~r;							\
 	      }									\
 	    FP_SET_EXCEPTION(FP_EX_INVALID);					\
@@ -743,12 +769,17 @@ do {									\
 	  }									\
 	else									\
 	  {									\
+	    int _lz0, _lz1;							\
 	    if (X##_e <= -_FP_WORKBITS - 1)					\
 	      _FP_FRAC_SET_##wc(X, _FP_MINFRAC_##wc);				\
 	    else								\
 	      _FP_FRAC_SRS_##wc(X, _FP_FRACBITS_##fs - 1 - X##_e,		\
 				_FP_WFRACBITS_##fs);				\
+	    _FP_FRAC_CLZ_##wc(_lz0, X);						\
 	    _FP_ROUND(wc, X);							\
+	    _FP_FRAC_CLZ_##wc(_lz1, X);						\
+	    if (_lz1 < _lz0)							\
+	      X##_e++; /* For overflow detection.  */				\
 	    _FP_FRAC_SRL_##wc(X, _FP_WORKBITS);					\
 	    _FP_FRAC_ASSEMBLE_##wc(r, X, rsize);				\
 	  }									\
@@ -757,12 +788,13 @@ do {									\
 	if (X##_e >= rsize - (rsigned > 0 || X##_s)				\
 	    || (!rsigned && X##_s))						\
 	  {	/* overflow */							\
+	    fallthrough;							\
 	  case FP_CLS_NAN:                                                      \
 	  case FP_CLS_INF:							\
 	    if (!rsigned)							\
 	      {									\
 		r = 0;								\
-		if (X##_s)							\
+		if (!X##_s)							\
 		  r = ~r;							\
 	      }									\
 	    else if (rsigned != 2)						\
@@ -790,11 +822,12 @@ do {									\
 	  ur_ = (unsigned rtype) -r;					\
 	else								\
 	  ur_ = (unsigned rtype) r;					\
-	if (rsize <= _FP_W_TYPE_SIZE)					\
-	  __FP_CLZ(X##_e, ur_);						\
-	else								\
-	  __FP_CLZ_2(X##_e, (_FP_W_TYPE)(ur_ >> _FP_W_TYPE_SIZE), 	\
-		     (_FP_W_TYPE)ur_);					\
+	(void) (((rsize) <= _FP_W_TYPE_SIZE)				\
+		? ({ __FP_CLZ(X##_e, ur_); })				\
+		: ({							\
+		     __FP_CLZ_2(X##_e, (_FP_W_TYPE)(ur_ >> _FP_W_TYPE_SIZE),  \
+							    (_FP_W_TYPE)ur_); \
+		  }));							\
 	if (rsize < _FP_W_TYPE_SIZE)					\
 		X##_e -= (_FP_W_TYPE_SIZE - rsize);			\
 	X##_e = rsize - X##_e - 1;					\

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Reset a DECstation machine.
  *
@@ -8,6 +9,8 @@
 #include <linux/linkage.h>
 
 #include <asm/addrspace.h>
+
+#include <asm/dec/reset.h>
 
 typedef void __noreturn (* noret_func_t)(void);
 

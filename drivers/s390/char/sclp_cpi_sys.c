@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *    SCLP control program identification sysfs interface
  *
@@ -6,8 +7,7 @@
  *		 Michael Ernst <mernst@de.ibm.com>
  */
 
-#define KMSG_COMPONENT "sclp_cpi"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "sclp_cpi: " fmt
 
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -81,7 +81,7 @@ static struct sclp_req *cpi_prepare_req(void)
 	struct cpi_sccb *sccb;
 	struct cpi_evbuf *evb;
 
-	req = kzalloc(sizeof(struct sclp_req), GFP_KERNEL);
+	req = kzalloc_obj(struct sclp_req);
 	if (!req)
 		return ERR_PTR(-ENOMEM);
 	sccb = (struct cpi_sccb *) get_zeroed_page(GFP_KERNEL | GFP_DMA);
@@ -93,7 +93,7 @@ static struct sclp_req *cpi_prepare_req(void)
 	/* setup SCCB for Control-Program Identification */
 	sccb->header.length = sizeof(struct cpi_sccb);
 	sccb->cpi_evbuf.header.length = sizeof(struct cpi_evbuf);
-	sccb->cpi_evbuf.header.type = 0x0b;
+	sccb->cpi_evbuf.header.type = EVTYP_CTLPROGIDENT;
 	evb = &sccb->cpi_evbuf;
 
 	/* set system type */
@@ -154,16 +154,14 @@ static int cpi_req(void)
 	wait_for_completion(&completion);
 
 	if (req->status != SCLP_REQ_DONE) {
-		pr_warning("request failed (status=0x%02x)\n",
-			   req->status);
+		pr_warn("request failed (status=0x%02x)\n", req->status);
 		rc = -EIO;
 		goto out_free_req;
 	}
 
 	response = ((struct cpi_sccb *) req->sccb)->header.response_code;
 	if (response != 0x0020) {
-		pr_warning("request failed with response code 0x%x\n",
-			   response);
+		pr_warn("request failed with response code 0x%x\n", response);
 		rc = -EIO;
 	}
 
@@ -224,7 +222,7 @@ static ssize_t system_name_show(struct kobject *kobj,
 	int rc;
 
 	mutex_lock(&sclp_cpi_mutex);
-	rc = snprintf(page, PAGE_SIZE, "%s\n", system_name);
+	rc = sysfs_emit(page, "%s\n", system_name);
 	mutex_unlock(&sclp_cpi_mutex);
 	return rc;
 }
@@ -256,7 +254,7 @@ static ssize_t sysplex_name_show(struct kobject *kobj,
 	int rc;
 
 	mutex_lock(&sclp_cpi_mutex);
-	rc = snprintf(page, PAGE_SIZE, "%s\n", sysplex_name);
+	rc = sysfs_emit(page, "%s\n", sysplex_name);
 	mutex_unlock(&sclp_cpi_mutex);
 	return rc;
 }
@@ -288,7 +286,7 @@ static ssize_t system_type_show(struct kobject *kobj,
 	int rc;
 
 	mutex_lock(&sclp_cpi_mutex);
-	rc = snprintf(page, PAGE_SIZE, "%s\n", system_type);
+	rc = sysfs_emit(page, "%s\n", system_type);
 	mutex_unlock(&sclp_cpi_mutex);
 	return rc;
 }
@@ -322,7 +320,7 @@ static ssize_t system_level_show(struct kobject *kobj,
 	mutex_lock(&sclp_cpi_mutex);
 	level = system_level;
 	mutex_unlock(&sclp_cpi_mutex);
-	return snprintf(page, PAGE_SIZE, "%#018llx\n", level);
+	return sysfs_emit(page, "%#018llx\n", level);
 }
 
 static ssize_t system_level_store(struct kobject *kobj,

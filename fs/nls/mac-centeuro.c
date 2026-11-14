@@ -513,7 +513,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_maccenteuro(void)
@@ -529,4 +528,5 @@ static void __exit exit_nls_maccenteuro(void)
 module_init(init_nls_maccenteuro)
 module_exit(exit_nls_maccenteuro)
 
+MODULE_DESCRIPTION("NLS Codepage maccenteuro");
 MODULE_LICENSE("Dual BSD/GPL");

@@ -1,19 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Performance event support - Freescale embedded specific definitions.
  *
  * Copyright 2008-2009 Paul Mackerras, IBM Corporation.
  * Copyright 2010 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/types.h>
 #include <asm/hw_irq.h>
 
-#define MAX_HWEVENTS 4
+#define MAX_HWEVENTS 6
 
 /* event flags */
 #define FSL_EMB_EVENT_VALID      1

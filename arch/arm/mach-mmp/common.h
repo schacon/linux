@@ -1,10 +1,7 @@
-#define ARRAY_AND_SIZE(x)	(x), ARRAY_SIZE(x)
+/* SPDX-License-Identifier: GPL-2.0 */
+#include <linux/reboot.h>
 
-extern void timer_init(int irq);
+extern void mmp_timer_init(int irq, unsigned long rate);
 
-extern void __init icu_init_irq(void);
 extern void __init mmp_map_io(void);
-extern void mmp_restart(char, const char *);
-extern void __init pxa168_clk_init(void);
-extern void __init pxa910_clk_init(void);
-extern void __init mmp2_clk_init(void);
+extern void __init mmp2_map_io(void);

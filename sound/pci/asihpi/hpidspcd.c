@@ -1,27 +1,13 @@
-/***********************************************************************/
-/**
+// SPDX-License-Identifier: GPL-2.0-only
+/***********************************************************************
 
     AudioScience HPI driver
-    Copyright (C) 1997-2011  AudioScience Inc. <support@audioscience.com>
+    Functions for reading DSP code using hotplug firmware loader
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of version 2 of the GNU General Public License as
-    published by the Free Software Foundation;
+    Copyright (C) 1997-2014  AudioScience Inc. <support@audioscience.com>
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
 
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-
-\file
-Functions for reading DSP code using
-hotplug firmware loader from individual dsp code files
-*/
-/***********************************************************************/
+***********************************************************************/
 #define SOURCEFILE_NAME "hpidspcd.c"
 #include "hpidspcd.h"
 #include "hpidebug.h"
@@ -37,7 +23,7 @@ struct dsp_code_private {
 short hpi_dsp_code_open(u32 adapter, void *os_data, struct dsp_code *dsp_code,
 	u32 *os_error_code)
 {
-	const struct firmware *firmware;
+	const struct firmware *firmware __free(firmware) = NULL;
 	struct pci_dev *dev = os_data;
 	struct code_header header;
 	char fw_name[20];
@@ -51,11 +37,11 @@ short hpi_dsp_code_open(u32 adapter, void *os_data, struct dsp_code *dsp_code,
 	if (err || !firmware) {
 		dev_err(&dev->dev, "%d, request_firmware failed for %s\n",
 			err, fw_name);
-		goto error1;
+		goto error;
 	}
 	if (firmware->size < sizeof(header)) {
 		dev_err(&dev->dev, "Header size too small %s\n", fw_name);
-		goto error2;
+		goto error;
 	}
 	memcpy(&header, firmware->data, sizeof(header));
 
@@ -65,39 +51,38 @@ short hpi_dsp_code_open(u32 adapter, void *os_data, struct dsp_code *dsp_code,
 		dev_err(&dev->dev,
 			"Invalid firmware header size %d != file %zd\n",
 			header.size, firmware->size);
-		goto error2;
+		goto error;
 	}
 
-	if ((header.version >> 9) != (HPI_VER >> 9)) {
-		/* Consider even and subsequent odd minor versions to be compatible */
-		dev_err(&dev->dev, "Incompatible firmware version DSP image %X != Driver %X\n",
+	if (HPI_VER_MAJOR(header.version) != HPI_VER_MAJOR(HPI_VER)) {
+		/* Major version change probably means Host-DSP protocol change */
+		dev_err(&dev->dev,
+			"Incompatible firmware version DSP image %X != Driver %X\n",
 			header.version, HPI_VER);
-		goto error2;
+		goto error;
 	}
 
 	if (header.version != HPI_VER) {
-		dev_info(&dev->dev,
-			 "Firmware: release version mismatch  DSP image %X != Driver %X\n",
-			 header.version, HPI_VER);
+		dev_warn(&dev->dev,
+			"Firmware version mismatch: DSP image %X != Driver %X\n",
+			header.version, HPI_VER);
 	}
 
 	HPI_DEBUG_LOG(DEBUG, "dsp code %s opened\n", fw_name);
-	dsp_code->pvt = kmalloc(sizeof(*dsp_code->pvt), GFP_KERNEL);
+	dsp_code->pvt = kmalloc_obj(*dsp_code->pvt);
 	if (!dsp_code->pvt) {
 		err_ret = HPI_ERROR_MEMORY_ALLOC;
-		goto error2;
+		goto error;
 	}
 
 	dsp_code->pvt->dev = dev;
-	dsp_code->pvt->firmware = firmware;
+	dsp_code->pvt->firmware = no_free_ptr(firmware);
 	dsp_code->header = header;
 	dsp_code->block_length = header.size / sizeof(u32);
 	dsp_code->word_count = sizeof(header) / sizeof(u32);
 	return 0;
 
-error2:
-	release_firmware(firmware);
-error1:
+error:
 	dsp_code->block_length = 0;
 	return err_ret;
 }

@@ -11,6 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/io.h>
 #include <asm/cache.h>
+#include <asm/cacheflush.h>
 
 #define CCR_CACHE_SNM	0x40000		/* Hardware-assisted synonym avoidance */
 #define CCR_CACHE_IBE	0x1000000	/* ICBI broadcast */
@@ -19,7 +20,7 @@ void __init shx3_cache_init(void)
 {
 	unsigned int ccr;
 
-	ccr = __raw_readl(CCR);
+	ccr = __raw_readl(SH_CCR);
 
 	/*
 	 * If we've got cache aliases, resolve them in hardware.
@@ -40,5 +41,5 @@ void __init shx3_cache_init(void)
 	ccr |= CCR_CACHE_IBE;
 #endif
 
-	writel_uncached(ccr, CCR);
+	writel_uncached(ccr, SH_CCR);
 }

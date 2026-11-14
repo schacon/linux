@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * psr.h: This file holds the macros for masking off various parts of
  *        the processor status register on the Sparc. This is valid
@@ -13,7 +14,7 @@
 #include <uapi/asm/psr.h>
 
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 /* Get the %psr register. */
 static inline unsigned int get_psr(void)
 {
@@ -62,6 +63,6 @@ static inline unsigned int get_fsr(void)
 	return fsr;
 }
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* !(__ASSEMBLER__) */
 
 #endif /* !(__LINUX_SPARC_PSR_H) */

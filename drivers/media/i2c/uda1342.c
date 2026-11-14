@@ -1,18 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2005-2006 Micronas USA Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License (Version 2) as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
  */
 
 #include <linux/module.h>
@@ -20,7 +8,7 @@
 #include <linux/i2c.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-device.h>
-#include <media/uda1342.h>
+#include <media/i2c/uda1342.h>
 #include <linux/slab.h>
 
 static int write_reg(struct i2c_client *client, int reg, int value)
@@ -57,8 +45,7 @@ static const struct v4l2_subdev_ops uda1342_ops = {
 	.audio = &uda1342_audio_ops,
 };
 
-static int uda1342_probe(struct i2c_client *client,
-			     const struct i2c_device_id *id)
+static int uda1342_probe(struct i2c_client *client)
 {
 	struct i2c_adapter *adapter = client->adapter;
 	struct v4l2_subdev *sd;
@@ -69,7 +56,7 @@ static int uda1342_probe(struct i2c_client *client,
 	dev_dbg(&client->dev, "initializing UDA1342 at address %d on %s\n",
 		client->addr, adapter->name);
 
-	sd = kzalloc(sizeof(struct v4l2_subdev), GFP_KERNEL);
+	sd = devm_kzalloc_obj(&client->dev, *sd);
 	if (sd == NULL)
 		return -ENOMEM;
 
@@ -84,17 +71,15 @@ static int uda1342_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int uda1342_remove(struct i2c_client *client)
+static void uda1342_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_device_unregister_subdev(sd);
-	kfree(sd);
-	return 0;
 }
 
 static const struct i2c_device_id uda1342_id[] = {
-	{ "uda1342", 0 },
+	{ .name = "uda1342" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, uda1342_id);
@@ -110,4 +95,5 @@ static struct i2c_driver uda1342_driver = {
 
 module_i2c_driver(uda1342_driver);
 
+MODULE_DESCRIPTION("Philips UDA1342 audio codec driver");
 MODULE_LICENSE("GPL v2");

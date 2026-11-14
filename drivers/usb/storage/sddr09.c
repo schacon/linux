@@ -1,4 +1,6 @@
-/* Driver for SanDisk SDDR-09 SmartMedia reader
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Driver for SanDisk SDDR-09 SmartMedia reader
  *
  *   (c) 2000, 2001 Robert Baruch (autophile@starband.net)
  *   (c) 2002 Andries Brouwer (aeb@cwi.nl)
@@ -10,20 +12,6 @@
  * been programmed to obey a certain limited set of SCSI commands.
  * This driver translates the "real" SCSI commands to the SDDR-09 SCSI
  * commands.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 /*
@@ -52,10 +40,14 @@
 #include "transport.h"
 #include "protocol.h"
 #include "debug.h"
+#include "scsiglue.h"
+
+#define DRV_NAME "ums-sddr09"
 
 MODULE_DESCRIPTION("Driver for SanDisk SDDR-09 SmartMedia reader");
 MODULE_AUTHOR("Andries Brouwer <aeb@cwi.nl>, Robert Baruch <autophile@starband.net>");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("USB_STORAGE");
 
 static int usb_stor_sddr09_dpcm_init(struct us_data *us);
 static int sddr09_transport(struct scsi_cmnd *srb, struct us_data *us);
@@ -71,7 +63,7 @@ static int usb_stor_sddr09_init(struct us_data *us);
 { USB_DEVICE_VER(id_vendor, id_product, bcdDeviceMin, bcdDeviceMax), \
   .driver_info = (flags) }
 
-static struct usb_device_id sddr09_usb_ids[] = {
+static const struct usb_device_id sddr09_usb_ids[] = {
 #	include "unusual_sddr09.h"
 	{ }		/* Terminating entry */
 };
@@ -93,7 +85,7 @@ MODULE_DEVICE_TABLE(usb, sddr09_usb_ids);
 	.initFunction = init_function,	\
 }
 
-static struct us_unusual_dev sddr09_unusual_dev_list[] = {
+static const struct us_unusual_dev sddr09_unusual_dev_list[] = {
 #	include "unusual_sddr09.h"
 	{ }		/* Terminating entry */
 };
@@ -152,7 +144,7 @@ static inline char *nand_flash_manufacturer(int manuf_id) {
  * 256 MB NAND flash has a 5-byte ID with 2nd byte 0xaa, 0xba, 0xca or 0xda.
  */
 
-static struct nand_flash_dev nand_flash_ids[] = {
+static const struct nand_flash_dev nand_flash_ids[] = {
 	/* NAND flash */
 	{ 0x6e, 20, 8, 4, 8, 2},	/* 1 MB */
 	{ 0xe8, 20, 8, 4, 8, 2},	/* 1 MB */
@@ -177,7 +169,7 @@ static struct nand_flash_dev nand_flash_ids[] = {
 	{ 0,}
 };
 
-static struct nand_flash_dev *
+static const struct nand_flash_dev *
 nand_find_id(unsigned char id) {
 	int i;
 
@@ -219,11 +211,7 @@ static void nand_init_ecc(void) {
 /* compute 3-byte ecc on 256 bytes */
 static void nand_compute_ecc(unsigned char *data, unsigned char *ecc) {
 	int i, j, a;
-	unsigned char par, bit, bits[8];
-
-	par = 0;
-	for (j = 0; j < 8; j++)
-		bits[j] = 0;
+	unsigned char par = 0, bit, bits[8] = {0};
 
 	/* collect 16 checksum bits */
 	for (i = 0; i < 256; i++) {
@@ -764,12 +752,10 @@ sddr09_read_data(struct us_data *us,
 	// a bounce buffer and move the data a piece at a time between the
 	// bounce buffer and the actual transfer buffer.
 
-	len = min(sectors, (unsigned int) info->blocksize) * info->pagesize;
+	len = min_t(unsigned int, sectors, info->blocksize) * info->pagesize;
 	buffer = kmalloc(len, GFP_NOIO);
-	if (buffer == NULL) {
-		printk(KERN_WARNING "sddr09_read_data: Out of memory\n");
+	if (!buffer)
 		return -ENOMEM;
-	}
 
 	// This could be made much more efficient by checking for
 	// contiguous LBA's. Another exercise left to the student.
@@ -800,10 +786,12 @@ sddr09_read_data(struct us_data *us,
 			usb_stor_dbg(us, "Read %d zero pages (LBA %d) page %d\n",
 				     pages, lba, page);
 
-			/* This is not really an error. It just means
-			   that the block has never been written.
-			   Instead of returning an error
-			   it is better to return all zero data. */
+			/*
+			 * This is not really an error. It just means
+			 * that the block has never been written.
+			 * Instead of returning an error
+			 * it is better to return all zero data.
+			 */
 
 			memset(buffer, 0, len);
 
@@ -870,13 +858,12 @@ sddr09_write_lba(struct us_data *us, unsigned int lba,
 	unsigned int pagelen;
 	unsigned char *bptr, *cptr, *xptr;
 	unsigned char ecc[3];
-	int i, result, isnew;
+	int i, result;
 
 	lbap = ((lba % 1000) << 1) | 0x1000;
 	if (parity[MSB_of(lbap) ^ LSB_of(lbap)])
 		lbap ^= 1;
 	pba = info->lba_to_pba[lba];
-	isnew = 0;
 
 	if (pba == UNDEF) {
 		pba = sddr09_find_unused_pba(info, lba);
@@ -887,12 +874,13 @@ sddr09_write_lba(struct us_data *us, unsigned int lba,
 		}
 		info->pba_to_lba[pba] = lba;
 		info->lba_to_pba[lba] = pba;
-		isnew = 1;
 	}
 
 	if (pba == 1) {
-		/* Maybe it is impossible to write to PBA 1.
-		   Fake success, but don't do anything. */
+		/*
+		 * Maybe it is impossible to write to PBA 1.
+		 * Fake success, but don't do anything.
+		 */
 		printk(KERN_WARNING "sddr09: avoid writing to pba 1\n");
 		return 0;
 	}
@@ -980,35 +968,38 @@ sddr09_write_data(struct us_data *us,
 	struct scatterlist *sg;
 	int result;
 
-	// Figure out the initial LBA and page
+	/* Figure out the initial LBA and page */
 	lba = address >> info->blockshift;
 	page = (address & info->blockmask);
 	maxlba = info->capacity >> (info->pageshift + info->blockshift);
 	if (lba >= maxlba)
 		return -EIO;
 
-	// blockbuffer is used for reading in the old data, overwriting
-	// with the new data, and performing ECC calculations
+	/*
+	 * blockbuffer is used for reading in the old data, overwriting
+	 * with the new data, and performing ECC calculations
+	 */
 
-	/* TODO: instead of doing kmalloc/kfree for each write,
-	   add a bufferpointer to the info structure */
+	/*
+	 * TODO: instead of doing kmalloc/kfree for each write,
+	 * add a bufferpointer to the info structure
+	 */
 
 	pagelen = (1 << info->pageshift) + (1 << CONTROL_SHIFT);
 	blocklen = (pagelen << info->blockshift);
 	blockbuffer = kmalloc(blocklen, GFP_NOIO);
-	if (!blockbuffer) {
-		printk(KERN_WARNING "sddr09_write_data: Out of memory\n");
+	if (!blockbuffer)
 		return -ENOMEM;
-	}
 
-	// Since we don't write the user data directly to the device,
-	// we have to create a bounce buffer and move the data a piece
-	// at a time between the bounce buffer and the actual transfer buffer.
+	/*
+	 * Since we don't write the user data directly to the device,
+	 * we have to create a bounce buffer and move the data a piece
+	 * at a time between the bounce buffer and the actual transfer buffer.
+	 */
 
-	len = min(sectors, (unsigned int) info->blocksize) * info->pagesize;
+	len = min_t(unsigned int, sectors, info->blocksize) * info->pagesize;
 	buffer = kmalloc(len, GFP_NOIO);
-	if (buffer == NULL) {
-		printk(KERN_WARNING "sddr09_write_data: Out of memory\n");
+	if (!buffer) {
 		kfree(blockbuffer);
 		return -ENOMEM;
 	}
@@ -1019,7 +1010,7 @@ sddr09_write_data(struct us_data *us,
 
 	while (sectors > 0) {
 
-		// Write as many sectors as possible in this block
+		/* Write as many sectors as possible in this block */
 
 		pages = min(sectors, info->blocksize - page);
 		len = (pages << info->pageshift);
@@ -1032,7 +1023,7 @@ sddr09_write_data(struct us_data *us,
 			break;
 		}
 
-		// Get the data from the transfer buffer
+		/* Get the data from the transfer buffer */
 		usb_stor_access_xfer_buf(buffer, len, us->srb,
 				&sg, &offset, FROM_XFER_BUF);
 
@@ -1103,24 +1094,24 @@ static int
 sddr09_get_wp(struct us_data *us, struct sddr09_card_info *info) {
 	int result;
 	unsigned char status;
+	const char *wp_fmt;
 
 	result = sddr09_read_status(us, &status);
 	if (result) {
 		usb_stor_dbg(us, "read_status fails\n");
 		return result;
 	}
-	usb_stor_dbg(us, "status 0x%02X", status);
 	if ((status & 0x80) == 0) {
 		info->flags |= SDDR09_WP;	/* write protected */
-		US_DEBUGPX(" WP");
+		wp_fmt = " WP";
+	} else {
+		wp_fmt = "";
 	}
-	if (status & 0x40)
-		US_DEBUGPX(" Ready");
-	if (status & LUNBITS)
-		US_DEBUGPX(" Suspended");
-	if (status & 0x1)
-		US_DEBUGPX(" Error");
-	US_DEBUGPX("\n");
+	usb_stor_dbg(us, "status 0x%02X%s%s%s%s\n", status, wp_fmt,
+		     status & 0x40 ? " Ready" : "",
+		     status & LUNBITS ? " Suspended" : "",
+		     status & 0x01 ? " Error" : "");
+
 	return 0;
 }
 
@@ -1142,9 +1133,9 @@ sddr09_reset(struct us_data *us) {
 }
 #endif
 
-static struct nand_flash_dev *
+static const struct nand_flash_dev *
 sddr09_get_cardinfo(struct us_data *us, unsigned char flags) {
-	struct nand_flash_dev *cardinfo;
+	const struct nand_flash_dev *cardinfo;
 	unsigned char deviceID[4];
 	char blurbtxt[256];
 	int result;
@@ -1159,8 +1150,7 @@ sddr09_get_cardinfo(struct us_data *us, unsigned char flags) {
 		return NULL;
 	}
 
-	sprintf(blurbtxt, "sddr09: Found Flash card, ID = %02X %02X %02X %02X",
-		deviceID[0], deviceID[1], deviceID[2], deviceID[3]);
+	sprintf(blurbtxt, "sddr09: Found Flash card, ID = %4ph", deviceID);
 
 	/* Byte 0 is the manufacturer */
 	sprintf(blurbtxt + strlen(blurbtxt),
@@ -1170,9 +1160,11 @@ sddr09_get_cardinfo(struct us_data *us, unsigned char flags) {
 	/* Byte 1 is the device type */
 	cardinfo = nand_find_id(deviceID[1]);
 	if (cardinfo) {
-		/* MB or MiB? It is neither. A 16 MB card has
-		   17301504 raw bytes, of which 16384000 are
-		   usable for user data. */
+		/*
+		 * MB or MiB? It is neither. A 16 MB card has
+		 * 17301504 raw bytes, of which 16384000 are
+		 * usable for user data.
+		 */
 		sprintf(blurbtxt + strlen(blurbtxt),
 			", %d MB", 1<<(cardinfo->chipshift - 20));
 	} else {
@@ -1213,21 +1205,24 @@ sddr09_read_map(struct us_data *us) {
 	if (!info->capacity)
 		return -1;
 
-	// size of a block is 1 << (blockshift + pageshift) bytes
-	// divide into the total capacity to get the number of blocks
+	/*
+	 * size of a block is 1 << (blockshift + pageshift) bytes
+	 * divide into the total capacity to get the number of blocks
+	 */
 
 	numblocks = info->capacity >> (info->blockshift + info->pageshift);
 
-	// read 64 bytes for every block (actually 1 << CONTROL_SHIFT)
-	// but only use a 64 KB buffer
-	// buffer size used must be a multiple of (1 << CONTROL_SHIFT)
+	/*
+	 * read 64 bytes for every block (actually 1 << CONTROL_SHIFT)
+	 * but only use a 64 KB buffer
+	 * buffer size used must be a multiple of (1 << CONTROL_SHIFT)
+	 */
 #define SDDR09_READ_MAP_BUFSZ 65536
 
 	alloc_blocks = min(numblocks, SDDR09_READ_MAP_BUFSZ >> CONTROL_SHIFT);
 	alloc_len = (alloc_blocks << CONTROL_SHIFT);
 	buffer = kmalloc(alloc_len, GFP_NOIO);
-	if (buffer == NULL) {
-		printk(KERN_WARNING "sddr09_read_map: out of memory\n");
+	if (!buffer) {
 		result = -1;
 		goto done;
 	}
@@ -1237,8 +1232,8 @@ sddr09_read_map(struct us_data *us) {
 
 	kfree(info->lba_to_pba);
 	kfree(info->pba_to_lba);
-	info->lba_to_pba = kmalloc(numblocks*sizeof(int), GFP_NOIO);
-	info->pba_to_lba = kmalloc(numblocks*sizeof(int), GFP_NOIO);
+	info->lba_to_pba = kmalloc_objs(int, numblocks, GFP_NOIO);
+	info->pba_to_lba = kmalloc_objs(int, numblocks, GFP_NOIO);
 
 	if (info->lba_to_pba == NULL || info->pba_to_lba == NULL) {
 		printk(KERN_WARNING "sddr09_read_map: out of memory\n");
@@ -1344,6 +1339,15 @@ sddr09_read_map(struct us_data *us) {
 
 		lba += 1000*(i/0x400);
 
+		/* The LBA comes from the card and may exceed the table size */
+		if (lba >= numblocks) {
+			dev_warn_ratelimited(&us->pusb_dev->dev,
+					"sddr09: Bad LBA %d for block %d exceeds the translation table size %d\n",
+					lba, i, numblocks);
+			info->pba_to_lba[i] = UNUSABLE;
+			continue;
+		}
+
 		if (info->lba_to_pba[lba] != UNDEF) {
 			printk(KERN_WARNING
 			       "sddr09: LBA %d seen for PBA %d and %d\n",
@@ -1433,7 +1437,7 @@ sddr09_common_init(struct us_data *us) {
 		return -EINVAL;
 	}
 
-	us->extra = kzalloc(sizeof(struct sddr09_card_info), GFP_NOIO);
+	us->extra = kzalloc_obj(struct sddr09_card_info, GFP_NOIO);
 	if (!us->extra)
 		return -ENOMEM;
 	us->extra_destructor = sddr09_card_info_destructor;
@@ -1502,7 +1506,7 @@ static int dpcm_transport(struct scsi_cmnd *srb, struct us_data *us)
 {
 	int ret;
 
-	usb_stor_dbg(us, "LUN=%d\n", srb->device->lun);
+	usb_stor_dbg(us, "LUN=%d\n", (u8)srb->device->lun);
 
 	switch (srb->device->lun) {
 	case 0:
@@ -1528,7 +1532,7 @@ static int dpcm_transport(struct scsi_cmnd *srb, struct us_data *us)
 		break;
 
 	default:
-		usb_stor_dbg(us, "Invalid LUN %d\n", srb->device->lun);
+	    usb_stor_dbg(us, "Invalid LUN %d\n", (u8)srb->device->lun);
 		ret = USB_STOR_TRANSPORT_ERROR;
 		break;
 	}
@@ -1550,12 +1554,12 @@ static int sddr09_transport(struct scsi_cmnd *srb, struct us_data *us)
 
 	struct sddr09_card_info *info;
 
-	static unsigned char inquiry_response[8] = {
+	static const unsigned char inquiry_response[8] = {
 		0x00, 0x80, 0x00, 0x02, 0x1F, 0x00, 0x00, 0x00
 	};
 
 	/* note: no block descriptor support */
-	static unsigned char mode_page_01[19] = {
+	static const unsigned char mode_page_01[19] = {
 		0x00, 0x0F, 0x00, 0x0, 0x0, 0x0, 0x00,
 		0x01, 0x0A,
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -1577,8 +1581,10 @@ static int sddr09_transport(struct scsi_cmnd *srb, struct us_data *us)
 
 	havefakesense = 1;
 
-	/* Dummy up a response for INQUIRY since SDDR09 doesn't
-	   respond to INQUIRY commands */
+	/*
+	 * Dummy up a response for INQUIRY since SDDR09 doesn't
+	 * respond to INQUIRY commands
+	 */
 
 	if (srb->cmnd[0] == INQUIRY) {
 		memcpy(ptr, inquiry_response, 8);
@@ -1587,7 +1593,7 @@ static int sddr09_transport(struct scsi_cmnd *srb, struct us_data *us)
 	}
 
 	if (srb->cmnd[0] == READ_CAPACITY) {
-		struct nand_flash_dev *cardinfo;
+		const struct nand_flash_dev *cardinfo;
 
 		sddr09_get_wp(us, info);	/* read WP bit */
 
@@ -1630,8 +1636,10 @@ static int sddr09_transport(struct scsi_cmnd *srb, struct us_data *us)
 	if (srb->cmnd[0] == MODE_SENSE_10) {
 		int modepage = (srb->cmnd[2] & 0x3F);
 
-		/* They ask for the Read/Write error recovery page,
-		   or for all pages. */
+		/*
+		 * They ask for the Read/Write error recovery page,
+		 * or for all pages.
+		 */
 		/* %% We should check DBD %% */
 		if (modepage == 0x01 || modepage == 0x3F) {
 			usb_stor_dbg(us, "Dummy up request for mode page 0x%x\n",
@@ -1684,7 +1692,8 @@ static int sddr09_transport(struct scsi_cmnd *srb, struct us_data *us)
 				USB_STOR_TRANSPORT_ERROR);
 	}
 
-	/* catch-all for all other commands, except
+	/*
+	 * catch-all for all other commands, except
 	 * pass TEST_UNIT_READY and REQUEST_SENSE through
 	 */
 	if (srb->cmnd[0] != TEST_UNIT_READY &&
@@ -1743,6 +1752,8 @@ usb_stor_sddr09_init(struct us_data *us) {
 	return sddr09_common_init(us);
 }
 
+static struct scsi_host_template sddr09_host_template;
+
 static int sddr09_probe(struct usb_interface *intf,
 			 const struct usb_device_id *id)
 {
@@ -1750,7 +1761,8 @@ static int sddr09_probe(struct usb_interface *intf,
 	int result;
 
 	result = usb_stor_probe1(&us, intf, id,
-			(id - sddr09_usb_ids) + sddr09_unusual_dev_list);
+			(id - sddr09_usb_ids) + sddr09_unusual_dev_list,
+			&sddr09_host_template);
 	if (result)
 		return result;
 
@@ -1771,7 +1783,7 @@ static int sddr09_probe(struct usb_interface *intf,
 }
 
 static struct usb_driver sddr09_driver = {
-	.name =		"ums-sddr09",
+	.name =		DRV_NAME,
 	.probe =	sddr09_probe,
 	.disconnect =	usb_stor_disconnect,
 	.suspend =	usb_stor_suspend,
@@ -1784,4 +1796,4 @@ static struct usb_driver sddr09_driver = {
 	.no_dynamic_id = 1,
 };
 
-module_usb_driver(sddr09_driver);
+module_usb_stor_driver(sddr09_driver, sddr09_host_template, DRV_NAME);

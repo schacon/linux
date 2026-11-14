@@ -1,29 +1,32 @@
+// SPDX-License-Identifier: GPL-2.0
 /* calibrate.c: default delay calibration
  *
  * Excised from init/main.c
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <linux/jiffies.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-#include <linux/timex.h>
-#include <linux/smp.h>
+#include <linux/jiffies.h>
+#include <linux/kstrtox.h>
 #include <linux/percpu.h>
+#include <linux/printk.h>
+#include <linux/smp.h>
+#include <linux/stddef.h>
 
 unsigned long lpj_fine;
 unsigned long preset_lpj;
+
 static int __init lpj_setup(char *str)
 {
-	preset_lpj = simple_strtoul(str,NULL,0);
-	return 1;
+	return kstrtoul(str, 0, &preset_lpj) == 0;
 }
 
 __setup("lpj=", lpj_setup);
 
-#ifdef ARCH_HAS_READ_CURRENT_TIMER
+#ifdef CONFIG_ARCH_HAS_DELAY_TIMER
 
-/* This routine uses the read_current_timer() routine and gets the
+/* This routine uses the delay_read_timer() routine and gets the
  * loops per jiffy directly, instead of guessing it using delay().
  * Also, this code tries to handle non-maskable asynchronous events
  * (like SMIs)
@@ -31,7 +34,7 @@ __setup("lpj=", lpj_setup);
 #define DELAY_CALIBRATION_TICKS			((HZ < 100) ? 1 : (HZ/100))
 #define MAX_DIRECT_CALIBRATION_RETRIES		5
 
-static unsigned long __cpuinit calibrate_delay_direct(void)
+static unsigned long calibrate_delay_direct(void)
 {
 	unsigned long pre_start, start, post_start;
 	unsigned long pre_end, end, post_end;
@@ -44,13 +47,13 @@ static unsigned long __cpuinit calibrate_delay_direct(void)
 	int min = -1;
 	int i;
 
-	if (read_current_timer(&pre_start) < 0 )
+	if (!delay_read_timer(&pre_start))
 		return 0;
 
 	/*
 	 * A simple loop like
 	 *	while ( jiffies < start_jiffies+1)
-	 *		start = read_current_timer();
+	 *		start = delay_read_timer();
 	 * will not do. As we don't really know whether jiffy switch
 	 * happened first or timer_value was read first. And some asynchronous
 	 * event can happen between these two events introducing errors in lpj.
@@ -68,22 +71,22 @@ static unsigned long __cpuinit calibrate_delay_direct(void)
 
 	for (i = 0; i < MAX_DIRECT_CALIBRATION_RETRIES; i++) {
 		pre_start = 0;
-		read_current_timer(&start);
+		delay_read_timer(&start);
 		start_jiffies = jiffies;
 		while (time_before_eq(jiffies, start_jiffies + 1)) {
 			pre_start = start;
-			read_current_timer(&start);
+			delay_read_timer(&start);
 		}
-		read_current_timer(&post_start);
+		delay_read_timer(&post_start);
 
 		pre_end = 0;
 		end = post_start;
 		while (time_before_eq(jiffies, start_jiffies + 1 +
 					       DELAY_CALIBRATION_TICKS)) {
 			pre_end = end;
-			read_current_timer(&end);
+			delay_read_timer(&end);
 		}
-		read_current_timer(&post_end);
+		delay_read_timer(&post_end);
 
 		timer_rate_max = (post_end - pre_start) /
 					DELAY_CALIBRATION_TICKS;
@@ -166,7 +169,10 @@ static unsigned long __cpuinit calibrate_delay_direct(void)
 	return 0;
 }
 #else
-static unsigned long __cpuinit calibrate_delay_direct(void) {return 0;}
+static unsigned long calibrate_delay_direct(void)
+{
+	return 0;
+}
 #endif
 
 /*
@@ -180,7 +186,7 @@ static unsigned long __cpuinit calibrate_delay_direct(void) {return 0;}
  */
 #define LPS_PREC 8
 
-static unsigned long __cpuinit calibrate_delay_converge(void)
+static unsigned long calibrate_delay_converge(void)
 {
 	/* First stage - slowly accelerate to find initial bounds */
 	unsigned long lpj, lpj_base, ticks, loopadd, loopadd_base, chop_limit;
@@ -254,12 +260,21 @@ static DEFINE_PER_CPU(unsigned long, cpu_loops_per_jiffy) = { 0 };
  * Architectures should override this function if a faster calibration
  * method is available.
  */
-unsigned long __attribute__((weak)) __cpuinit calibrate_delay_is_known(void)
+unsigned long __attribute__((weak)) calibrate_delay_is_known(void)
 {
 	return 0;
 }
 
-void __cpuinit calibrate_delay(void)
+/*
+ * Indicate the cpu delay calibration is done. This can be used by
+ * architectures to stop accepting delay timer registrations after this point.
+ */
+
+void __attribute__((weak)) calibration_delay_done(void)
+{
+}
+
+void calibrate_delay(void)
 {
 	unsigned long lpj;
 	static bool printed;
@@ -298,4 +313,6 @@ void __cpuinit calibrate_delay(void)
 
 	loops_per_jiffy = lpj;
 	printed = true;
+
+	calibration_delay_done();
 }

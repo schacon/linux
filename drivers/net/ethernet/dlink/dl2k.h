@@ -1,13 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*  D-Link DL2000-based Gigabit Ethernet Adapter Linux driver */
 /*
     Copyright (c) 2001, 2002 by D-Link Corporation
     Written by Edward Peng.<edward_peng@dlink.com.tw>
     Created 03-May-2001, base on Linux' sundance.c.
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
 */
 
 #ifndef __DL2K_H__
@@ -25,14 +22,13 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include <linux/init.h>
 #include <linux/crc32.h>
 #include <linux/ethtool.h>
 #include <linux/mii.h>
 #include <linux/bitops.h>
 #include <asm/processor.h>	/* Processor type for cache alignment. */
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/delay.h>
 #include <linux/spinlock.h>
 #include <linux/time.h>
@@ -212,6 +208,10 @@ enum ASICCtrl_HiWord_bits {
 	ResetBusy = 0x0400,
 };
 
+#define IPG_AC_LED_MODE		BIT(14)
+#define IPG_AC_LED_SPEED	BIT(27)
+#define IPG_AC_LED_MODE_BIT_1	BIT(29)
+
 /* Transmit Frame Control bits */
 enum TFC_bits {
 	DwordAlign = 0x00000000,
@@ -270,7 +270,7 @@ enum _pcs_reg {
 	PCS_ESR = 15,
 };
 
-/* IEEE Extened Status Register */
+/* IEEE Extended Status Register */
 enum _mii_esr {
 	MII_ESR_1000BX_FD = 0x8000,
 	MII_ESR_1000BX_HD = 0x4000,
@@ -329,15 +329,18 @@ enum _pcs_anlpar {
 };
 
 typedef struct t_SROM {
-	u16 config_param;	/* 0x00 */
-	u16 asic_ctrl;		/* 0x02 */
-	u16 sub_vendor_id;	/* 0x04 */
-	u16 sub_system_id;	/* 0x06 */
-	u16 reserved1[12];	/* 0x08-0x1f */
+	__le16 config_param;	/* 0x00 */
+	__le16 asic_ctrl;	/* 0x02 */
+	__le16 sub_vendor_id;	/* 0x04 */
+	__le16 sub_system_id;	/* 0x06 */
+	__le16 pci_base_1;	/* 0x08 (IP1000A only) */
+	__le16 pci_base_2;	/* 0x0a (IP1000A only) */
+	__le16 led_mode;	/* 0x0c (IP1000A only) */
+	__le16 reserved1[9];	/* 0x0e-0x1f */
 	u8 mac_addr[6];		/* 0x20-0x25 */
 	u8 reserved2[10];	/* 0x26-0x2f */
 	u8 sib[204];		/* 0x30-0xfb */
-	u32 crc;		/* 0xfc-0xff */
+	__le32 crc;		/* 0xfc-0xff */
 } SROM_t, *PSROM_t;
 
 /* Ioctl custom data */
@@ -369,9 +372,10 @@ struct netdev_private {
 	struct pci_dev *pdev;
 	void __iomem *ioaddr;
 	void __iomem *eeprom_addr;
+	// To ensure synchronization when stats are updated.
+	spinlock_t stats_lock;
 	spinlock_t tx_lock;
 	spinlock_t rx_lock;
-	struct net_device_stats stats;
 	unsigned int rx_buf_sz;		/* Based on MTU+slack. */
 	unsigned int speed;		/* Operating speed */
 	unsigned int vlan;		/* VLAN Id */
@@ -398,6 +402,9 @@ struct netdev_private {
 	u16 advertising;	/* NWay media advertisement */
 	u16 negotiate;		/* Negotiated media */
 	int phy_addr;		/* PHY addresses. */
+	u16 led_mode;		/* LED mode read from EEPROM (IP1000A only) */
+
+	bool rmon_enable;
 };
 
 /* The station address location in the EEPROM. */
@@ -408,10 +415,15 @@ struct netdev_private {
         class_mask              of the class are honored during the comparison.
         driver_data             Data private to the driver.
 */
+#define CHIP_IP1000A	1
 
-static DEFINE_PCI_DEVICE_TABLE(rio_pci_tbl) = {
-	{0x1186, 0x4000, PCI_ANY_ID, PCI_ANY_ID, },
-	{0x13f0, 0x1021, PCI_ANY_ID, PCI_ANY_ID, },
+static const struct pci_device_id rio_pci_tbl[] = {
+	{ PCI_DEVICE(0x1186, 0x4000) },
+	{ PCI_DEVICE(0x13f0, 0x1021) },
+	{ PCI_VDEVICE(SUNDANCE,	0x1023), .driver_data = CHIP_IP1000A },
+	{ PCI_VDEVICE(SUNDANCE,	0x2021), .driver_data = CHIP_IP1000A },
+	{ PCI_VDEVICE(DLINK,	0x9021), .driver_data = CHIP_IP1000A },
+	{ PCI_VDEVICE(DLINK,	0x4020), .driver_data = CHIP_IP1000A },
 	{ }
 };
 MODULE_DEVICE_TABLE (pci, rio_pci_tbl);

@@ -84,11 +84,6 @@ static inline int pullbit(struct pushpull *pp)
 	return bit;
 }
 
-static inline int pulledbits(struct pushpull *pp)
-{
-	return pp->ofs;
-}
-
 
 static void init_rubin(struct rubin_state *rs, int div, int *bits)
 {
@@ -280,11 +275,6 @@ static int rubin_do_compress(int bit_divider, int *bits, unsigned char *data_in,
 		pos++;
 
 	end_rubin(&rs);
-
-	if (outpos > pos) {
-		/* We failed */
-		return -1;
-	}
 
 	/* Tell the caller how much we managed to compress,
 	 * and how much space it took */

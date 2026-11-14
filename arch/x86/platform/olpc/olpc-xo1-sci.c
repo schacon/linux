@@ -1,25 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Support for OLPC XO-1 System Control Interrupts (SCI)
  *
  * Copyright (C) 2010 One Laptop per Child
  * Copyright (C) 2006 Red Hat, Inc.
  * Copyright (C) 2006 Advanced Micro Devices, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/cs5535.h>
 #include <linux/device.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
-#include <linux/pm_wakeup.h>
-#include <linux/mfd/core.h>
 #include <linux/power_supply.h>
 #include <linux/suspend.h>
 #include <linux/workqueue.h>
@@ -57,21 +51,21 @@ static const char * const lid_wake_mode_names[] = {
 
 static void battery_status_changed(void)
 {
-	struct power_supply *psy = power_supply_get_by_name("olpc-battery");
+	struct power_supply *psy = power_supply_get_by_name("olpc_battery");
 
 	if (psy) {
 		power_supply_changed(psy);
-		put_device(psy->dev);
+		power_supply_put(psy);
 	}
 }
 
 static void ac_status_changed(void)
 {
-	struct power_supply *psy = power_supply_get_by_name("olpc-ac");
+	struct power_supply *psy = power_supply_get_by_name("olpc_ac");
 
 	if (psy) {
 		power_supply_changed(psy);
-		put_device(psy->dev);
+		power_supply_put(psy);
 	}
 }
 
@@ -85,7 +79,7 @@ static void send_ebook_state(void)
 		return;
 	}
 
-	if (!!test_bit(SW_TABLET_MODE, ebook_switch_idev->sw) == state)
+	if (test_bit(SW_TABLET_MODE, ebook_switch_idev->sw) == !!state)
 		return; /* Nothing new to report. */
 
 	input_report_switch(ebook_switch_idev, SW_TABLET_MODE, state);
@@ -109,7 +103,7 @@ static void detect_lid_state(void)
 	 * the edge detector hookup on the gpio inputs on the geode is
 	 * odd, to say the least.  See http://dev.laptop.org/ticket/5703
 	 * for details, but in a nutshell:  we don't use the edge
-	 * detectors.  instead, we make use of an anomoly:  with the both
+	 * detectors.  instead, we make use of an anomaly:  with the both
 	 * edge detectors turned off, we still get an edge event on a
 	 * positive edge transition.  to take advantage of this, we use the
 	 * front-end inverter to ensure that that's the edge we're always
@@ -160,6 +154,12 @@ static ssize_t lid_wake_mode_set(struct device *dev,
 }
 static DEVICE_ATTR(lid_wake_mode, S_IWUSR | S_IRUGO, lid_wake_mode_show,
 		   lid_wake_mode_set);
+
+static struct attribute *lid_attrs[] = {
+	&dev_attr_lid_wake_mode.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(lid);
 
 /*
  * Process all items in the EC's SCI queue.
@@ -311,12 +311,13 @@ static int xo1_sci_resume(struct platform_device *pdev)
 
 static int setup_sci_interrupt(struct platform_device *pdev)
 {
-	u32 lo, hi;
+	u64 msr;
+	u32 lo;
 	u32 sts;
 	int r;
 
-	rdmsr(0x51400020, lo, hi);
-	sci_irq = (lo >> 20) & 15;
+	rdmsrq(0x51400020, msr);
+	sci_irq = (msr >> 20) & 15;
 
 	if (sci_irq) {
 		dev_info(&pdev->dev, "SCI is mapped to IRQ %d\n", sci_irq);
@@ -324,8 +325,8 @@ static int setup_sci_interrupt(struct platform_device *pdev)
 		/* Zero means masked */
 		dev_info(&pdev->dev, "SCI unmapped. Mapping to IRQ 3\n");
 		sci_irq = 3;
-		lo |= 0x00300000;
-		wrmsrl(0x51400020, lo);
+		msr |= 0x00300000;
+		wrmsrq(0x51400020, msr);
 	}
 
 	/* Select level triggered in PIC */
@@ -514,17 +515,8 @@ static int setup_lid_switch(struct platform_device *pdev)
 		goto err_register;
 	}
 
-	r = device_create_file(&lid_switch_idev->dev, &dev_attr_lid_wake_mode);
-	if (r) {
-		dev_err(&pdev->dev, "failed to create wake mode attr: %d\n", r);
-		goto err_create_attr;
-	}
-
 	return 0;
 
-err_create_attr:
-	input_unregister_device(lid_switch_idev);
-	lid_switch_idev = NULL;
 err_register:
 	input_free_device(lid_switch_idev);
 	return r;
@@ -532,7 +524,6 @@ err_register:
 
 static void free_lid_switch(void)
 {
-	device_remove_file(&lid_switch_idev->dev, &dev_attr_lid_wake_mode);
 	input_unregister_device(lid_switch_idev);
 }
 
@@ -544,10 +535,6 @@ static int xo1_sci_probe(struct platform_device *pdev)
 	/* don't run on non-XOs */
 	if (!machine_is_olpc())
 		return -ENODEV;
-
-	r = mfd_cell_enable(pdev);
-	if (r)
-		return r;
 
 	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
 	if (!res) {
@@ -611,9 +598,8 @@ err_ebook:
 	return r;
 }
 
-static int xo1_sci_remove(struct platform_device *pdev)
+static void xo1_sci_remove(struct platform_device *pdev)
 {
-	mfd_cell_disable(pdev);
 	free_irq(sci_irq, pdev);
 	cancel_work_sync(&sci_work);
 	free_ec_sci();
@@ -622,12 +608,12 @@ static int xo1_sci_remove(struct platform_device *pdev)
 	free_ebook_switch();
 	free_power_button();
 	acpi_base = 0;
-	return 0;
 }
 
 static struct platform_driver xo1_sci_driver = {
 	.driver = {
 		.name = "olpc-xo1-sci-acpi",
+		.dev_groups = lid_groups,
 	},
 	.probe = xo1_sci_probe,
 	.remove = xo1_sci_remove,

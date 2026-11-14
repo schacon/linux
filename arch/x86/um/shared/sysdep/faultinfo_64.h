@@ -27,9 +27,18 @@ struct faultinfo {
 /* This is Page Fault */
 #define SEGV_IS_FIXABLE(fi)	((fi)->trap_no == 14)
 
-/* No broken SKAS API, which doesn't pass trap_no, here. */
-#define SEGV_MAYBE_FIXABLE(fi)	0
-
 #define PTRACE_FULL_FAULTINFO 1
+
+#define ___backtrack_faulted(_faulted)					\
+	asm volatile (							\
+		"movq $__get_kernel_nofault_faulted_%=,%1\n"		\
+		"mov $0, %0\n"						\
+		"jmp _end_%=\n"						\
+		"__get_kernel_nofault_faulted_%=:\n"			\
+		"mov $1, %0;"						\
+		"_end_%=:"						\
+		: "=r" (_faulted),					\
+		  "=m" (current->thread.segv_continue) ::		\
+	)
 
 #endif

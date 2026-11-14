@@ -1,16 +1,8 @@
-/* saa711x - Philips SAA711x video decoder register specifications
+/* SPDX-License-Identifier: GPL-2.0+ */
+/*
+ * saa711x - Philips SAA711x video decoder register specifications
  *
- * Copyright (c) 2006 Mauro Carvalho Chehab <mchehab@infradead.org>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Copyright (c) 2006 Mauro Carvalho Chehab <mchehab@kernel.org>
  */
 
 #define R_00_CHIP_VERSION                             0x00
@@ -200,6 +192,25 @@
 #define R_FA_PULSE_C_POS                              0xfa
 #define R_FB_PULSE_C_POS_MSB                          0xfb
 #define R_FF_S_PLL_MAX_PHASE_ERR_THRESH_NUM_LINES     0xff
+
+/* SAA7113 bit-masks */
+#define SAA7113_R_08_HTC_OFFSET 3
+#define SAA7113_R_08_HTC_MASK (0x3 << SAA7113_R_08_HTC_OFFSET)
+#define SAA7113_R_08_FSEL 0x40
+#define SAA7113_R_08_AUFD 0x80
+
+#define SAA7113_R_10_VRLN_OFFSET 3
+#define SAA7113_R_10_VRLN_MASK (0x1 << SAA7113_R_10_VRLN_OFFSET)
+#define SAA7113_R_10_OFTS_OFFSET 6
+#define SAA7113_R_10_OFTS_MASK (0x3 << SAA7113_R_10_OFTS_OFFSET)
+
+#define SAA7113_R_12_RTS0_OFFSET 0
+#define SAA7113_R_12_RTS0_MASK (0xf << SAA7113_R_12_RTS0_OFFSET)
+#define SAA7113_R_12_RTS1_OFFSET 4
+#define SAA7113_R_12_RTS1_MASK (0xf << SAA7113_R_12_RTS1_OFFSET)
+
+#define SAA7113_R_13_ADLSB_OFFSET 7
+#define SAA7113_R_13_ADLSB_MASK (0x1 << SAA7113_R_13_ADLSB_OFFSET)
 
 #if 0
 /* Those structs will be used in the future for debug purposes */

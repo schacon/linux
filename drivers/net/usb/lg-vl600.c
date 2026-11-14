@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Ethernet interface part of the LG VL600 LTE modem (4G dongle)
  *
  * Copyright (C) 2011 Intel Corporation
  * Author: Andrzej Zaborowski <balrogg@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
@@ -44,7 +31,7 @@
  * Windows/Mac drivers do send a couple of such frames to the device
  * during initialisation, with protocol set to 0x0906 or 0x0b06 and (what
  * seems to be) a flag in the .dummy_flags.  This doesn't seem necessary
- * for modem operation but can possibly be used for GPS or other funcitons.
+ * for modem operation but can possibly be used for GPS or other functions.
  */
 
 struct vl600_frame_hdr {
@@ -69,7 +56,7 @@ struct vl600_state {
 static int vl600_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	int ret;
-	struct vl600_state *s = kzalloc(sizeof(struct vl600_state), GFP_KERNEL);
+	struct vl600_state *s = kzalloc_obj(struct vl600_state);
 
 	if (!s)
 		return -ENOMEM;
@@ -85,7 +72,7 @@ static int vl600_bind(struct usbnet *dev, struct usb_interface *intf)
 	/* ARP packets don't go through, but they're also of no use.  The
 	 * subnet has only two hosts anyway: us and the gateway / DHCP
 	 * server (probably simulated by modem firmware or network operator)
-	 * whose address changes everytime we connect to the intarwebz and
+	 * whose address changes every time we connect to the intarwebz and
 	 * who doesn't bother answering ARP requests either.  So hardware
 	 * addresses have no meaning, the destination and the source of every
 	 * packet depend only on whether it is on the IN or OUT endpoint.  */
@@ -100,9 +87,7 @@ static void vl600_unbind(struct usbnet *dev, struct usb_interface *intf)
 {
 	struct vl600_state *s = dev->driver_priv;
 
-	if (s->current_rx_buf)
-		dev_kfree_skb(s->current_rx_buf);
-
+	dev_kfree_skb(s->current_rx_buf);
 	kfree(s);
 
 	return usbnet_cdc_unbind(dev, intf);
@@ -136,7 +121,7 @@ static int vl600_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 		}
 
 		buf = s->current_rx_buf;
-		memcpy(skb_put(buf, skb->len), skb->data, skb->len);
+		skb_put_data(buf, skb->data, skb->len);
 	} else if (skb->len < 4) {
 		netif_err(dev, ifup, dev->net, "Frame too short\n");
 		dev->net->stats.rx_length_errors++;
@@ -158,12 +143,8 @@ static int vl600_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 
 		s->current_rx_buf = skb_copy_expand(skb, 0,
 				le32_to_cpup(&frame->len), GFP_ATOMIC);
-		if (!s->current_rx_buf) {
-			netif_err(dev, ifup, dev->net, "Reserving %i bytes "
-					"for packet assembly failed.\n",
-					le32_to_cpup(&frame->len));
+		if (!s->current_rx_buf)
 			dev->net->stats.rx_errors++;
-		}
 
 		return 0;
 	}
@@ -191,7 +172,7 @@ static int vl600_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 		 * the h_proto field is in the same place so we just leave it
 		 * alone and fill in the remaining fields.
 		 */
-		ethhdr = (struct ethhdr *) skb->data;
+		ethhdr = (struct ethhdr *)buf->data;
 		if (be16_to_cpup(&ethhdr->h_proto) == ETH_P_ARP &&
 				buf->len > 0x26) {
 			/* Copy the addresses from packet contents */
@@ -202,7 +183,7 @@ static int vl600_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 					&buf->data[sizeof(*ethhdr) + 0x12],
 					ETH_ALEN);
 		} else {
-			memset(ethhdr->h_source, 0, ETH_ALEN);
+			eth_zero_addr(ethhdr->h_source);
 			memcpy(ethhdr->h_dest, dev->net->dev_addr, ETH_ALEN);
 
 			/* Inbound IPv6 packets have an IPv4 ethertype (0x800)
@@ -211,7 +192,7 @@ static int vl600_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 			 * (0x86dd) so Linux can understand it.
 			 */
 			if ((buf->data[sizeof(*ethhdr)] & 0xf0) == 0x60)
-				ethhdr->h_proto = __constant_htons(ETH_P_IPV6);
+				ethhdr->h_proto = htons(ETH_P_IPV6);
 		}
 
 		if (count) {
@@ -305,7 +286,7 @@ encapsulate:
 	memset(&packet->dummy, 0, sizeof(packet->dummy));
 	packet->len = cpu_to_le32(orig_len);
 
-	frame = (struct vl600_frame_hdr *) skb_push(skb, sizeof(*frame));
+	frame = skb_push(skb, sizeof(*frame));
 	memset(frame, 0, sizeof(*frame));
 	frame->len = cpu_to_le32(full_len);
 	frame->serial = cpu_to_le32(serial++);

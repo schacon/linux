@@ -1,25 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /************************************************************************
 
 This file is part of Echo Digital Audio's generic driver library.
 Copyright Echo Digital Audio Corporation (c) 1998 - 2005
 All rights reserved
 www.echoaudio.com
-
-This library is free software; you can redistribute it and/or
-modify it under the terms of the GNU Lesser General Public
-License as published by the Free Software Foundation; either
-version 2.1 of the License, or (at your option) any later version.
-
-This library is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-Lesser General Public License for more details.
-
-You should have received a copy of the GNU Lesser General Public
-License along with this library; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-*************************************************************************
 
  Translation from C++ and adaptation for use in ALSA-Driver
  were made by Giuliano Pochini <pochini@shiny.it>
@@ -61,7 +46,8 @@ static int set_sample_rate(struct echoaudio *chip, u32 rate)
 
 	control_reg |= clock;
 	if (control_reg != old_control_reg) {
-		DE_ACT(("set_sample_rate: %d clock %d\n", rate, clock));
+		dev_dbg(chip->card->dev,
+			"set_sample_rate: %d clock %d\n", rate, clock);
 		chip->comm_page->control_register = cpu_to_le32(control_reg);
 		chip->sample_rate = rate;
 		clear_handshake(chip);
@@ -89,7 +75,8 @@ static int set_vmixer_gain(struct echoaudio *chip, u16 output, u16 pipe,
 	index = output * num_pipes_out(chip) + pipe;
 	chip->comm_page->vmixer[index] = gain;
 
-	DE_ACT(("set_vmixer_gain: pipe %d, out %d = %d\n", pipe, output, gain));
+	dev_dbg(chip->card->dev,
+		"set_vmixer_gain: pipe %d, out %d = %d\n", pipe, output, gain);
 	return 0;
 }
 

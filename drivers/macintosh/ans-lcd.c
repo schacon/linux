@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * /dev/lcd driver for Apple Network Servers.
  */
@@ -7,13 +8,13 @@
 #include <linux/kernel.h>
 #include <linux/miscdevice.h>
 #include <linux/fcntl.h>
-#include <linux/init.h>
+#include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/fs.h>
+#include <linux/of.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/sections.h>
-#include <asm/prom.h>
 #include <asm/io.h>
 
 #include "ans-lcd.h"
@@ -63,14 +64,14 @@ anslcd_write( struct file * file, const char __user * buf,
 	printk(KERN_DEBUG "LCD: write\n");
 #endif
 
-	if (!access_ok(VERIFY_READ, buf, count))
+	if (!access_ok(buf, count))
 		return -EFAULT;
 
 	mutex_lock(&anslcd_mutex);
 	for ( i = *ppos; count > 0; ++i, ++p, --count ) 
 	{
 		char c;
-		__get_user(c, p);
+		get_user(c, p);
 		anslcd_write_byte_data( c );
 	}
 	mutex_unlock(&anslcd_mutex);
@@ -101,10 +102,10 @@ anslcd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		break;
 	case ANSLCD_SENDCTRL:
 		temp = (char __user *) arg;
-		__get_user(ch, temp);
+		get_user(ch, temp);
 		for (; ch; temp++) { /* FIXME: This is ugly, but should work, as a \0 byte is not a valid command code */
 			anslcd_write_byte_ctrl ( ch );
-			__get_user(ch, temp);
+			get_user(ch, temp);
 		}
 		break;
 	case ANSLCD_SETSHORTDELAY:
@@ -141,12 +142,13 @@ const struct file_operations anslcd_fops = {
 };
 
 static struct miscdevice anslcd_dev = {
-	ANSLCD_MINOR,
+	LCD_MINOR,
 	"anslcd",
 	&anslcd_fops
 };
 
-const char anslcd_logo[] =	"********************"  /* Line #1 */
+static const char anslcd_logo[] __initconst =
+				"********************"  /* Line #1 */
 				"*      LINUX!      *"  /* Line #3 */
 				"*    Welcome to    *"  /* Line #2 */
 				"********************"; /* Line #4 */
@@ -159,7 +161,7 @@ anslcd_init(void)
 	struct device_node* node;
 
 	node = of_find_node_by_name(NULL, "lcd");
-	if (!node || !node->parent || strcmp(node->parent->name, "gc")) {
+	if (!node || !of_node_name_eq(node->parent, "gc")) {
 		of_node_put(node);
 		return -ENODEV;
 	}
@@ -200,3 +202,4 @@ anslcd_exit(void)
 
 module_init(anslcd_init);
 module_exit(anslcd_exit);
+MODULE_LICENSE("GPL v2");

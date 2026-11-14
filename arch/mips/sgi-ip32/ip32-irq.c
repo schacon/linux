@@ -18,6 +18,7 @@
 #include <linux/mm.h>
 #include <linux/random.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
 
 #include <asm/irq_cpu.h>
 #include <asm/mipsregs.h>
@@ -27,13 +28,15 @@
 #include <asm/ip32/mace.h>
 #include <asm/ip32/ip32_ints.h>
 
+#include "ip32-common.h"
+
 /* issue a PIO read to make sure no PIO writes are pending */
-static void inline flush_crime_bus(void)
+static inline void flush_crime_bus(void)
 {
 	crime->control;
 }
 
-static void inline flush_mace_bus(void)
+static inline void flush_mace_bus(void)
 {
 	mace->perif.ctrl.misc;
 }
@@ -106,20 +109,6 @@ static void inline flush_mace_bus(void)
  * is quite different anyway.
  */
 
-/* Some initial interrupts to set up */
-extern irqreturn_t crime_memerr_intr(int irq, void *dev_id);
-extern irqreturn_t crime_cpuerr_intr(int irq, void *dev_id);
-
-static struct irqaction memerr_irq = {
-	.handler = crime_memerr_intr,
-	.name = "CRIME memory error",
-};
-
-static struct irqaction cpuerr_irq = {
-	.handler = crime_cpuerr_intr,
-	.name = "CRIME CPU error",
-};
-
 /*
  * This is for pure CRIME interrupts - ie not MACE.  The advantage?
  * We get to split the register in half and do faster lookups.
@@ -169,38 +158,6 @@ static struct irq_chip crime_edge_interrupt = {
 	.irq_mask	= crime_disable_irq,
 	.irq_mask_ack	= crime_edge_mask_and_ack_irq,
 	.irq_unmask	= crime_enable_irq,
-};
-
-/*
- * This is for MACE PCI interrupts.  We can decrease bus traffic by masking
- * as close to the source as possible.	This also means we can take the
- * next chunk of the CRIME register in one piece.
- */
-
-static unsigned long macepci_mask;
-
-static void enable_macepci_irq(struct irq_data *d)
-{
-	macepci_mask |= MACEPCI_CONTROL_INT(d->irq - MACEPCI_SCSI0_IRQ);
-	mace->pci.control = macepci_mask;
-	crime_mask |= 1 << (d->irq - CRIME_IRQ_BASE);
-	crime->imask = crime_mask;
-}
-
-static void disable_macepci_irq(struct irq_data *d)
-{
-	crime_mask &= ~(1 << (d->irq - CRIME_IRQ_BASE));
-	crime->imask = crime_mask;
-	flush_crime_bus();
-	macepci_mask &= ~MACEPCI_CONTROL_INT(d->irq - MACEPCI_SCSI0_IRQ);
-	mace->pci.control = macepci_mask;
-	flush_mace_bus();
-}
-
-static struct irq_chip ip32_macepci_interrupt = {
-	.name = "IP32 MACE PCI",
-	.irq_mask = disable_macepci_irq,
-	.irq_unmask = enable_macepci_irq,
 };
 
 /* This is used for MACE ISA interrupts.  That means bits 4-6 in the
@@ -310,8 +267,8 @@ static struct irq_chip ip32_maceisa_edge_interrupt = {
 	.irq_unmask	= enable_maceisa_irq,
 };
 
-/* This is used for regular non-ISA, non-PCI MACE interrupts.  That means
- * bits 0-3 and 7 in the CRIME register.
+/* This is used for regular non-ISA MACE interrupts.  That means bits 0-3
+ * and 7-15 in the CRIME register.
  */
 
 static void enable_mace_irq(struct irq_data *d)
@@ -352,7 +309,7 @@ static void ip32_unknown_interrupt(void)
 	printk("Register dump:\n");
 	show_regs(get_irq_regs());
 
-	printk("Please mail this report to linux-mips@linux-mips.org\n");
+	printk("Please mail this report to linux-mips@vger.kernel.org\n");
 	printk("Spinning...");
 	while(1) ;
 }
@@ -447,16 +404,9 @@ void __init arch_init_irq(void)
 	mips_cpu_irq_init();
 	for (irq = CRIME_IRQ_BASE; irq <= IP32_IRQ_MAX; irq++) {
 		switch (irq) {
-		case MACE_VID_IN1_IRQ ... MACE_PCI_BRIDGE_IRQ:
+		case MACE_VID_IN1_IRQ ... MACEPCI_SHARED2_IRQ:
 			irq_set_chip_and_handler_name(irq,
 						      &ip32_mace_interrupt,
-						      handle_level_irq,
-						      "level");
-			break;
-
-		case MACEPCI_SCSI0_IRQ ...  MACEPCI_SHARED2_IRQ:
-			irq_set_chip_and_handler_name(irq,
-						      &ip32_macepci_interrupt,
 						      handle_level_irq,
 						      "level");
 			break;
@@ -496,8 +446,12 @@ void __init arch_init_irq(void)
 			break;
 		}
 	}
-	setup_irq(CRIME_MEMERR_IRQ, &memerr_irq);
-	setup_irq(CRIME_CPUERR_IRQ, &cpuerr_irq);
+	if (request_irq(CRIME_MEMERR_IRQ, crime_memerr_intr, 0,
+			"CRIME memory error", NULL))
+		pr_err("Failed to register CRIME memory error interrupt\n");
+	if (request_irq(CRIME_CPUERR_IRQ, crime_cpuerr_intr, 0,
+			"CRIME CPU error", NULL))
+		pr_err("Failed to register CRIME CPU error interrupt\n");
 
 #define ALLINTS (IE_IRQ0 | IE_IRQ1 | IE_IRQ2 | IE_IRQ3 | IE_IRQ4 | IE_IRQ5)
 	change_c0_status(ST0_IM, ALLINTS);

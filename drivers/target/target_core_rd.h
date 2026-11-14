@@ -1,5 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef TARGET_CORE_RD_H
 #define TARGET_CORE_RD_H
+
+#include <linux/module.h>
+#include <linux/types.h>
+#include <target/target_core_base.h>
 
 #define RD_HBA_VERSION		"v4.0"
 #define RD_MCP_VERSION		"4.0"
@@ -23,6 +28,7 @@ struct rd_dev_sg_table {
 
 #define RDF_HAS_PAGE_COUNT	0x01
 #define RDF_NULLIO		0x02
+#define RDF_DUMMY		0x04
 
 struct rd_dev {
 	struct se_device dev;
@@ -33,8 +39,12 @@ struct rd_dev {
 	u32		rd_page_count;
 	/* Number of SG tables in sg_table_array */
 	u32		sg_table_count;
+	/* Number of SG tables in sg_prot_array */
+	u32		sg_prot_count;
 	/* Array of rd_dev_sg_table_t containing scatterlists */
 	struct rd_dev_sg_table *sg_table_array;
+	/* Array of rd_dev_sg_table containing protection scatterlists */
+	struct rd_dev_sg_table *sg_prot_array;
 	/* Ramdisk HBA device is connected to */
 	struct rd_host *rd_host;
 } ____cacheline_aligned;

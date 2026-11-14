@@ -1,6 +1,6 @@
 /******************************************************************************
  * mcelog.c
- * Driver for receiving and transferring machine check error infomation
+ * Driver for receiving and transferring machine check error information
  *
  * Copyright (c) 2012 Intel Corporation
  * Author: Liu, Jinsong <jinsong.liu@intel.com>
@@ -32,6 +32,8 @@
  * IN THE SOFTWARE.
  */
 
+#define pr_fmt(fmt) "xen_mcelog: " fmt
+
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -51,11 +53,9 @@
 #include <asm/xen/hypercall.h>
 #include <asm/xen/hypervisor.h>
 
-#define XEN_MCELOG "xen_mcelog: "
-
 static struct mc_info g_mi;
-static struct mcinfo_logical_cpu *g_physinfo;
-static uint32_t ncpus;
+static struct mcinfo_logical_cpu *g_physinfo __ro_after_init;
+static uint32_t ncpus __ro_after_init;
 
 static DEFINE_MUTEX(mcelog_lock);
 
@@ -139,12 +139,12 @@ out:
 	return err ? err : buf - ubuf;
 }
 
-static unsigned int xen_mce_chrdev_poll(struct file *file, poll_table *wait)
+static __poll_t xen_mce_chrdev_poll(struct file *file, poll_table *wait)
 {
 	poll_wait(file, &xen_mce_chrdev_wait, wait);
 
 	if (xen_mcelog.next)
-		return POLLIN | POLLRDNORM;
+		return EPOLLIN | EPOLLRDNORM;
 
 	return 0;
 }
@@ -165,9 +165,7 @@ static long xen_mce_chrdev_ioctl(struct file *f, unsigned int cmd,
 	case MCE_GETCLEAR_FLAGS: {
 		unsigned flags;
 
-		do {
-			flags = xen_mcelog.flags;
-		} while (cmpxchg(&xen_mcelog.flags, flags, 0) != flags);
+		flags = xchg(&xen_mcelog.flags, 0);
 
 		return put_user(flags, p);
 	}
@@ -182,10 +180,9 @@ static const struct file_operations xen_mce_chrdev_ops = {
 	.read			= xen_mce_chrdev_read,
 	.poll			= xen_mce_chrdev_poll,
 	.unlocked_ioctl		= xen_mce_chrdev_ioctl,
-	.llseek			= no_llseek,
 };
 
-static struct miscdevice xen_mce_chrdev_device = {
+static struct miscdevice xen_mce_chrdev_device __ro_after_init = {
 	MISC_MCELOG_MINOR,
 	"mcelog",
 	&xen_mce_chrdev_ops,
@@ -222,12 +219,12 @@ static int convert_log(struct mc_info *mi)
 	struct mcinfo_global *mc_global;
 	struct mcinfo_bank *mc_bank;
 	struct xen_mce m;
-	uint32_t i;
+	unsigned int i, j;
 
 	mic = NULL;
 	x86_mcinfo_lookup(&mic, mi, MC_TYPE_GLOBAL);
 	if (unlikely(!mic)) {
-		pr_warning(XEN_MCELOG "Failed to find global error info\n");
+		pr_warn("Failed to find global error info\n");
 		return -ENODEV;
 	}
 
@@ -241,20 +238,29 @@ static int convert_log(struct mc_info *mi)
 		if (g_physinfo[i].mc_apicid == m.apicid)
 			break;
 	if (unlikely(i == ncpus)) {
-		pr_warning(XEN_MCELOG "Failed to match cpu with apicid %d\n",
-			   m.apicid);
+		pr_warn("Failed to match cpu with apicid %d\n", m.apicid);
 		return -ENODEV;
 	}
 
 	m.socketid = g_physinfo[i].mc_chipid;
 	m.cpu = m.extcpu = g_physinfo[i].mc_cpunr;
 	m.cpuvendor = (__u8)g_physinfo[i].mc_vendor;
-	m.mcgcap = g_physinfo[i].mc_msrvalues[__MC_MSR_MCGCAP].value;
+	for (j = 0; j < g_physinfo[i].mc_nmsrvals; ++j)
+		switch (g_physinfo[i].mc_msrvalues[j].reg) {
+		case MSR_IA32_MCG_CAP:
+			m.mcgcap = g_physinfo[i].mc_msrvalues[j].value;
+			break;
+
+		case MSR_PPIN:
+		case MSR_AMD_PPIN:
+			m.ppin = g_physinfo[i].mc_msrvalues[j].value;
+			break;
+		}
 
 	mic = NULL;
 	x86_mcinfo_lookup(&mic, mi, MC_TYPE_BANK);
 	if (unlikely(!mic)) {
-		pr_warning(XEN_MCELOG "Fail to find bank error info\n");
+		pr_warn("Fail to find bank error info\n");
 		return -ENODEV;
 	}
 
@@ -289,15 +295,13 @@ static int mc_queue_handle(uint32_t flags)
 	int ret = 0;
 
 	mc_op.cmd = XEN_MC_fetch;
-	mc_op.interface_version = XEN_MCA_INTERFACE_VERSION;
 	set_xen_guest_handle(mc_op.u.mc_fetch.data, &g_mi);
 	do {
 		mc_op.u.mc_fetch.flags = flags;
 		ret = HYPERVISOR_mca(&mc_op);
 		if (ret) {
-			pr_err(XEN_MCELOG "Failed to fetch %s error log\n",
-			       (flags == XEN_MC_URGENT) ?
-			       "urgnet" : "nonurgent");
+			pr_err("Failed to fetch %surgent error log\n",
+			       flags == XEN_MC_URGENT ? "" : "non");
 			break;
 		}
 
@@ -307,15 +311,12 @@ static int mc_queue_handle(uint32_t flags)
 		else {
 			ret = convert_log(&g_mi);
 			if (ret)
-				pr_warning(XEN_MCELOG
-					   "Failed to convert this error log, "
-					   "continue acking it anyway\n");
+				pr_warn("Failed to convert this error log, continue acking it anyway\n");
 
 			mc_op.u.mc_fetch.flags = flags | XEN_MC_ACK;
 			ret = HYPERVISOR_mca(&mc_op);
 			if (ret) {
-				pr_err(XEN_MCELOG
-				       "Failed to ack previous error log\n");
+				pr_err("Failed to ack previous error log\n");
 				break;
 			}
 		}
@@ -334,15 +335,12 @@ static void xen_mce_work_fn(struct work_struct *work)
 	/* urgent mc_info */
 	err = mc_queue_handle(XEN_MC_URGENT);
 	if (err)
-		pr_err(XEN_MCELOG
-		       "Failed to handle urgent mc_info queue, "
-		       "continue handling nonurgent mc_info queue anyway.\n");
+		pr_err("Failed to handle urgent mc_info queue, continue handling nonurgent mc_info queue anyway\n");
 
 	/* nonurgent mc_info */
 	err = mc_queue_handle(XEN_MC_NONURGENT);
 	if (err)
-		pr_err(XEN_MCELOG
-		       "Failed to handle nonurgent mc_info queue.\n");
+		pr_err("Failed to handle nonurgent mc_info queue\n");
 
 	/* wake processes polling /dev/mcelog */
 	wake_up_interruptible(&xen_mce_chrdev_wait);
@@ -366,24 +364,22 @@ static int bind_virq_for_mce(void)
 
 	/* Fetch physical CPU Numbers */
 	mc_op.cmd = XEN_MC_physcpuinfo;
-	mc_op.interface_version = XEN_MCA_INTERFACE_VERSION;
 	set_xen_guest_handle(mc_op.u.mc_physcpuinfo.info, g_physinfo);
 	ret = HYPERVISOR_mca(&mc_op);
 	if (ret) {
-		pr_err(XEN_MCELOG "Failed to get CPU numbers\n");
+		pr_err("Failed to get CPU numbers\n");
 		return ret;
 	}
 
 	/* Fetch each CPU Physical Info for later reference*/
 	ncpus = mc_op.u.mc_physcpuinfo.ncpus;
-	g_physinfo = kcalloc(ncpus, sizeof(struct mcinfo_logical_cpu),
-			     GFP_KERNEL);
+	g_physinfo = kzalloc_objs(struct mcinfo_logical_cpu, ncpus);
 	if (!g_physinfo)
 		return -ENOMEM;
 	set_xen_guest_handle(mc_op.u.mc_physcpuinfo.info, g_physinfo);
 	ret = HYPERVISOR_mca(&mc_op);
 	if (ret) {
-		pr_err(XEN_MCELOG "Failed to get CPU info\n");
+		pr_err("Failed to get CPU info\n");
 		kfree(g_physinfo);
 		return ret;
 	}
@@ -391,7 +387,7 @@ static int bind_virq_for_mce(void)
 	ret  = bind_virq_to_irqhandler(VIRQ_MCA, 0,
 				       xen_mce_interrupt, 0, "mce", NULL);
 	if (ret < 0) {
-		pr_err(XEN_MCELOG "Failed to bind virq\n");
+		pr_err("Failed to bind virq\n");
 		kfree(g_physinfo);
 		return ret;
 	}
@@ -401,14 +397,27 @@ static int bind_virq_for_mce(void)
 
 static int __init xen_late_init_mcelog(void)
 {
-	/* Only DOM0 is responsible for MCE logging */
-	if (xen_initial_domain()) {
-		/* register character device /dev/mcelog for xen mcelog */
-		if (misc_register(&xen_mce_chrdev_device))
-			return -ENODEV;
-		return bind_virq_for_mce();
-	}
+	int ret;
 
-	return -ENODEV;
+	/* Only DOM0 is responsible for MCE logging */
+	if (!xen_initial_domain())
+		return -ENODEV;
+
+	/* register character device /dev/mcelog for xen mcelog */
+	ret = misc_register(&xen_mce_chrdev_device);
+	if (ret)
+		return ret;
+
+	ret = bind_virq_for_mce();
+	if (ret)
+		goto deregister;
+
+	pr_info("/dev/mcelog registered by Xen\n");
+
+	return 0;
+
+deregister:
+	misc_deregister(&xen_mce_chrdev_device);
+	return ret;
 }
 device_initcall(xen_late_init_mcelog);

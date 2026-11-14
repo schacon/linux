@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 Red Hat. All rights reserved.
  *
@@ -119,13 +120,13 @@ struct dm_cache_policy *dm_cache_policy_create(const char *name,
 	type = get_policy(name);
 	if (!type) {
 		DMWARN("unknown policy type");
-		return NULL;
+		return ERR_PTR(-EINVAL);
 	}
 
 	p = type->create(cache_size, origin_size, cache_block_size);
 	if (!p) {
 		put_policy(type);
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 	p->private = type;
 
@@ -146,11 +147,15 @@ const char *dm_cache_policy_get_name(struct dm_cache_policy *p)
 {
 	struct dm_cache_policy_type *t = p->private;
 
+	/* if t->real is set then an alias was used (e.g. "default") */
+	if (t->real)
+		return t->real->name;
+
 	return t->name;
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_get_name);
 
-const unsigned *dm_cache_policy_get_version(struct dm_cache_policy *p)
+const unsigned int *dm_cache_policy_get_version(struct dm_cache_policy *p)
 {
 	struct dm_cache_policy_type *t = p->private;
 

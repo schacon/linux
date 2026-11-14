@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
 *Copyright (C) 2004 Konrad Eisele (eiselekd@web.de,konrad@gaisler.com), Gaisler Research
 *Copyright (C) 2004 Stefan Holst (mail@s-holst.de), Uni-Stuttgart
@@ -7,7 +8,7 @@
 #ifndef LEON_AMBA_H_INCLUDE
 #define LEON_AMBA_H_INCLUDE
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 struct amba_prom_registers {
 	unsigned int phys_addr;	/* The physical address of this register */
@@ -47,6 +48,7 @@ struct amba_prom_registers {
 #define LEON3_GPTIMER_LD 4
 #define LEON3_GPTIMER_IRQEN 8
 #define LEON3_GPTIMER_SEPIRQ 8
+#define LEON3_GPTIMER_TIMERS 0x7
 
 #define LEON23_REG_TIMER_CONTROL_EN    0x00000001 /* 1 = enable counting */
 /* 0 = hold scalar and counter */
@@ -87,7 +89,7 @@ struct amba_prom_registers {
 #define LEON3_GPTIMER_CONFIG_NRTIMERS(c) ((c)->config & 0x7)
 #define LEON3_GPTIMER_CTRL_ISPENDING(r)  (((r)&LEON3_GPTIMER_CTRL_PENDING) ? 1 : 0)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 struct leon3_irqctrl_regs_map {
 	u32 ilevel;
@@ -187,7 +189,7 @@ extern int leon_debug_irqout;
 extern unsigned long leon3_gptimer_irq;
 extern unsigned int sparc_leon_eirq;
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #define LEON3_IO_AREA 0xfff00000
 #define LEON3_CONF_AREA 0xff000

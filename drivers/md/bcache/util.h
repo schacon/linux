@@ -1,43 +1,34 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 
 #ifndef _BCACHE_UTIL_H
 #define _BCACHE_UTIL_H
 
+#include <linux/blkdev.h>
+#include <linux/closure.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/sched/clock.h>
 #include <linux/llist.h>
 #include <linux/ratelimit.h>
 #include <linux/vmalloc.h>
 #include <linux/workqueue.h>
-
-#include "closure.h"
-
-#define PAGE_SECTORS		(PAGE_SIZE / 512)
+#include <linux/crc64.h>
 
 struct closure;
 
-#include <trace/events/bcache.h>
+#ifdef CONFIG_BCACHE_DEBUG
 
-#ifdef CONFIG_BCACHE_EDEBUG
-
+#define EBUG_ON(cond)			BUG_ON(cond)
 #define atomic_dec_bug(v)	BUG_ON(atomic_dec_return(v) < 0)
 #define atomic_inc_bug(v, i)	BUG_ON(atomic_inc_return(v) <= i)
 
-#else /* EDEBUG */
+#else /* DEBUG */
 
+#define EBUG_ON(cond)		do { if (cond) do {} while (0); } while (0)
 #define atomic_dec_bug(v)	atomic_dec(v)
 #define atomic_inc_bug(v, i)	atomic_inc(v)
 
 #endif
-
-#define BITMASK(name, type, field, offset, size)		\
-static inline uint64_t name(const type *k)			\
-{ return (k->field >> offset) & ~(((uint64_t) ~0) << size); }	\
-								\
-static inline void SET_##name(type *k, uint64_t v)		\
-{								\
-	k->field &= ~(~((uint64_t) ~0 << size) << offset);	\
-	k->field |= v << offset;				\
-}
 
 #define DECLARE_HEAP(type, name)					\
 	struct {							\
@@ -51,20 +42,13 @@ static inline void SET_##name(type *k, uint64_t v)		\
 	(heap)->used = 0;						\
 	(heap)->size = (_size);						\
 	_bytes = (heap)->size * sizeof(*(heap)->data);			\
-	(heap)->data = NULL;						\
-	if (_bytes < KMALLOC_MAX_SIZE)					\
-		(heap)->data = kmalloc(_bytes, (gfp));			\
-	if ((!(heap)->data) && ((gfp) & GFP_KERNEL))			\
-		(heap)->data = vmalloc(_bytes);				\
+	(heap)->data = kvmalloc(_bytes, (gfp) & GFP_KERNEL);		\
 	(heap)->data;							\
 })
 
 #define free_heap(heap)							\
 do {									\
-	if (is_vmalloc_addr((heap)->data))				\
-		vfree((heap)->data);					\
-	else								\
-		kfree((heap)->data);					\
+	kvfree((heap)->data);						\
 	(heap)->data = NULL;						\
 } while (0)
 
@@ -122,7 +106,7 @@ do {									\
 	_r;								\
 })
 
-#define heap_peek(h)	((h)->size ? (h)->data[0] : NULL)
+#define heap_peek(h)	((h)->used ? (h)->data[0] : NULL)
 
 #define heap_full(h)	((h)->used == (h)->size)
 
@@ -147,12 +131,8 @@ do {									\
 									\
 	(fifo)->mask = _allocated_size - 1;				\
 	(fifo)->front = (fifo)->back = 0;				\
-	(fifo)->data = NULL;						\
 									\
-	if (_bytes < KMALLOC_MAX_SIZE)					\
-		(fifo)->data = kmalloc(_bytes, (gfp));			\
-	if ((!(fifo)->data) && ((gfp) & GFP_KERNEL))			\
-		(fifo)->data = vmalloc(_bytes);				\
+	(fifo)->data = kvmalloc(_bytes, (gfp) & GFP_KERNEL);		\
 	(fifo)->data;							\
 })
 
@@ -172,10 +152,7 @@ do {									\
 
 #define free_fifo(fifo)							\
 do {									\
-	if (is_vmalloc_addr((fifo)->data))				\
-		vfree((fifo)->data);					\
-	else								\
-		kfree((fifo)->data);					\
+	kvfree((fifo)->data);						\
 	(fifo)->data = NULL;						\
 } while (0)
 
@@ -307,10 +284,10 @@ do {									\
 #define ANYSINT_MAX(t)							\
 	((((t) 1 << (sizeof(t) * 8 - 2)) - (t) 1) * (t) 2 + (t) 1)
 
-int bch_strtoint_h(const char *, int *);
-int bch_strtouint_h(const char *, unsigned int *);
-int bch_strtoll_h(const char *, long long *);
-int bch_strtoull_h(const char *, unsigned long long *);
+int bch_strtoint_h(const char *cp, int *res);
+int bch_strtouint_h(const char *cp, unsigned int *res);
+int bch_strtoll_h(const char *cp, long long *res);
+int bch_strtoull_h(const char *cp, unsigned long long *res);
 
 static inline int bch_strtol_h(const char *cp, long *res)
 {
@@ -362,34 +339,13 @@ static inline int bch_strtoul_h(const char *cp, long *res)
 	_r;								\
 })
 
-#define snprint(buf, size, var)						\
-	snprintf(buf, size,						\
-		__builtin_types_compatible_p(typeof(var), int)		\
-		     ? "%i\n" :						\
-		__builtin_types_compatible_p(typeof(var), unsigned)	\
-		     ? "%u\n" :						\
-		__builtin_types_compatible_p(typeof(var), long)		\
-		     ? "%li\n" :					\
-		__builtin_types_compatible_p(typeof(var), unsigned long)\
-		     ? "%lu\n" :					\
-		__builtin_types_compatible_p(typeof(var), int64_t)	\
-		     ? "%lli\n" :					\
-		__builtin_types_compatible_p(typeof(var), uint64_t)	\
-		     ? "%llu\n" :					\
-		__builtin_types_compatible_p(typeof(var), const char *)	\
-		     ? "%s\n" : "%i\n", var)
-
 ssize_t bch_hprint(char *buf, int64_t v);
 
 bool bch_is_zero(const char *p, size_t n);
 int bch_parse_uuid(const char *s, char *uuid);
 
-ssize_t bch_snprint_string_list(char *buf, size_t size, const char * const list[],
-			    size_t selected);
-
-ssize_t bch_read_string_list(const char *buf, const char * const list[]);
-
 struct time_stats {
+	spinlock_t	lock;
 	/*
 	 * all fields are in nanoseconds, averages are ewmas stored left shifted
 	 * by 8
@@ -401,6 +357,11 @@ struct time_stats {
 };
 
 void bch_time_stats_update(struct time_stats *stats, uint64_t time);
+
+static inline unsigned int local_clock_us(void)
+{
+	return local_clock() >> 10;
+}
 
 #define NSEC_PER_ns			1L
 #define NSEC_PER_us			NSEC_PER_USEC
@@ -419,8 +380,9 @@ do {									\
 			  average_frequency,	frequency_units);	\
 	__print_time_stat(stats, name,					\
 			  average_duration,	duration_units);	\
-	__print_time_stat(stats, name,					\
-			  max_duration,		duration_units);	\
+	sysfs_print(name ## _ ##max_duration ## _ ## duration_units,	\
+			div_u64((stats)->max_duration,			\
+				NSEC_PER_ ## duration_units));		\
 									\
 	sysfs_print(name ## _last_ ## frequency_units, (stats)->last	\
 		    ? div_s64(local_clock() - (stats)->last,		\
@@ -452,17 +414,23 @@ read_attribute(name ## _last_ ## frequency_units)
 	(ewma) >> factor;						\
 })
 
-struct ratelimit {
+struct bch_ratelimit {
+	/* Next time we want to do some work, in nanoseconds */
 	uint64_t		next;
-	unsigned		rate;
+
+	/*
+	 * Rate at which we want to do work, in units per second
+	 * The units here correspond to the units passed to bch_next_delay()
+	 */
+	atomic_long_t		rate;
 };
 
-static inline void ratelimit_reset(struct ratelimit *d)
+static inline void bch_ratelimit_reset(struct bch_ratelimit *d)
 {
 	d->next = local_clock();
 }
 
-unsigned bch_next_delay(struct ratelimit *d, uint64_t done);
+uint64_t bch_next_delay(struct bch_ratelimit *d, uint64_t done);
 
 #define __DIV_SAFE(n, d, zero)						\
 ({									\
@@ -554,36 +522,40 @@ dup:									\
 #define RB_PREV(ptr, member)						\
 	container_of_or_null(rb_prev(&(ptr)->member), typeof(*ptr), member)
 
-/* Does linear interpolation between powers of two */
-static inline unsigned fract_exp_two(unsigned x, unsigned fract_bits)
+static inline uint64_t bch_crc64(const void *p, size_t len)
 {
-	unsigned fract = x & ~(~0 << fract_bits);
+	uint64_t crc = 0xffffffffffffffffULL;
 
-	x >>= fract_bits;
-	x   = 1 << x;
-	x  += (x * fract) >> fract_bits;
-
-	return x;
+	crc = crc64_be(crc, p, len);
+	return crc ^ 0xffffffffffffffffULL;
 }
 
-#define bio_end(bio)	((bio)->bi_sector + bio_sectors(bio))
+/*
+ * A stepwise-linear pseudo-exponential.  This returns 1 << (x >>
+ * frac_bits), with the less-significant bits filled in by linear
+ * interpolation.
+ *
+ * This can also be interpreted as a floating-point number format,
+ * where the low frac_bits are the mantissa (with implicit leading
+ * 1 bit), and the more significant bits are the exponent.
+ * The return value is 1.mantissa * 2^exponent.
+ *
+ * The way this is used, fract_bits is 6 and the largest possible
+ * input is CONGESTED_MAX-1 = 1023 (exponent 16, mantissa 0x1.fc),
+ * so the maximum output is 0x1fc00.
+ */
+static inline unsigned int fract_exp_two(unsigned int x,
+					 unsigned int fract_bits)
+{
+	unsigned int mantissa = 1 << fract_bits;	/* Implicit bit */
+
+	mantissa += x & (mantissa - 1);
+	x >>= fract_bits;	/* The exponent */
+	/* Largest intermediate value 0x7f0000 */
+	return mantissa << x >> fract_bits;
+}
 
 void bch_bio_map(struct bio *bio, void *base);
-
-int bch_bio_alloc_pages(struct bio *bio, gfp_t gfp);
-
-static inline sector_t bdev_sectors(struct block_device *bdev)
-{
-	return bdev->bd_inode->i_size >> 9;
-}
-
-#define closure_bio_submit(bio, cl, dev)				\
-do {									\
-	closure_get(cl);						\
-	bch_generic_make_request(bio, &(dev)->bio_split_hook);		\
-} while (0)
-
-uint64_t bch_crc64_update(uint64_t, const void *, size_t);
-uint64_t bch_crc64(const void *, size_t);
+int bch_bio_alloc_pages(struct bio *bio, gfp_t gfp_mask);
 
 #endif /* _BCACHE_UTIL_H */

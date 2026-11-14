@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -11,7 +12,7 @@
 #include <asm/sgi/mc.h>
 #include <asm/sgi/ip22.h>
 
-static struct bus_type gio_bus_type;
+static const struct bus_type gio_bus_type;
 
 static struct {
 	const char *name;
@@ -19,14 +20,15 @@ static struct {
 } gio_name_table[] = {
 	{ .name = "SGI Impact", .id = 0x10 },
 	{ .name = "Phobos G160", .id = 0x35 },
+	{ .name = "Phobos G130", .id = 0x36 },
+	{ .name = "Phobos G100", .id = 0x37 },
+	{ .name = "Set Engineering GFE", .id = 0x38 },
 	/* fake IDs */
 	{ .name = "SGI Newport", .id = 0x7e },
 	{ .name = "SGI GR2/GR3", .id = 0x7f },
 };
 
-static struct device gio_bus = {
-	.init_name = "gio",
-};
+static struct device *gio_bus;
 
 /**
  * gio_match_device - Tell if an of_device structure has a matching
@@ -37,8 +39,9 @@ static struct device gio_bus = {
  * Used by a driver to check whether an of_device present in the
  * system is in its list of supported devices.
  */
-const struct gio_device_id *gio_match_device(const struct gio_device_id *match,
-		     const struct gio_device *dev)
+static const struct gio_device_id *
+gio_match_device(const struct gio_device_id *match,
+		 const struct gio_device *dev)
 {
 	const struct gio_device_id *ids;
 
@@ -48,7 +51,6 @@ const struct gio_device_id *gio_match_device(const struct gio_device_id *match,
 
 	return NULL;
 }
-EXPORT_SYMBOL_GPL(gio_match_device);
 
 struct gio_device *gio_dev_get(struct gio_device *dev)
 {
@@ -78,19 +80,20 @@ EXPORT_SYMBOL_GPL(gio_dev_put);
  * Will be called only by the device core when all users of this gio device are
  * done.
  */
-void gio_release_dev(struct device *dev)
+static void gio_release_dev(struct device *dev)
 {
 	struct gio_device *giodev;
 
 	giodev = to_gio_device(dev);
 	kfree(giodev);
 }
-EXPORT_SYMBOL_GPL(gio_release_dev);
 
 int gio_device_register(struct gio_device *giodev)
 {
 	giodev->dev.bus = &gio_bus_type;
-	giodev->dev.parent = &gio_bus;
+	giodev->dev.parent = gio_bus;
+	giodev->dev.release = gio_release_dev;
+
 	return device_register(&giodev->dev);
 }
 EXPORT_SYMBOL_GPL(gio_device_register);
@@ -101,7 +104,7 @@ void gio_device_unregister(struct gio_device *giodev)
 }
 EXPORT_SYMBOL_GPL(gio_device_unregister);
 
-static int gio_bus_match(struct device *dev, struct device_driver *drv)
+static int gio_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct gio_device *gio_dev = to_gio_device(dev);
 	struct gio_driver *gio_drv = to_gio_driver(drv);
@@ -122,47 +125,20 @@ static int gio_device_probe(struct device *dev)
 	if (!drv->probe)
 		return error;
 
-	gio_dev_get(gio_dev);
-
 	match = gio_match_device(drv->id_table, gio_dev);
 	if (match)
 		error = drv->probe(gio_dev, match);
-	if (error)
-		gio_dev_put(gio_dev);
 
 	return error;
 }
 
-static int gio_device_remove(struct device *dev)
+static void gio_device_remove(struct device *dev)
 {
 	struct gio_device *gio_dev = to_gio_device(dev);
 	struct gio_driver *drv = to_gio_driver(dev->driver);
 
-	if (dev->driver && drv->remove)
+	if (drv->remove)
 		drv->remove(gio_dev);
-	return 0;
-}
-
-static int gio_device_suspend(struct device *dev, pm_message_t state)
-{
-	struct gio_device *gio_dev = to_gio_device(dev);
-	struct gio_driver *drv = to_gio_driver(dev->driver);
-	int error = 0;
-
-	if (dev->driver && drv->suspend)
-		error = drv->suspend(gio_dev, state);
-	return error;
-}
-
-static int gio_device_resume(struct device *dev)
-{
-	struct gio_device *gio_dev = to_gio_device(dev);
-	struct gio_driver *drv = to_gio_driver(dev->driver);
-	int error = 0;
-
-	if (dev->driver && drv->resume)
-		error = drv->resume(gio_dev);
-	return error;
 }
 
 static void gio_device_shutdown(struct device *dev)
@@ -178,10 +154,10 @@ static ssize_t modalias_show(struct device *dev, struct device_attribute *a,
 			     char *buf)
 {
 	struct gio_device *gio_dev = to_gio_device(dev);
-	int len = snprintf(buf, PAGE_SIZE, "gio:%x\n", gio_dev->id.id);
 
-	return (len >= PAGE_SIZE) ? (PAGE_SIZE - 1) : len;
+	return sysfs_emit(buf, "gio:%x\n", gio_dev->id.id);
 }
+static DEVICE_ATTR_RO(modalias);
 
 static ssize_t name_show(struct device *dev,
 			 struct device_attribute *attr, char *buf)
@@ -189,8 +165,9 @@ static ssize_t name_show(struct device *dev,
 	struct gio_device *giodev;
 
 	giodev = to_gio_device(dev);
-	return sprintf(buf, "%s", giodev->name);
+	return sysfs_emit(buf, "%s\n", giodev->name);
 }
+static DEVICE_ATTR_RO(name);
 
 static ssize_t id_show(struct device *dev,
 		       struct device_attribute *attr, char *buf)
@@ -198,19 +175,21 @@ static ssize_t id_show(struct device *dev,
 	struct gio_device *giodev;
 
 	giodev = to_gio_device(dev);
-	return sprintf(buf, "%x", giodev->id.id);
+	return sysfs_emit(buf, "%x\n", giodev->id.id);
 }
+static DEVICE_ATTR_RO(id);
 
-static struct device_attribute gio_dev_attrs[] = {
-	__ATTR_RO(modalias),
-	__ATTR_RO(name),
-	__ATTR_RO(id),
-	__ATTR_NULL,
+static struct attribute *gio_dev_attrs[] = {
+	&dev_attr_modalias.attr,
+	&dev_attr_name.attr,
+	&dev_attr_id.attr,
+	NULL,
 };
+ATTRIBUTE_GROUPS(gio_dev);
 
-static int gio_device_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int gio_device_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
-	struct gio_device *gio_dev = to_gio_device(dev);
+	const struct gio_device *gio_dev = to_gio_device(dev);
 
 	add_uevent_var(env, "MODALIAS=gio:%x", gio_dev->id.id);
 	return 0;
@@ -255,7 +234,7 @@ void gio_set_master(struct gio_device *dev)
 }
 EXPORT_SYMBOL_GPL(gio_set_master);
 
-void ip22_gio_set_64bit(int slotno)
+static void ip22_gio_set_64bit(int slotno)
 {
 	u32 tmp = sgimc->giopar;
 
@@ -293,7 +272,16 @@ static int ip22_gio_id(unsigned long addr, u32 *res)
 		 * data matches
 		 */
 		ptr8 = (void *)CKSEG1ADDR(addr + 3);
-		get_dbe(tmp8, ptr8);
+		if (get_dbe(tmp8, ptr8)) {
+			/*
+			 * 32bit access worked, but 8bit doesn't
+			 * so we don't see phantom reads on
+			 * a pipelined bus, but a real card which
+			 * doesn't support 8 bit reads
+			 */
+			*res = tmp32;
+			return 1;
+		}
 		ptr16 = (void *)CKSEG1ADDR(addr + 2);
 		get_dbe(tmp16, ptr16);
 		if (tmp8 == (tmp16 & 0xff) &&
@@ -324,7 +312,7 @@ static int ip22_is_gr2(unsigned long addr)
 }
 
 
-static void ip22_check_gio(int slotno, unsigned long addr)
+static void ip22_check_gio(int slotno, unsigned long addr, int irq)
 {
 	const char *name = "Unknown";
 	struct gio_device *gio_dev;
@@ -338,9 +326,9 @@ static void ip22_check_gio(int slotno, unsigned long addr)
 	else {
 		if (!ip22_gio_id(addr, &tmp)) {
 			/*
-			 * no GIO signature at start address of slot, but
-			 * Newport doesn't have one, so let's check usea
-			 * status register
+			 * no GIO signature at start address of slot
+			 * since Newport doesn't have one, we check if
+			 * user status register is readable
 			 */
 			if (ip22_gio_id(addr + NEWPORT_USTATUS_OFFS, &tmp))
 				tmp = 0x7e;
@@ -362,27 +350,29 @@ static void ip22_check_gio(int slotno, unsigned long addr)
 		}
 		printk(KERN_INFO "GIO: slot %d : %s (id %x)\n",
 		       slotno, name, id);
-		gio_dev = kzalloc(sizeof *gio_dev, GFP_KERNEL);
+		gio_dev = kzalloc_obj(*gio_dev);
+		if (!gio_dev)
+			return;
 		gio_dev->name = name;
 		gio_dev->slotno = slotno;
 		gio_dev->id.id = id;
 		gio_dev->resource.start = addr;
 		gio_dev->resource.end = addr + 0x3fffff;
 		gio_dev->resource.flags = IORESOURCE_MEM;
+		gio_dev->irq = irq;
 		dev_set_name(&gio_dev->dev, "%d", slotno);
-		gio_device_register(gio_dev);
+		if (gio_device_register(gio_dev))
+			gio_dev_put(gio_dev);
 	} else
 		printk(KERN_INFO "GIO: slot %d : Empty\n", slotno);
 }
 
-static struct bus_type gio_bus_type = {
+static const struct bus_type gio_bus_type = {
 	.name	   = "gio",
-	.dev_attrs = gio_dev_attrs,
+	.dev_groups = gio_dev_groups,
 	.match	   = gio_bus_match,
 	.probe	   = gio_device_probe,
 	.remove	   = gio_device_remove,
-	.suspend   = gio_device_suspend,
-	.resume	   = gio_device_resume,
 	.shutdown  = gio_device_shutdown,
 	.uevent	   = gio_device_uevent,
 };
@@ -394,33 +384,35 @@ static struct resource gio_bus_resource = {
 	.flags = IORESOURCE_MEM,
 };
 
-int __init ip22_gio_init(void)
+static int __init ip22_gio_init(void)
 {
 	unsigned int pbdma __maybe_unused;
 	int ret;
 
-	ret = device_register(&gio_bus);
-	if (ret)
-		return ret;
+	gio_bus = root_device_register("gio");
+	if (IS_ERR(gio_bus))
+		return PTR_ERR(gio_bus);
 
 	ret = bus_register(&gio_bus_type);
 	if (!ret) {
 		request_resource(&iomem_resource, &gio_bus_resource);
 		printk(KERN_INFO "GIO: Probing bus...\n");
 
-		if (ip22_is_fullhouse() ||
-		    !get_dbe(pbdma, (unsigned int *)&hpc3c1->pbdma[1])) {
-			/* Indigo2 and ChallengeS */
-			ip22_check_gio(0, GIO_SLOT_GFX_BASE);
-			ip22_check_gio(1, GIO_SLOT_EXP0_BASE);
+		if (ip22_is_fullhouse()) {
+			/* Indigo2 */
+			ip22_check_gio(0, GIO_SLOT_GFX_BASE, SGI_GIO_1_IRQ);
+			ip22_check_gio(1, GIO_SLOT_EXP0_BASE, SGI_GIO_1_IRQ);
 		} else {
-			/* Indy */
-			ip22_check_gio(0, GIO_SLOT_GFX_BASE);
-			ip22_check_gio(1, GIO_SLOT_EXP0_BASE);
-			ip22_check_gio(2, GIO_SLOT_EXP1_BASE);
+			/* Indy/Challenge S */
+			if (get_dbe(pbdma, (unsigned int *)&hpc3c1->pbdma[1]))
+				ip22_check_gio(0, GIO_SLOT_GFX_BASE,
+					       SGI_GIO_0_IRQ);
+			ip22_check_gio(1, GIO_SLOT_EXP0_BASE, SGI_GIOEXP0_IRQ);
+			ip22_check_gio(2, GIO_SLOT_EXP1_BASE, SGI_GIOEXP1_IRQ);
 		}
-	} else
-		device_unregister(&gio_bus);
+	} else {
+		root_device_unregister(gio_bus);
+	}
 
 	return ret;
 }

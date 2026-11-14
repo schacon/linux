@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * sch_plug.c Queue traffic until an explicit release command
- *
- *             This program is free software; you can redistribute it and/or
- *             modify it under the terms of the GNU General Public License
- *             as published by the Free Software Foundation; either version
- *             2 of the License, or (at your option) any later version.
  *
  * There are two ways to use this qdisc:
  * 1. A simple "instantaneous" plug/unplug operation, by issuing an alternating
@@ -64,6 +60,8 @@ struct plug_sched_data {
 	 */
 	bool unplug_indefinite;
 
+	bool throttled;
+
 	/* Queue Limit in bytes */
 	u32 limit;
 
@@ -86,24 +84,25 @@ struct plug_sched_data {
 	u32 pkts_to_release;
 };
 
-static int plug_enqueue(struct sk_buff *skb, struct Qdisc *sch)
+static int plug_enqueue(struct sk_buff *skb, struct Qdisc *sch,
+			struct sk_buff **to_free)
 {
 	struct plug_sched_data *q = qdisc_priv(sch);
 
-	if (likely(sch->qstats.backlog + skb->len <= q->limit)) {
+	if (likely((u64)sch->qstats.backlog + skb->len <= q->limit)) {
 		if (!q->unplug_indefinite)
 			q->pkts_current_epoch++;
 		return qdisc_enqueue_tail(skb, sch);
 	}
 
-	return qdisc_reshape_fail(skb, sch);
+	return qdisc_drop(skb, sch, to_free);
 }
 
 static struct sk_buff *plug_dequeue(struct Qdisc *sch)
 {
 	struct plug_sched_data *q = qdisc_priv(sch);
 
-	if (qdisc_is_throttled(sch))
+	if (q->throttled)
 		return NULL;
 
 	if (!q->unplug_indefinite) {
@@ -111,7 +110,7 @@ static struct sk_buff *plug_dequeue(struct Qdisc *sch)
 			/* No more packets to dequeue. Block the queue
 			 * and wait for the next release command.
 			 */
-			qdisc_throttled(sch);
+			q->throttled = true;
 			return NULL;
 		}
 		q->pkts_to_release--;
@@ -120,7 +119,8 @@ static struct sk_buff *plug_dequeue(struct Qdisc *sch)
 	return qdisc_dequeue_head(sch);
 }
 
-static int plug_init(struct Qdisc *sch, struct nlattr *opt)
+static int plug_init(struct Qdisc *sch, struct nlattr *opt,
+		     struct netlink_ext_ack *extack)
 {
 	struct plug_sched_data *q = qdisc_priv(sch);
 
@@ -130,12 +130,8 @@ static int plug_init(struct Qdisc *sch, struct nlattr *opt)
 	q->unplug_indefinite = false;
 
 	if (opt == NULL) {
-		/* We will set a default limit of 100 pkts (~150kB)
-		 * in case tx_queue_len is not available. The
-		 * default value is completely arbitrary.
-		 */
-		u32 pkt_limit = qdisc_dev(sch)->tx_queue_len ? : 100;
-		q->limit = pkt_limit * psched_mtu(qdisc_dev(sch));
+		q->limit = qdisc_dev(sch)->tx_queue_len
+		           * psched_mtu(qdisc_dev(sch));
 	} else {
 		struct tc_plug_qopt *ctl = nla_data(opt);
 
@@ -145,7 +141,7 @@ static int plug_init(struct Qdisc *sch, struct nlattr *opt)
 		q->limit = ctl->limit;
 	}
 
-	qdisc_throttled(sch);
+	q->throttled = true;
 	return 0;
 }
 
@@ -159,13 +155,11 @@ static int plug_init(struct Qdisc *sch, struct nlattr *opt)
  *   command is received (just act as a pass-thru queue).
  * TCQ_PLUG_LIMIT: Increase/decrease queue size
  */
-static int plug_change(struct Qdisc *sch, struct nlattr *opt)
+static int plug_change(struct Qdisc *sch, struct nlattr *opt,
+		       struct netlink_ext_ack *extack)
 {
 	struct plug_sched_data *q = qdisc_priv(sch);
 	struct tc_plug_qopt *msg;
-
-	if (opt == NULL)
-		return -EINVAL;
 
 	msg = nla_data(opt);
 	if (nla_len(opt) < sizeof(*msg))
@@ -177,7 +171,7 @@ static int plug_change(struct Qdisc *sch, struct nlattr *opt)
 		q->pkts_last_epoch = q->pkts_current_epoch;
 		q->pkts_current_epoch = 0;
 		if (q->unplug_indefinite)
-			qdisc_throttled(sch);
+			q->throttled = true;
 		q->unplug_indefinite = false;
 		break;
 	case TCQ_PLUG_RELEASE_ONE:
@@ -186,7 +180,7 @@ static int plug_change(struct Qdisc *sch, struct nlattr *opt)
 		 */
 		q->pkts_to_release += q->pkts_last_epoch;
 		q->pkts_last_epoch = 0;
-		qdisc_unthrottled(sch);
+		q->throttled = false;
 		netif_schedule_queue(sch->dev_queue);
 		break;
 	case TCQ_PLUG_RELEASE_INDEFINITE:
@@ -194,7 +188,7 @@ static int plug_change(struct Qdisc *sch, struct nlattr *opt)
 		q->pkts_to_release = 0;
 		q->pkts_last_epoch = 0;
 		q->pkts_current_epoch = 0;
-		qdisc_unthrottled(sch);
+		q->throttled = false;
 		netif_schedule_queue(sch->dev_queue);
 		break;
 	case TCQ_PLUG_LIMIT:
@@ -213,11 +207,13 @@ static struct Qdisc_ops plug_qdisc_ops __read_mostly = {
 	.priv_size   =       sizeof(struct plug_sched_data),
 	.enqueue     =       plug_enqueue,
 	.dequeue     =       plug_dequeue,
-	.peek        =       qdisc_peek_head,
+	.peek        =       qdisc_peek_dequeued,
 	.init        =       plug_init,
 	.change      =       plug_change,
+	.reset       =	     qdisc_reset_queue,
 	.owner       =       THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("plug");
 
 static int __init plug_module_init(void)
 {
@@ -231,3 +227,4 @@ static void __exit plug_module_exit(void)
 module_init(plug_module_init)
 module_exit(plug_module_exit)
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Qdisc to plug and unplug traffic via netlink control");

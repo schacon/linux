@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  bt819 - BT819A VideoStream Decoder (Rockwell Part)
  *
@@ -12,20 +13,6 @@
  *
  * This code was modify/ported from the saa7111 driver written
  * by Dave Perks.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/module.h>
@@ -36,9 +23,8 @@
 #include <linux/videodev2.h>
 #include <linux/slab.h>
 #include <media/v4l2-device.h>
-#include <media/v4l2-chip-ident.h>
 #include <media/v4l2-ctrls.h>
-#include <media/bt819.h>
+#include <media/i2c/bt819.h>
 
 MODULE_DESCRIPTION("Brooktree-819 video decoder driver");
 MODULE_AUTHOR("Mike Bernson & Dave Perks");
@@ -57,7 +43,6 @@ struct bt819 {
 	unsigned char reg[32];
 
 	v4l2_std_id norm;
-	int ident;
 	int input;
 	int enable;
 };
@@ -170,12 +155,12 @@ static int bt819_init(struct v4l2_subdev *sd)
 		0x0e, 0xb4,	/* 0x0e Chroma Gain (V) msb */
 		0x0f, 0x00,	/* 0x0f Hue control */
 		0x12, 0x04,	/* 0x12 Output Format */
-		0x13, 0x20,	/* 0x13 Vertial Scaling msb 0x00
+		0x13, 0x20,	/* 0x13 Vertical Scaling msb 0x00
 					   chroma comb OFF, line drop scaling, interlace scaling
-					   BUG? Why does turning the chroma comb on fuck up color?
+					   BUG? Why does turning the chroma comb on screw up color?
 					   Bug in the bt819 stepping on my board?
 					*/
-		0x14, 0x00,	/* 0x14 Vertial Scaling lsb */
+		0x14, 0x00,	/* 0x14 Vertical Scaling lsb */
 		0x16, 0x07,	/* 0x16 Video Timing Polarity
 					   ACTIVE=active low
 					   FIELD: high=odd,
@@ -217,15 +202,17 @@ static int bt819_status(struct v4l2_subdev *sd, u32 *pstatus, v4l2_std_id *pstd)
 	struct bt819 *decoder = to_bt819(sd);
 	int status = bt819_read(decoder, 0x00);
 	int res = V4L2_IN_ST_NO_SIGNAL;
-	v4l2_std_id std;
+	v4l2_std_id std = pstd ? *pstd : V4L2_STD_ALL;
 
 	if ((status & 0x80))
 		res = 0;
+	else
+		std = V4L2_STD_UNKNOWN;
 
 	if ((status & 0x10))
-		std = V4L2_STD_PAL;
+		std &= V4L2_STD_PAL;
 	else
-		std = V4L2_STD_NTSC;
+		std &= V4L2_STD_NTSC;
 	if (pstd)
 		*pstd = std;
 	if (pstatus)
@@ -373,33 +360,14 @@ static int bt819_s_ctrl(struct v4l2_ctrl *ctrl)
 	return 0;
 }
 
-static int bt819_g_chip_ident(struct v4l2_subdev *sd, struct v4l2_dbg_chip_ident *chip)
-{
-	struct bt819 *decoder = to_bt819(sd);
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	return v4l2_chip_ident_i2c_client(client, chip, decoder->ident, 0);
-}
-
 /* ----------------------------------------------------------------------- */
 
 static const struct v4l2_ctrl_ops bt819_ctrl_ops = {
 	.s_ctrl = bt819_s_ctrl,
 };
 
-static const struct v4l2_subdev_core_ops bt819_core_ops = {
-	.g_chip_ident = bt819_g_chip_ident,
-	.g_ext_ctrls = v4l2_subdev_g_ext_ctrls,
-	.try_ext_ctrls = v4l2_subdev_try_ext_ctrls,
-	.s_ext_ctrls = v4l2_subdev_s_ext_ctrls,
-	.g_ctrl = v4l2_subdev_g_ctrl,
-	.s_ctrl = v4l2_subdev_s_ctrl,
-	.queryctrl = v4l2_subdev_queryctrl,
-	.querymenu = v4l2_subdev_querymenu,
-	.s_std = bt819_s_std,
-};
-
 static const struct v4l2_subdev_video_ops bt819_video_ops = {
+	.s_std = bt819_s_std,
 	.s_routing = bt819_s_routing,
 	.s_stream = bt819_s_stream,
 	.querystd = bt819_querystd,
@@ -407,14 +375,12 @@ static const struct v4l2_subdev_video_ops bt819_video_ops = {
 };
 
 static const struct v4l2_subdev_ops bt819_ops = {
-	.core = &bt819_core_ops,
 	.video = &bt819_video_ops,
 };
 
 /* ----------------------------------------------------------------------- */
 
-static int bt819_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int bt819_probe(struct i2c_client *client)
 {
 	int i, ver;
 	struct bt819 *decoder;
@@ -425,7 +391,7 @@ static int bt819_probe(struct i2c_client *client,
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -ENODEV;
 
-	decoder = kzalloc(sizeof(struct bt819), GFP_KERNEL);
+	decoder = devm_kzalloc_obj(&client->dev, *decoder);
 	if (decoder == NULL)
 		return -ENOMEM;
 	sd = &decoder->sd;
@@ -435,15 +401,12 @@ static int bt819_probe(struct i2c_client *client,
 	switch (ver & 0xf0) {
 	case 0x70:
 		name = "bt819a";
-		decoder->ident = V4L2_IDENT_BT819A;
 		break;
 	case 0x60:
 		name = "bt817a";
-		decoder->ident = V4L2_IDENT_BT817A;
 		break;
 	case 0x20:
 		name = "bt815a";
-		decoder->ident = V4L2_IDENT_BT815A;
 		break;
 	default:
 		v4l2_dbg(1, debug, sd,
@@ -476,37 +439,33 @@ static int bt819_probe(struct i2c_client *client,
 		int err = decoder->hdl.error;
 
 		v4l2_ctrl_handler_free(&decoder->hdl);
-		kfree(decoder);
 		return err;
 	}
 	v4l2_ctrl_handler_setup(&decoder->hdl);
 	return 0;
 }
 
-static int bt819_remove(struct i2c_client *client)
+static void bt819_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct bt819 *decoder = to_bt819(sd);
 
 	v4l2_device_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(&decoder->hdl);
-	kfree(decoder);
-	return 0;
 }
 
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id bt819_id[] = {
-	{ "bt819a", 0 },
-	{ "bt817a", 0 },
-	{ "bt815a", 0 },
+	{ .name = "bt819a" },
+	{ .name = "bt817a" },
+	{ .name = "bt815a" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, bt819_id);
 
 static struct i2c_driver bt819_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "bt819",
 	},
 	.probe		= bt819_probe,

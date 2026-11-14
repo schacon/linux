@@ -1,23 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Driver for the Conexant CX25821 PCIe bridge
  *
  *  Copyright (C) 2009 Conexant Systems Inc.
  *  Authors  <shu.lin@conexant.com>, <hiep.huynh@conexant.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -438,7 +424,7 @@ void medusa_set_resolution(struct cx25821_dev *dev, int width,
 		decoder_count = decoder_select + 1;
 	} else {
 		decoder = 0;
-		decoder_count = _num_decoders;
+		decoder_count = dev->_max_num_decoders;
 	}
 
 	switch (width) {
@@ -505,8 +491,6 @@ static void medusa_set_decoderduration(struct cx25821_dev *dev, int decoder,
 		disp_cnt_reg = DISP_GH_CNT;
 		break;
 	}
-
-	_display_field_cnt[decoder] = duration;
 
 	/* update hardware */
 	fld_cnt = cx25821_i2c_read(&dev->i2c_bus[0], disp_cnt_reg, &tmp);
@@ -667,8 +651,6 @@ int medusa_video_init(struct cx25821_dev *dev)
 	int ret_val = 0;
 	int i = 0;
 
-	_num_decoders = dev->_max_num_decoders;
-
 	/* disable Auto source selection on all video decoders */
 	value = cx25821_i2c_read(&dev->i2c_bus[0], MON_A_CTRL, &tmp);
 	value &= 0xFFFFF0FF;
@@ -685,8 +667,14 @@ int medusa_video_init(struct cx25821_dev *dev)
 	if (ret_val < 0)
 		goto error;
 
-	for (i = 0; i < _num_decoders; i++)
-		medusa_set_decoderduration(dev, i, _display_field_cnt[i]);
+	/*
+	 * FIXME: due to a coding bug the duration was always 0. It's
+	 * likely that it really should be something else, but due to the
+	 * lack of documentation I have no idea what it should be. For
+	 * now just fill in 0 as the duration.
+	 */
+	for (i = 0; i < dev->_max_num_decoders; i++)
+		medusa_set_decoderduration(dev, i, 0);
 
 	/* Select monitor as DENC A input, power up the DAC */
 	value = cx25821_i2c_read(&dev->i2c_bus[0], DENC_AB_CTRL, &tmp);
@@ -717,7 +705,7 @@ int medusa_video_init(struct cx25821_dev *dev)
 	/* Turn on all of the data out and control output pins. */
 	value = cx25821_i2c_read(&dev->i2c_bus[0], PIN_OE_CTRL, &tmp);
 	value &= 0xFEF0FE00;
-	if (_num_decoders == MAX_DECODERS) {
+	if (dev->_max_num_decoders == MAX_DECODERS) {
 		/*
 		 * Note: The octal board does not support control pins(bit16-19)
 		 * These bits are ignored in the octal board.

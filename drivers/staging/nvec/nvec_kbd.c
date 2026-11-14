@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * nvec_kbd: keyboard driver for a NVIDIA compliant embedded controller
  *
@@ -5,11 +6,6 @@
  *
  * Authors:  Pierre-Hugues Husson <phhusson@free.fr>
  *           Marc Dietrich <marvin24@gmx.de>
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
- *
  */
 
 #include <linux/module.h>
@@ -58,7 +54,7 @@ static int nvec_keys_notifier(struct notifier_block *nb,
 			      unsigned long event_type, void *data)
 {
 	int code, state;
-	unsigned char *msg = (unsigned char *)data;
+	unsigned char *msg = data;
 
 	if (event_type == NVEC_KB_EVT) {
 		int _size = (msg[0] & (3 << 5)) >> 5;
@@ -126,7 +122,9 @@ static int nvec_kbd_probe(struct platform_device *pdev)
 	for (i = 0; i < ARRAY_SIZE(extcode_tab_us102); ++i)
 		keycodes[j++] = extcode_tab_us102[i];
 
-	idev = input_allocate_device();
+	idev = devm_input_allocate_device(&pdev->dev);
+	if (!idev)
+		return -ENOMEM;
 	idev->name = "nvec keyboard";
 	idev->phys = "nvec";
 	idev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REP) | BIT_MASK(EV_LED);
@@ -142,7 +140,7 @@ static int nvec_kbd_probe(struct platform_device *pdev)
 	clear_bit(0, idev->keybit);
 	err = input_register_device(idev);
 	if (err)
-		goto fail;
+		return err;
 
 	keys_dev.input = idev;
 	keys_dev.notifier.notifier_call = nvec_keys_notifier;
@@ -150,24 +148,21 @@ static int nvec_kbd_probe(struct platform_device *pdev)
 	nvec_register_notifier(nvec, &keys_dev.notifier, 0);
 
 	/* Enable keyboard */
-	nvec_write_async(nvec, enable_kbd, 2);
+	nvec_write_sync(nvec, enable_kbd, 2, NULL);
 
 	/* configures wake on special keys */
-	nvec_write_async(nvec, cnfg_wake, 4);
+	nvec_write_sync(nvec, cnfg_wake, 4, NULL);
+
 	/* enable wake key reporting */
-	nvec_write_async(nvec, cnfg_wake_key_reporting, 3);
+	nvec_write_sync(nvec, cnfg_wake_key_reporting, 3, NULL);
 
 	/* Disable caps lock LED */
-	nvec_write_async(nvec, clear_leds, sizeof(clear_leds));
+	nvec_write_sync(nvec, clear_leds, sizeof(clear_leds), NULL);
 
 	return 0;
-
-fail:
-	input_free_device(idev);
-	return err;
 }
 
-static int nvec_kbd_remove(struct platform_device *pdev)
+static void nvec_kbd_remove(struct platform_device *pdev)
 {
 	struct nvec_chip *nvec = dev_get_drvdata(pdev->dev.parent);
 	char disable_kbd[] = { NVEC_KBD, DISABLE_KBD },
@@ -176,10 +171,6 @@ static int nvec_kbd_remove(struct platform_device *pdev)
 	nvec_write_async(nvec, uncnfg_wake_key_reporting, 3);
 	nvec_write_async(nvec, disable_kbd, 2);
 	nvec_unregister_notifier(nvec, &keys_dev.notifier);
-
-	input_unregister_device(keys_dev.input);
-
-	return 0;
 }
 
 static struct platform_driver nvec_kbd_driver = {
@@ -187,7 +178,6 @@ static struct platform_driver nvec_kbd_driver = {
 	.remove = nvec_kbd_remove,
 	.driver = {
 		.name = "nvec-kbd",
-		.owner = THIS_MODULE,
 	},
 };
 

@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Windfarm PowerMac thermal control. iMac G5
  *
  * (c) Copyright 2005 Benjamin Herrenschmidt, IBM Corp.
  *                    <benh@kernel.crashing.org>
- *
- * Released under the term of the GNU GPL v2.
  *
  * The algorithm used is the PID control algorithm, used the same
  * way the published Darwin code does, using the same values that
@@ -90,7 +89,6 @@
  * from the SDB partition. If we ever end up with actually slewing the system
  * clock and thus changing operating points, we'll have to find a way to
  * communicate with the CPU freq driver;
- *
  */
 
 #include <linux/types.h>
@@ -104,7 +102,8 @@
 #include <linux/kmod.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
-#include <asm/prom.h>
+#include <linux/of.h>
+
 #include <asm/machdep.h>
 #include <asm/io.h>
 #include <asm/sections.h>
@@ -140,7 +139,8 @@ static struct wf_control *fan_system;
 static struct wf_control *cpufreq_clamp;
 
 /* Set to kick the control loop into life */
-static int wf_smu_all_controls_ok, wf_smu_all_sensors_ok, wf_smu_started;
+static int wf_smu_all_controls_ok, wf_smu_all_sensors_ok;
+static bool wf_smu_started;
 
 /* Failure handling.. could be nicer */
 #define FAILURE_FAN		0x01
@@ -149,6 +149,7 @@ static int wf_smu_all_controls_ok, wf_smu_all_sensors_ok, wf_smu_started;
 
 static unsigned int wf_smu_failure_state;
 static int wf_smu_readjust, wf_smu_skipping;
+static bool wf_smu_overtemp;
 
 /*
  * ****** System Fans Control Loop ******
@@ -282,8 +283,7 @@ static void wf_smu_create_sys_fans(void)
 	}
 
 	/* Alloc & initialize state */
-	wf_smu_sys_fans = kmalloc(sizeof(struct wf_smu_sys_fans_state),
-				  GFP_KERNEL);
+	wf_smu_sys_fans = kmalloc_obj(struct wf_smu_sys_fans_state);
 	if (wf_smu_sys_fans == NULL) {
 		printk(KERN_WARNING "windfarm: Memory allocation error"
 		       " max fan speed\n");
@@ -400,7 +400,7 @@ static void wf_smu_create_cpu_fans(void)
 
 	/* First, locate the PID params in SMU SBD */
 	hdr = smu_get_sdb_partition(SMU_SDB_CPUPIDDATA_ID, NULL);
-	if (hdr == 0) {
+	if (!hdr) {
 		printk(KERN_WARNING "windfarm: CPU PID fan config not found "
 		       "max fan speed\n");
 		goto fail;
@@ -418,8 +418,7 @@ static void wf_smu_create_cpu_fans(void)
 		tmax = 0x5e0000; /* 94 degree default */
 
 	/* Alloc & initialize state */
-	wf_smu_cpu_fans = kmalloc(sizeof(struct wf_smu_cpu_fans_state),
-				  GFP_KERNEL);
+	wf_smu_cpu_fans = kmalloc_obj(struct wf_smu_cpu_fans_state);
 	if (wf_smu_cpu_fans == NULL)
 		goto fail;
        	wf_smu_cpu_fans->ticks = 1;
@@ -453,7 +452,7 @@ static void wf_smu_create_cpu_fans(void)
 	wf_cpu_pid_init(&wf_smu_cpu_fans->pid, &pid_param);
 
 	DBG("wf: CPU Fan control initialized.\n");
-	DBG("    ttarged=%d.%03d, tmax=%d.%03d, min=%d RPM, max=%d RPM\n",
+	DBG("    ttarget=%d.%03d, tmax=%d.%03d, min=%d RPM, max=%d RPM\n",
 	    FIX32TOPRINT(pid_param.ttarget), FIX32TOPRINT(pid_param.tmax),
 	    pid_param.min, pid_param.max);
 
@@ -548,7 +547,7 @@ static void wf_smu_tick(void)
 		DBG("wf: creating control loops !\n");
 		wf_smu_create_sys_fans();
 		wf_smu_create_cpu_fans();
-		wf_smu_started = 1;
+		wf_smu_started = true;
 	}
 
 	/* Skipping ticks */
@@ -593,6 +592,7 @@ static void wf_smu_tick(void)
 	if (new_failure & FAILURE_OVERTEMP) {
 		wf_set_overtemp();
 		wf_smu_skipping = 2;
+		wf_smu_overtemp = true;
 	}
 
 	/* We only clear the overtemp condition if overtemp is cleared
@@ -601,8 +601,10 @@ static void wf_smu_tick(void)
 	 * the control loop levels, but we don't want to keep it clear
 	 * here in this case
 	 */
-	if (new_failure == 0 && last_failure & FAILURE_OVERTEMP)
+	if (!wf_smu_failure_state && wf_smu_overtemp) {
 		wf_clear_overtemp();
+		wf_smu_overtemp = false;
+	}
 }
 
 static void wf_smu_new_control(struct wf_control *ct)
@@ -701,7 +703,7 @@ static int wf_init_pm(void)
 	const struct smu_sdbp_header *hdr;
 
 	hdr = smu_get_sdb_partition(SMU_SDB_SENSORTREE_ID, NULL);
-	if (hdr != 0) {
+	if (hdr) {
 		struct smu_sdbp_sensortree *st =
 			(struct smu_sdbp_sensortree *)&hdr[1];
 		wf_smu_mach_model = st->model_id;
@@ -720,7 +722,7 @@ static int wf_smu_probe(struct platform_device *ddev)
 	return 0;
 }
 
-static int wf_smu_remove(struct platform_device *ddev)
+static void wf_smu_remove(struct platform_device *ddev)
 {
 	wf_unregister_client(&wf_smu_events);
 
@@ -757,16 +759,13 @@ static int wf_smu_remove(struct platform_device *ddev)
 	/* Destroy control loops state structures */
 	kfree(wf_smu_sys_fans);
 	kfree(wf_smu_cpu_fans);
-
-	return 0;
 }
 
 static struct platform_driver wf_smu_driver = {
-        .probe = wf_smu_probe,
-        .remove = wf_smu_remove,
+	.probe = wf_smu_probe,
+	.remove = wf_smu_remove,
 	.driver = {
 		.name = "windfarm",
-		.owner	= THIS_MODULE,
 	},
 };
 

@@ -1,26 +1,44 @@
+// SPDX-License-Identifier: GPL-2.0
+#include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <linux/zalloc.h>
 
-#include "util.h"
 #include "values.h"
+#include "debug.h"
+#include "evsel.h"
 
-void perf_read_values_init(struct perf_read_values *values)
+int perf_read_values_init(struct perf_read_values *values)
 {
 	values->threads_max = 16;
-	values->pid = malloc(values->threads_max * sizeof(*values->pid));
-	values->tid = malloc(values->threads_max * sizeof(*values->tid));
-	values->value = malloc(values->threads_max * sizeof(*values->value));
-	if (!values->pid || !values->tid || !values->value)
-		die("failed to allocate read_values threads arrays");
+	values->pid = calloc(values->threads_max, sizeof(*values->pid));
+	values->tid = calloc(values->threads_max, sizeof(*values->tid));
+	values->value = calloc(values->threads_max, sizeof(*values->value));
+	if (!values->pid || !values->tid || !values->value) {
+		pr_debug("failed to allocate read_values threads arrays");
+		goto out_free_pid;
+	}
 	values->threads = 0;
 
 	values->counters_max = 16;
-	values->counterrawid = malloc(values->counters_max
-				      * sizeof(*values->counterrawid));
-	values->countername = malloc(values->counters_max
-				     * sizeof(*values->countername));
-	if (!values->counterrawid || !values->countername)
-		die("failed to allocate read_values counters arrays");
-	values->counters = 0;
+	values->counters = malloc(values->counters_max * sizeof(*values->counters));
+	if (!values->counters) {
+		pr_debug("failed to allocate read_values counters array");
+		goto out_free_counter;
+	}
+	values->num_counters = 0;
+
+	return 0;
+
+out_free_counter:
+	zfree(&values->counters);
+out_free_pid:
+	zfree(&values->pid);
+	zfree(&values->tid);
+	zfree(&values->value);
+	return -ENOMEM;
 }
 
 void perf_read_values_destroy(struct perf_read_values *values)
@@ -31,27 +49,34 @@ void perf_read_values_destroy(struct perf_read_values *values)
 		return;
 
 	for (i = 0; i < values->threads; i++)
-		free(values->value[i]);
-	free(values->value);
-	free(values->pid);
-	free(values->tid);
-	free(values->counterrawid);
-	for (i = 0; i < values->counters; i++)
-		free(values->countername[i]);
-	free(values->countername);
+		zfree(&values->value[i]);
+	zfree(&values->value);
+	zfree(&values->pid);
+	zfree(&values->tid);
+	zfree(&values->counters);
 }
 
-static void perf_read_values__enlarge_threads(struct perf_read_values *values)
+static int perf_read_values__enlarge_threads(struct perf_read_values *values)
 {
-	values->threads_max *= 2;
-	values->pid = realloc(values->pid,
-			      values->threads_max * sizeof(*values->pid));
-	values->tid = realloc(values->tid,
-			      values->threads_max * sizeof(*values->tid));
-	values->value = realloc(values->value,
-				values->threads_max * sizeof(*values->value));
-	if (!values->pid || !values->tid || !values->value)
-		die("failed to enlarge read_values threads arrays");
+	int nthreads_max = values->threads_max * 2;
+	void *npid = realloc(values->pid, nthreads_max * sizeof(*values->pid)),
+	     *ntid = realloc(values->tid, nthreads_max * sizeof(*values->tid)),
+	     *nvalue = realloc(values->value, nthreads_max * sizeof(*values->value));
+
+	if (!npid || !ntid || !nvalue)
+		goto out_err;
+
+	values->threads_max = nthreads_max;
+	values->pid = npid;
+	values->tid = ntid;
+	values->value = nvalue;
+	return 0;
+out_err:
+	free(npid);
+	free(ntid);
+	free(nvalue);
+	pr_debug("failed to enlarge read_values threads arrays");
+	return -ENOMEM;
 }
 
 static int perf_read_values__findnew_thread(struct perf_read_values *values,
@@ -63,68 +88,98 @@ static int perf_read_values__findnew_thread(struct perf_read_values *values,
 		if (values->pid[i] == pid && values->tid[i] == tid)
 			return i;
 
-	if (values->threads == values->threads_max)
-		perf_read_values__enlarge_threads(values);
+	if (values->threads == values->threads_max) {
+		i = perf_read_values__enlarge_threads(values);
+		if (i < 0)
+			return i;
+	}
 
-	i = values->threads++;
+	i = values->threads;
+
+	values->value[i] = calloc(values->counters_max, sizeof(**values->value));
+	if (!values->value[i]) {
+		pr_debug("failed to allocate read_values counters array");
+		return -ENOMEM;
+	}
 	values->pid[i] = pid;
 	values->tid[i] = tid;
-	values->value[i] = malloc(values->counters_max * sizeof(**values->value));
-	if (!values->value[i])
-		die("failed to allocate read_values counters array");
+	values->threads = i + 1;
 
 	return i;
 }
 
-static void perf_read_values__enlarge_counters(struct perf_read_values *values)
+static int perf_read_values__enlarge_counters(struct perf_read_values *values)
 {
-	int i;
+	int counters_max = values->counters_max * 2;
+	struct evsel **new_counters = realloc(values->counters,
+					     counters_max * sizeof(*values->counters));
 
-	values->counters_max *= 2;
-	values->counterrawid = realloc(values->counterrawid,
-				       values->counters_max * sizeof(*values->counterrawid));
-	values->countername = realloc(values->countername,
-				      values->counters_max * sizeof(*values->countername));
-	if (!values->counterrawid || !values->countername)
-		die("failed to enlarge read_values counters arrays");
-
-	for (i = 0; i < values->threads; i++) {
-		values->value[i] = realloc(values->value[i],
-					   values->counters_max * sizeof(**values->value));
-		if (!values->value[i])
-			die("failed to enlarge read_values counters arrays");
+	if (!new_counters) {
+		pr_debug("failed to enlarge read_values counters array");
+		goto out_enomem;
 	}
+
+	for (int i = 0; i < values->threads; i++) {
+		u64 *value = realloc(values->value[i], counters_max * sizeof(**values->value));
+
+		if (!value) {
+			pr_debug("failed to enlarge read_values ->values array");
+			goto out_free_counters;
+		}
+
+		for (int j = values->counters_max; j < counters_max; j++)
+			value[j] = 0;
+
+		values->value[i] = value;
+	}
+
+	values->counters_max = counters_max;
+	values->counters = new_counters;
+
+	return 0;
+out_free_counters:
+	free(new_counters);
+out_enomem:
+	return -ENOMEM;
 }
 
 static int perf_read_values__findnew_counter(struct perf_read_values *values,
-					     u64 rawid, const char *name)
+					     struct evsel *evsel)
 {
 	int i;
 
-	for (i = 0; i < values->counters; i++)
-		if (values->counterrawid[i] == rawid)
+	for (i = 0; i < values->num_counters; i++)
+		if (values->counters[i] == evsel)
 			return i;
 
-	if (values->counters == values->counters_max)
-		perf_read_values__enlarge_counters(values);
+	if (values->num_counters == values->counters_max) {
+		int err = perf_read_values__enlarge_counters(values);
 
-	i = values->counters++;
-	values->counterrawid[i] = rawid;
-	values->countername[i] = strdup(name);
+		if (err)
+			return err;
+	}
+
+	i = values->num_counters++;
+	values->counters[i] = evsel;
 
 	return i;
 }
 
-void perf_read_values_add_value(struct perf_read_values *values,
+int perf_read_values_add_value(struct perf_read_values *values,
 				u32 pid, u32 tid,
-				u64 rawid, const char *name, u64 value)
+				struct evsel *evsel, u64 value)
 {
 	int tindex, cindex;
 
 	tindex = perf_read_values__findnew_thread(values, pid, tid);
-	cindex = perf_read_values__findnew_counter(values, rawid, name);
+	if (tindex < 0)
+		return tindex;
+	cindex = perf_read_values__findnew_counter(values, evsel);
+	if (cindex < 0)
+		return cindex;
 
-	values->value[tindex][cindex] = value;
+	values->value[tindex][cindex] += value;
+	return 0;
 }
 
 static void perf_read_values__display_pretty(FILE *fp,
@@ -134,13 +189,15 @@ static void perf_read_values__display_pretty(FILE *fp,
 	int pidwidth, tidwidth;
 	int *counterwidth;
 
-	counterwidth = malloc(values->counters * sizeof(*counterwidth));
-	if (!counterwidth)
-		die("failed to allocate counterwidth array");
+	counterwidth = malloc(values->num_counters * sizeof(*counterwidth));
+	if (!counterwidth) {
+		fprintf(fp, "INTERNAL ERROR: Failed to allocate counterwidth array\n");
+		return;
+	}
 	tidwidth = 3;
 	pidwidth = 3;
-	for (j = 0; j < values->counters; j++)
-		counterwidth[j] = strlen(values->countername[j]);
+	for (j = 0; j < values->num_counters; j++)
+		counterwidth[j] = strlen(evsel__name(values->counters[j]));
 	for (i = 0; i < values->threads; i++) {
 		int width;
 
@@ -150,7 +207,7 @@ static void perf_read_values__display_pretty(FILE *fp,
 		width = snprintf(NULL, 0, "%d", values->tid[i]);
 		if (width > tidwidth)
 			tidwidth = width;
-		for (j = 0; j < values->counters; j++) {
+		for (j = 0; j < values->num_counters; j++) {
 			width = snprintf(NULL, 0, "%" PRIu64, values->value[i][j]);
 			if (width > counterwidth[j])
 				counterwidth[j] = width;
@@ -158,14 +215,14 @@ static void perf_read_values__display_pretty(FILE *fp,
 	}
 
 	fprintf(fp, "# %*s  %*s", pidwidth, "PID", tidwidth, "TID");
-	for (j = 0; j < values->counters; j++)
-		fprintf(fp, "  %*s", counterwidth[j], values->countername[j]);
+	for (j = 0; j < values->num_counters; j++)
+		fprintf(fp, "  %*s", counterwidth[j], evsel__name(values->counters[j]));
 	fprintf(fp, "\n");
 
 	for (i = 0; i < values->threads; i++) {
 		fprintf(fp, "  %*d  %*d", pidwidth, values->pid[i],
 			tidwidth, values->tid[i]);
-		for (j = 0; j < values->counters; j++)
+		for (j = 0; j < values->num_counters; j++)
 			fprintf(fp, "  %*" PRIu64,
 				counterwidth[j], values->value[i][j]);
 		fprintf(fp, "\n");
@@ -193,16 +250,16 @@ static void perf_read_values__display_raw(FILE *fp,
 		if (width > tidwidth)
 			tidwidth = width;
 	}
-	for (j = 0; j < values->counters; j++) {
-		width = strlen(values->countername[j]);
+	for (j = 0; j < values->num_counters; j++) {
+		width = strlen(evsel__name(values->counters[j]));
 		if (width > namewidth)
 			namewidth = width;
-		width = snprintf(NULL, 0, "%" PRIx64, values->counterrawid[j]);
+		width = snprintf(NULL, 0, "%x", values->counters[j]->core.idx);
 		if (width > rawwidth)
 			rawwidth = width;
 	}
 	for (i = 0; i < values->threads; i++) {
-		for (j = 0; j < values->counters; j++) {
+		for (j = 0; j < values->num_counters; j++) {
 			width = snprintf(NULL, 0, "%" PRIu64, values->value[i][j]);
 			if (width > countwidth)
 				countwidth = width;
@@ -214,12 +271,12 @@ static void perf_read_values__display_raw(FILE *fp,
 		namewidth, "Name", rawwidth, "Raw",
 		countwidth, "Count");
 	for (i = 0; i < values->threads; i++)
-		for (j = 0; j < values->counters; j++)
-			fprintf(fp, "  %*d  %*d  %*s  %*" PRIx64 "  %*" PRIu64,
+		for (j = 0; j < values->num_counters; j++)
+			fprintf(fp, "  %*d  %*d  %*s  %*x  %*" PRIu64,
 				pidwidth, values->pid[i],
 				tidwidth, values->tid[i],
-				namewidth, values->countername[j],
-				rawwidth, values->counterrawid[j],
+				namewidth, evsel__name(values->counters[j]),
+				rawwidth, values->counters[j]->core.idx,
 				countwidth, values->value[i][j]);
 }
 

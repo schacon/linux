@@ -14,8 +14,8 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/mc146818rtc.h>
+#include <linux/of_address.h>
 
-#include <asm/prom.h>
 
 static int  __init add_rtc(void)
 {
@@ -62,8 +62,9 @@ static int  __init add_rtc(void)
 	pd = platform_device_register_simple("rtc_cmos", -1,
 					     &res[0], num_res);
 
-	return PTR_RET(pd);
+	return PTR_ERR_OR_ZERO(pd);
 }
 fs_initcall(add_rtc);
 
+MODULE_DESCRIPTION("PPC RTC CMOS driver");
 MODULE_LICENSE("GPL");

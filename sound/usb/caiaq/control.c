@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   Copyright (c) 2007 Daniel Mack
  *   friendly supported by NI.
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/device.h>
@@ -28,6 +15,7 @@
 #include "control.h"
 
 #define CNT_INTVAL 0x10000
+#define MASCHINE_BANK_SIZE 32
 
 static int control_info(struct snd_kcontrol *kcontrol,
 			struct snd_ctl_elem_info *uinfo)
@@ -99,14 +87,27 @@ static int control_put(struct snd_kcontrol *kcontrol,
 	struct snd_usb_caiaqdev *cdev = caiaqdev(chip->card);
 	int pos = kcontrol->private_value;
 	int v = ucontrol->value.integer.value[0];
-	unsigned char cmd = EP1_CMD_WRITE_IO;
+	int ret;
+	unsigned char cmd;
 
-	if (cdev->chip.usb_id ==
-		USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_TRAKTORKONTROLX1))
+	switch (cdev->chip.usb_id) {
+	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_MASCHINECONTROLLER):
+	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_TRAKTORKONTROLX1):
+	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_KORECONTROLLER2):
+	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_KORECONTROLLER):
 		cmd = EP1_CMD_DIMM_LEDS;
+		break;
+	default:
+		cmd = EP1_CMD_WRITE_IO;
+		break;
+	}
 
 	if (pos & CNT_INTVAL) {
 		int i = pos & ~CNT_INTVAL;
+		unsigned char old = cdev->control_state[i];
+
+		if (old == v)
+			return 0;
 
 		cdev->control_state[i] = v;
 
@@ -117,22 +118,52 @@ static int control_put(struct snd_kcontrol *kcontrol,
 			cdev->ep8_out_buf[0] = i;
 			cdev->ep8_out_buf[1] = v;
 
-			usb_bulk_msg(cdev->chip.dev,
-				     usb_sndbulkpipe(cdev->chip.dev, 8),
-				     cdev->ep8_out_buf, sizeof(cdev->ep8_out_buf),
-				     &actual_len, 200);
+			ret = usb_bulk_msg(cdev->chip.dev,
+					   usb_sndbulkpipe(cdev->chip.dev, 8),
+					   cdev->ep8_out_buf,
+					   sizeof(cdev->ep8_out_buf),
+					   &actual_len, 200);
+		} else if (cdev->chip.usb_id ==
+			USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_MASCHINECONTROLLER)) {
+
+			int bank = 0;
+			int offset = 0;
+
+			if (i >= MASCHINE_BANK_SIZE) {
+				bank = 0x1e;
+				offset = MASCHINE_BANK_SIZE;
+			}
+
+			ret = snd_usb_caiaq_send_command_bank(cdev, cmd, bank,
+							      cdev->control_state + offset,
+							      MASCHINE_BANK_SIZE);
 		} else {
-			snd_usb_caiaq_send_command(cdev, cmd,
-					cdev->control_state, sizeof(cdev->control_state));
+			ret = snd_usb_caiaq_send_command(cdev, cmd,
+							 cdev->control_state,
+							 sizeof(cdev->control_state));
+		}
+
+		if (ret < 0) {
+			cdev->control_state[i] = old;
+			return ret;
 		}
 	} else {
-		if (v)
-			cdev->control_state[pos / 8] |= 1 << (pos % 8);
-		else
-			cdev->control_state[pos / 8] &= ~(1 << (pos % 8));
+		int idx = pos / 8;
+		unsigned char mask = 1 << (pos % 8);
+		unsigned char old = cdev->control_state[idx];
+		unsigned char val = v ? (old | mask) : (old & ~mask);
 
-		snd_usb_caiaq_send_command(cdev, cmd,
-				cdev->control_state, sizeof(cdev->control_state));
+		if (old == val)
+			return 0;
+
+		cdev->control_state[idx] = val;
+		ret = snd_usb_caiaq_send_command(cdev, cmd,
+						 cdev->control_state,
+						 sizeof(cdev->control_state));
+		if (ret < 0) {
+			cdev->control_state[idx] = old;
+			return ret;
+		}
 	}
 
 	return 1;
@@ -153,14 +184,14 @@ struct caiaq_controller {
 	int index;
 };
 
-static struct caiaq_controller ak1_controller[] = {
+static const struct caiaq_controller ak1_controller[] = {
 	{ "LED left", 	2 },
 	{ "LED middle", 1 },
 	{ "LED right", 	0 },
 	{ "LED ring", 	3 }
 };
 
-static struct caiaq_controller rk2_controller[] = {
+static const struct caiaq_controller rk2_controller[] = {
 	{ "LED 1",		5  },
 	{ "LED 2",		4  },
 	{ "LED 3",		3  },
@@ -186,7 +217,7 @@ static struct caiaq_controller rk2_controller[] = {
 	{ "LED 7seg_3g",	23 }
 };
 
-static struct caiaq_controller rk3_controller[] = {
+static const struct caiaq_controller rk3_controller[] = {
 	{ "LED 7seg_1a",        0 + 0 },
 	{ "LED 7seg_1b",        0 + 1 },
 	{ "LED 7seg_1c",        0 + 2 },
@@ -234,7 +265,7 @@ static struct caiaq_controller rk3_controller[] = {
 	{ "LED pedal",		32 + 8 }
 };
 
-static struct caiaq_controller kore_controller[] = {
+static const struct caiaq_controller kore_controller[] = {
 	{ "LED F1",		8   | CNT_INTVAL },
 	{ "LED F2",		12  | CNT_INTVAL },
 	{ "LED F3",		0   | CNT_INTVAL },
@@ -268,7 +299,7 @@ static struct caiaq_controller kore_controller[] = {
 	{ "LED control",	26  | CNT_INTVAL }
 };
 
-static struct caiaq_controller a8dj_controller[] = {
+static const struct caiaq_controller a8dj_controller[] = {
 	{ "Current input mode",			0 | CNT_INTVAL 	},
 	{ "GND lift for TC Vinyl mode", 	24 + 0 		},
 	{ "GND lift for TC CD/Line mode", 	24 + 1 		},
@@ -276,11 +307,11 @@ static struct caiaq_controller a8dj_controller[] = {
 	{ "Software lock", 			40 		}
 };
 
-static struct caiaq_controller a4dj_controller[] = {
+static const struct caiaq_controller a4dj_controller[] = {
 	{ "Current input mode",	0 | CNT_INTVAL 	}
 };
 
-static struct caiaq_controller kontrolx1_controller[] = {
+static const struct caiaq_controller kontrolx1_controller[] = {
 	{ "LED FX A: ON",		7 | CNT_INTVAL	},
 	{ "LED FX A: 1",		6 | CNT_INTVAL	},
 	{ "LED FX A: 2",		5 | CNT_INTVAL	},
@@ -317,7 +348,7 @@ static struct caiaq_controller kontrolx1_controller[] = {
 	{ "LED Deck B: SYNC",		8  | CNT_INTVAL	},
 };
 
-static struct caiaq_controller kontrols4_controller[] = {
+static const struct caiaq_controller kontrols4_controller[] = {
 	{ "LED: Master: Quant",			10  | CNT_INTVAL },
 	{ "LED: Master: Headphone",		11  | CNT_INTVAL },
 	{ "LED: Master: Master",		12  | CNT_INTVAL },
@@ -490,7 +521,75 @@ static struct caiaq_controller kontrols4_controller[] = {
 	{ "LED: FX2: Mode",			133 | CNT_INTVAL },
 };
 
-static int add_controls(struct caiaq_controller *c, int num,
+static const struct caiaq_controller maschine_controller[] = {
+	{ "LED: Pad 1",				3  | CNT_INTVAL },
+	{ "LED: Pad 2",				2  | CNT_INTVAL },
+	{ "LED: Pad 3",				1  | CNT_INTVAL },
+	{ "LED: Pad 4",				0  | CNT_INTVAL },
+	{ "LED: Pad 5",				7  | CNT_INTVAL },
+	{ "LED: Pad 6",				6  | CNT_INTVAL },
+	{ "LED: Pad 7",				5  | CNT_INTVAL },
+	{ "LED: Pad 8",				4  | CNT_INTVAL },
+	{ "LED: Pad 9",				11 | CNT_INTVAL },
+	{ "LED: Pad 10",			10 | CNT_INTVAL },
+	{ "LED: Pad 11",			9  | CNT_INTVAL },
+	{ "LED: Pad 12",			8  | CNT_INTVAL },
+	{ "LED: Pad 13",			15 | CNT_INTVAL },
+	{ "LED: Pad 14",			14 | CNT_INTVAL },
+	{ "LED: Pad 15",			13 | CNT_INTVAL },
+	{ "LED: Pad 16",			12 | CNT_INTVAL },
+
+	{ "LED: Mute",				16 | CNT_INTVAL },
+	{ "LED: Solo",				17 | CNT_INTVAL },
+	{ "LED: Select",			18 | CNT_INTVAL },
+	{ "LED: Duplicate",			19 | CNT_INTVAL },
+	{ "LED: Navigate",			20 | CNT_INTVAL },
+	{ "LED: Pad Mode",			21 | CNT_INTVAL },
+	{ "LED: Pattern",			22 | CNT_INTVAL },
+	{ "LED: Scene",				23 | CNT_INTVAL },
+
+	{ "LED: Shift",				24 | CNT_INTVAL },
+	{ "LED: Erase",				25 | CNT_INTVAL },
+	{ "LED: Grid",				26 | CNT_INTVAL },
+	{ "LED: Right Bottom",			27 | CNT_INTVAL },
+	{ "LED: Rec",				28 | CNT_INTVAL },
+	{ "LED: Play",				29 | CNT_INTVAL },
+	{ "LED: Left Bottom",			32 | CNT_INTVAL },
+	{ "LED: Restart",			33 | CNT_INTVAL },
+
+	{ "LED: Group A",			41 | CNT_INTVAL },
+	{ "LED: Group B",			40 | CNT_INTVAL },
+	{ "LED: Group C",			37 | CNT_INTVAL },
+	{ "LED: Group D",			36 | CNT_INTVAL },
+	{ "LED: Group E",			39 | CNT_INTVAL },
+	{ "LED: Group F",			38 | CNT_INTVAL },
+	{ "LED: Group G",			35 | CNT_INTVAL },
+	{ "LED: Group H",			34 | CNT_INTVAL },
+
+	{ "LED: Auto Write",			42 | CNT_INTVAL },
+	{ "LED: Snap",				43 | CNT_INTVAL },
+	{ "LED: Right Top",			44 | CNT_INTVAL },
+	{ "LED: Left Top",			45 | CNT_INTVAL },
+	{ "LED: Sampling",			46 | CNT_INTVAL },
+	{ "LED: Browse",			47 | CNT_INTVAL },
+	{ "LED: Step",				48 | CNT_INTVAL },
+	{ "LED: Control",			49 | CNT_INTVAL },
+
+	{ "LED: Top Button 1",			57 | CNT_INTVAL },
+	{ "LED: Top Button 2",			56 | CNT_INTVAL },
+	{ "LED: Top Button 3",			55 | CNT_INTVAL },
+	{ "LED: Top Button 4",			54 | CNT_INTVAL },
+	{ "LED: Top Button 5",			53 | CNT_INTVAL },
+	{ "LED: Top Button 6",			52 | CNT_INTVAL },
+	{ "LED: Top Button 7",			51 | CNT_INTVAL },
+	{ "LED: Top Button 8",			50 | CNT_INTVAL },
+
+	{ "LED: Note Repeat",			58 | CNT_INTVAL },
+
+	{ "Backlight Display",			59 | CNT_INTVAL }
+};
+
+static int add_controls(const struct caiaq_controller *c, int num,
 			struct snd_usb_caiaqdev *cdev)
 {
 	int i, ret;
@@ -553,8 +652,12 @@ int snd_usb_caiaq_control_init(struct snd_usb_caiaqdev *cdev)
 		ret = add_controls(kontrols4_controller,
 			ARRAY_SIZE(kontrols4_controller), cdev);
 		break;
+
+	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_MASCHINECONTROLLER):
+		ret = add_controls(maschine_controller,
+			ARRAY_SIZE(maschine_controller), cdev);
+		break;
 	}
 
 	return ret;
 }
-

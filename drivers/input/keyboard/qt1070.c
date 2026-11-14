@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Atmel AT42QT1070 QTouch Sensor Controller
  *
@@ -8,24 +9,9 @@
  *  Base on AT42QT2160 driver by:
  *  Raphael Derosso Pereira <raphaelpereira@gmail.com>
  *  Copyright (C) 2009
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/input.h>
 #include <linux/slab.h>
@@ -140,16 +126,14 @@ static irqreturn_t qt1070_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int qt1070_probe(struct i2c_client *client,
-				const struct i2c_device_id *id)
+static int qt1070_probe(struct i2c_client *client)
 {
 	struct qt1070_data *data;
 	struct input_dev *input;
 	int i;
 	int err;
 
-	err = i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE);
-	if (!err) {
+	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE)) {
 		dev_err(&client->dev, "%s adapter not supported\n",
 			dev_driver_string(&client->adapter->dev));
 		return -ENODEV;
@@ -164,20 +148,19 @@ static int qt1070_probe(struct i2c_client *client,
 	if (!qt1070_identify(client))
 		return -ENODEV;
 
-	data = kzalloc(sizeof(struct qt1070_data), GFP_KERNEL);
-	input = input_allocate_device();
-	if (!data || !input) {
-		dev_err(&client->dev, "insufficient memory\n");
-		err = -ENOMEM;
-		goto err_free_mem;
-	}
+	data = devm_kzalloc_obj(&client->dev, struct qt1070_data);
+	if (!data)
+		return -ENOMEM;
+
+	input = devm_input_allocate_device(&client->dev);
+	if (!input)
+		return -ENOMEM;
 
 	data->client = client;
 	data->input = input;
 	data->irq = client->irq;
 
 	input->name = "AT42QT1070 QTouch Sensor";
-	input->dev.parent = &client->dev;
 	input->id.bustype = BUS_I2C;
 
 	/* Add the keycode */
@@ -200,19 +183,20 @@ static int qt1070_probe(struct i2c_client *client,
 	qt1070_write(client, RESET, 1);
 	msleep(QT1070_RESET_TIME);
 
-	err = request_threaded_irq(client->irq, NULL, qt1070_interrupt,
-				   IRQF_TRIGGER_NONE | IRQF_ONESHOT,
-				   client->dev.driver->name, data);
+	err = devm_request_threaded_irq(&client->dev, client->irq,
+					NULL, qt1070_interrupt,
+					IRQF_TRIGGER_NONE | IRQF_ONESHOT,
+					client->dev.driver->name, data);
 	if (err) {
 		dev_err(&client->dev, "fail to request irq\n");
-		goto err_free_mem;
+		return err;
 	}
 
 	/* Register the input device */
 	err = input_register_device(data->input);
 	if (err) {
 		dev_err(&client->dev, "Failed to register input device\n");
-		goto err_free_irq;
+		return err;
 	}
 
 	i2c_set_clientdata(client, data);
@@ -221,42 +205,54 @@ static int qt1070_probe(struct i2c_client *client,
 	qt1070_read(client, DET_STATUS);
 
 	return 0;
-
-err_free_irq:
-	free_irq(client->irq, data);
-err_free_mem:
-	input_free_device(input);
-	kfree(data);
-	return err;
 }
 
-static int qt1070_remove(struct i2c_client *client)
+static int qt1070_suspend(struct device *dev)
 {
+	struct i2c_client *client = to_i2c_client(dev);
 	struct qt1070_data *data = i2c_get_clientdata(client);
 
-	/* Release IRQ */
-	free_irq(client->irq, data);
-
-	input_unregister_device(data->input);
-	kfree(data);
+	if (device_may_wakeup(dev))
+		enable_irq_wake(data->irq);
 
 	return 0;
 }
 
+static int qt1070_resume(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct qt1070_data *data = i2c_get_clientdata(client);
+
+	if (device_may_wakeup(dev))
+		disable_irq_wake(data->irq);
+
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(qt1070_pm_ops, qt1070_suspend, qt1070_resume);
+
 static const struct i2c_device_id qt1070_id[] = {
-	{ "qt1070", 0 },
-	{ },
+	{ .name = "qt1070" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, qt1070_id);
+
+#ifdef CONFIG_OF
+static const struct of_device_id qt1070_of_match[] = {
+	{ .compatible = "qt1070", },
+	{ },
+};
+MODULE_DEVICE_TABLE(of, qt1070_of_match);
+#endif
 
 static struct i2c_driver qt1070_driver = {
 	.driver	= {
 		.name	= "qt1070",
-		.owner	= THIS_MODULE,
+		.of_match_table = of_match_ptr(qt1070_of_match),
+		.pm	= pm_sleep_ptr(&qt1070_pm_ops),
 	},
 	.id_table	= qt1070_id,
 	.probe		= qt1070_probe,
-	.remove		= qt1070_remove,
 };
 
 module_i2c_driver(qt1070_driver);

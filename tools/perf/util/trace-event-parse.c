@@ -1,176 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2009, Steven Rostedt <srostedt@redhat.com>
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License (not later!)
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
- * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 #include <errno.h>
 
-#include "../perf.h"
-#include "util.h"
+#include "debug.h"
 #include "trace-event.h"
 
-int header_page_size_size;
-int header_page_ts_size;
-int header_page_data_offset;
-
-bool latency_format;
-
-struct pevent *read_trace_init(int file_bigendian, int host_bigendian)
-{
-	struct pevent *pevent = pevent_alloc();
-
-	if (pevent != NULL) {
-		pevent_set_flag(pevent, PEVENT_NSEC_OUTPUT);
-		pevent_set_file_bigendian(pevent, file_bigendian);
-		pevent_set_host_bigendian(pevent, host_bigendian);
-	}
-
-	return pevent;
-}
-
-static int get_common_field(struct scripting_context *context,
-			    int *offset, int *size, const char *type)
-{
-	struct pevent *pevent = context->pevent;
-	struct event_format *event;
-	struct format_field *field;
-
-	if (!*size) {
-		if (!pevent->events)
-			return 0;
-
-		event = pevent->events[0];
-		field = pevent_find_common_field(event, type);
-		if (!field)
-			return 0;
-		*offset = field->offset;
-		*size = field->size;
-	}
-
-	return pevent_read_number(pevent, context->event_data + *offset, *size);
-}
-
-int common_lock_depth(struct scripting_context *context)
-{
-	static int offset;
-	static int size;
-	int ret;
-
-	ret = get_common_field(context, &size, &offset,
-			       "common_lock_depth");
-	if (ret < 0)
-		return -1;
-
-	return ret;
-}
-
-int common_flags(struct scripting_context *context)
-{
-	static int offset;
-	static int size;
-	int ret;
-
-	ret = get_common_field(context, &size, &offset,
-			       "common_flags");
-	if (ret < 0)
-		return -1;
-
-	return ret;
-}
-
-int common_pc(struct scripting_context *context)
-{
-	static int offset;
-	static int size;
-	int ret;
-
-	ret = get_common_field(context, &size, &offset,
-			       "common_preempt_count");
-	if (ret < 0)
-		return -1;
-
-	return ret;
-}
+#include <linux/ctype.h>
+#include <linux/kernel.h>
+#include <event-parse.h>
 
 unsigned long long
-raw_field_value(struct event_format *event, const char *name, void *data)
+raw_field_value(struct tep_event *event, const char *name, void *data)
 {
-	struct format_field *field;
+	struct tep_format_field *field;
 	unsigned long long val;
 
-	field = pevent_find_any_field(event, name);
+	field = tep_find_any_field(event, name);
 	if (!field)
 		return 0ULL;
 
-	pevent_read_number_field(field, data, &val);
+	tep_read_number_field(field, data, &val);
 
 	return val;
 }
 
-void *raw_field_ptr(struct event_format *event, const char *name, void *data)
+unsigned long long read_size(struct tep_event *event, void *ptr, int size)
 {
-	struct format_field *field;
-
-	field = pevent_find_any_field(event, name);
-	if (!field)
-		return NULL;
-
-	if (field->flags & FIELD_IS_DYNAMIC) {
-		int offset;
-
-		offset = *(int *)(data + field->offset);
-		offset &= 0xffff;
-
-		return data + offset;
-	}
-
-	return data + field->offset;
+	return tep_read_number(event->tep, ptr, size);
 }
 
-int trace_parse_common_type(struct pevent *pevent, void *data)
+void event_format__fprintf(const struct tep_event *event,
+			   int cpu, void *data, int size, FILE *fp)
 {
-	struct pevent_record record;
-
-	record.data = data;
-	return pevent_data_type(pevent, &record);
-}
-
-int trace_parse_common_pid(struct pevent *pevent, void *data)
-{
-	struct pevent_record record;
-
-	record.data = data;
-	return pevent_data_pid(pevent, &record);
-}
-
-unsigned long long read_size(struct event_format *event, void *ptr, int size)
-{
-	return pevent_read_number(event->pevent, ptr, size);
-}
-
-void event_format__print(struct event_format *event,
-			 int cpu, void *data, int size)
-{
-	struct pevent_record record;
+	struct tep_record record;
 	struct trace_seq s;
 
 	memset(&record, 0, sizeof(record));
@@ -179,41 +46,125 @@ void event_format__print(struct event_format *event,
 	record.data = data;
 
 	trace_seq_init(&s);
-	pevent_event_info(&s, event, &record);
-	trace_seq_do_printf(&s);
+	tep_print_event(event->tep, &s, &record, "%s", TEP_PRINT_INFO);
+	trace_seq_do_fprintf(&s, fp);
+	trace_seq_destroy(&s);
 }
 
-void parse_proc_kallsyms(struct pevent *pevent,
-			 char *file, unsigned int size __maybe_unused)
+/*
+ * prev_state is of size long, which is 32 bits on 32 bit architectures.
+ * As it needs to have the same bits for both 32 bit and 64 bit architectures
+ * we can just assume that the flags we care about will all be within
+ * the 32 bits.
+ */
+#define MAX_STATE_BITS 32
+
+static const char *convert_sym(struct tep_print_flag_sym *sym)
 {
-	unsigned long long addr;
-	char *func;
-	char *line;
-	char *next = NULL;
-	char *addr_str;
-	char *mod;
-	char *fmt;
+	static char save_states[MAX_STATE_BITS + 1];
 
-	line = strtok_r(file, "\n", &next);
-	while (line) {
-		mod = NULL;
-		addr_str = strtok_r(line, " ", &fmt);
-		addr = strtoull(addr_str, NULL, 16);
-		/* skip character */
-		strtok_r(NULL, " ", &fmt);
-		func = strtok_r(NULL, "\t", &fmt);
-		mod = strtok_r(NULL, "]", &fmt);
-		/* truncate the extra '[' */
-		if (mod)
-			mod = mod + 1;
+	memset(save_states, 0, sizeof(save_states));
 
-		pevent_register_function(pevent, func, addr, mod);
+	/* This is the flags for the prev_state_field, now make them into a string */
+	for (; sym; sym = sym->next) {
+		long bitmask = strtoul(sym->value, NULL, 0);
+		int i;
 
-		line = strtok_r(NULL, "\n", &next);
+		for (i = 0; !(bitmask & 1); i++)
+			bitmask >>= 1;
+
+		if (i >= MAX_STATE_BITS)
+			continue;
+
+		save_states[i] = sym->str[0];
 	}
+
+	return save_states;
 }
 
-void parse_ftrace_printk(struct pevent *pevent,
+static struct tep_print_arg_field *
+find_arg_field(struct tep_format_field *prev_state_field, struct tep_print_arg *arg)
+{
+	struct tep_print_arg_field *field;
+
+	if (!arg)
+		return NULL;
+
+	if (arg->type == TEP_PRINT_FIELD)
+		return &arg->field;
+
+	if (arg->type == TEP_PRINT_OP) {
+		field = find_arg_field(prev_state_field, arg->op.left);
+		if (field && field->field == prev_state_field)
+			return field;
+		field = find_arg_field(prev_state_field, arg->op.right);
+		if (field && field->field == prev_state_field)
+			return field;
+	}
+	return NULL;
+}
+
+static struct tep_print_flag_sym *
+test_flags(struct tep_format_field *prev_state_field, struct tep_print_arg *arg)
+{
+	struct tep_print_arg_field *field;
+
+	field = find_arg_field(prev_state_field, arg->flags.field);
+	if (!field)
+		return NULL;
+
+	return arg->flags.flags;
+}
+
+static struct tep_print_flag_sym *
+search_op(struct tep_format_field *prev_state_field, struct tep_print_arg *arg)
+{
+	struct tep_print_flag_sym *sym = NULL;
+
+	if (!arg)
+		return NULL;
+
+	if (arg->type == TEP_PRINT_OP) {
+		sym = search_op(prev_state_field, arg->op.left);
+		if (sym)
+			return sym;
+
+		sym = search_op(prev_state_field, arg->op.right);
+		if (sym)
+			return sym;
+	} else if (arg->type == TEP_PRINT_FLAGS) {
+		sym = test_flags(prev_state_field, arg);
+	}
+
+	return sym;
+}
+
+const char *parse_task_states(struct tep_format_field *state_field)
+{
+	struct tep_print_flag_sym *sym;
+	struct tep_print_arg *arg;
+	struct tep_event *event;
+
+	event = state_field->event;
+
+	/*
+	 * Look at the event format fields, and search for where
+	 * the prev_state is parsed via the format flags.
+	 */
+	for (arg = event->print_fmt.args; arg; arg = arg->next) {
+		/*
+		 * Currently, the __print_flags() for the prev_state
+		 * is embedded in operations, so they too must be
+		 * searched.
+		 */
+		sym = search_op(state_field, arg);
+		if (sym)
+			return convert_sym(sym);
+	}
+	return NULL;
+}
+
+void parse_ftrace_printk(struct tep_handle *pevent,
 			 char *file, unsigned int size __maybe_unused)
 {
 	unsigned long long addr;
@@ -221,59 +172,49 @@ void parse_ftrace_printk(struct pevent *pevent,
 	char *line;
 	char *next = NULL;
 	char *addr_str;
-	char *fmt;
+	char *fmt = NULL;
 
 	line = strtok_r(file, "\n", &next);
 	while (line) {
 		addr_str = strtok_r(line, ":", &fmt);
 		if (!addr_str) {
-			warning("printk format with empty entry");
+			pr_warning("printk format with empty entry");
 			break;
 		}
 		addr = strtoull(addr_str, NULL, 16);
 		/* fmt still has a space, skip it */
 		printk = strdup(fmt+1);
 		line = strtok_r(NULL, "\n", &next);
-		pevent_register_print_string(pevent, printk, addr);
+		tep_register_print_string(pevent, printk, addr);
+		free(printk);
 	}
 }
 
-int parse_ftrace_file(struct pevent *pevent, char *buf, unsigned long size)
+void parse_saved_cmdline(struct tep_handle *pevent,
+			 char *file, unsigned int size __maybe_unused)
 {
-	return pevent_parse_event(pevent, buf, size, "ftrace");
+	char comm[17]; /* Max comm length in the kernel is 16. */
+	char *line;
+	char *next = NULL;
+	int pid;
+
+	line = strtok_r(file, "\n", &next);
+	while (line) {
+		if (sscanf(line, "%d %16s", &pid, comm) == 2)
+			tep_register_comm(pevent, comm, pid);
+		line = strtok_r(NULL, "\n", &next);
+	}
 }
 
-int parse_event_file(struct pevent *pevent,
+int parse_ftrace_file(struct tep_handle *pevent, char *buf, unsigned long size)
+{
+	return tep_parse_event(pevent, buf, size, "ftrace");
+}
+
+int parse_event_file(struct tep_handle *pevent,
 		     char *buf, unsigned long size, char *sys)
 {
-	return pevent_parse_event(pevent, buf, size, sys);
-}
-
-struct event_format *trace_find_next_event(struct pevent *pevent,
-					   struct event_format *event)
-{
-	static int idx;
-
-	if (!pevent || !pevent->events)
-		return NULL;
-
-	if (!event) {
-		idx = 0;
-		return pevent->events[0];
-	}
-
-	if (idx < pevent->nr_events && event == pevent->events[idx]) {
-		idx++;
-		if (idx == pevent->nr_events)
-			return NULL;
-		return pevent->events[idx];
-	}
-
-	for (idx = 1; idx < pevent->nr_events; idx++) {
-		if (event == pevent->events[idx - 1])
-			return pevent->events[idx];
-	}
-	return NULL;
+	return tep_parse_event(pevent, buf, size, sys);
 }
 
 struct flag {
@@ -287,7 +228,7 @@ static const struct flag flags[] = {
 	{ "NET_TX_SOFTIRQ", 2 },
 	{ "NET_RX_SOFTIRQ", 3 },
 	{ "BLOCK_SOFTIRQ", 4 },
-	{ "BLOCK_IOPOLL_SOFTIRQ", 5 },
+	{ "IRQ_POLL_SOFTIRQ", 5 },
 	{ "TASKLET_SOFTIRQ", 6 },
 	{ "SCHED_SOFTIRQ", 7 },
 	{ "HRTIMER_SOFTIRQ", 8 },
@@ -309,7 +250,7 @@ unsigned long long eval_flag(const char *flag)
 	if (isdigit(flag[0]))
 		return strtoull(flag, NULL, 0);
 
-	for (i = 0; i < (int)(sizeof(flags)/sizeof(flags[0])); i++)
+	for (i = 0; i < (int)(ARRAY_SIZE(flags)); i++)
 		if (strcmp(flags[i].name, flag) == 0)
 			return flags[i].value;
 

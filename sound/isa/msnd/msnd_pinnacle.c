@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*********************************************************************
  *
  * Linux multisound pinnacle/fiji driver for ALSA.
@@ -9,7 +10,6 @@
  *	to make it easier for some brave heart to implemt classic
  *	support in alsa, i left all the MSND_CLASSIC tokens in this file.
  *	but for now this untested & undone.
- *
  *
  * ripped from linux kernel 2.4.18 by Karsten Wiese.
  *
@@ -29,20 +29,6 @@
  * 12-3-2000  Modified IO port validation  Steve Sycamore
  *
  * Copyright (C) 1998 Andrew Veliath
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  ********************************************************************/
 
@@ -73,17 +59,19 @@
 #ifdef MSND_CLASSIC
 #  include "msnd_classic.h"
 #  define LOGNAME			"msnd_classic"
+#  define DEV_NAME			"msnd-classic"
 #else
 #  include "msnd_pinnacle.h"
 #  define LOGNAME			"snd_msnd_pinnacle"
+#  define DEV_NAME			"msnd-pinnacle"
 #endif
 
 static void set_default_audio_parameters(struct snd_msnd *chip)
 {
-	chip->play_sample_size = DEFSAMPLESIZE;
+	chip->play_sample_size = snd_pcm_format_width(DEFSAMPLESIZE);
 	chip->play_sample_rate = DEFSAMPLERATE;
 	chip->play_channels = DEFCHANNELS;
-	chip->capture_sample_size = DEFSAMPLESIZE;
+	chip->capture_sample_size = snd_pcm_format_width(DEFSAMPLESIZE);
 	chip->capture_sample_rate = DEFSAMPLERATE;
 	chip->capture_channels = DEFCHANNELS;
 }
@@ -93,11 +81,12 @@ static void snd_msnd_eval_dsp_msg(struct snd_msnd *chip, u16 wMessage)
 	switch (HIBYTE(wMessage)) {
 	case HIMT_PLAY_DONE: {
 		if (chip->banksPlayed < 3)
-			snd_printdd("%08X: HIMT_PLAY_DONE: %i\n",
+			dev_dbg(chip->card->dev, "%08X: HIMT_PLAY_DONE: %i\n",
 				(unsigned)jiffies, LOBYTE(wMessage));
 
 		if (chip->last_playbank == LOBYTE(wMessage)) {
-			snd_printdd("chip.last_playbank == LOBYTE(wMessage)\n");
+			dev_dbg(chip->card->dev,
+				"chip.last_playbank == LOBYTE(wMessage)\n");
 			break;
 		}
 		chip->banksPlayed++;
@@ -133,33 +122,29 @@ static void snd_msnd_eval_dsp_msg(struct snd_msnd *chip, u16 wMessage)
 		case HIDSP_PLAY_UNDER:
 #endif
 		case HIDSP_INT_PLAY_UNDER:
-			snd_printd(KERN_WARNING LOGNAME ": Play underflow %i\n",
+			dev_dbg(chip->card->dev,
+				LOGNAME ": Play underflow %i\n",
 				chip->banksPlayed);
 			if (chip->banksPlayed > 2)
 				clear_bit(F_WRITING, &chip->flags);
 			break;
 
 		case HIDSP_INT_RECORD_OVER:
-			snd_printd(KERN_WARNING LOGNAME ": Record overflow\n");
+			dev_dbg(chip->card->dev, LOGNAME ": Record overflow\n");
 			clear_bit(F_READING, &chip->flags);
 			break;
 
 		default:
-			snd_printd(KERN_WARNING LOGNAME
-				   ": DSP message %d 0x%02x\n",
-				   LOBYTE(wMessage), LOBYTE(wMessage));
+			dev_dbg(chip->card->dev, LOGNAME
+				": DSP message %d 0x%02x\n",
+				LOBYTE(wMessage), LOBYTE(wMessage));
 			break;
 		}
 		break;
 
-	case HIMT_MIDI_IN_UCHAR:
-		if (chip->msndmidi_mpu)
-			snd_msndmidi_input_read(chip->msndmidi_mpu);
-		break;
-
 	default:
-		snd_printd(KERN_WARNING LOGNAME ": HIMT message %d 0x%02x\n",
-			   HIBYTE(wMessage), HIBYTE(wMessage));
+		dev_dbg(chip->card->dev, LOGNAME ": HIMT message %d 0x%02x\n",
+			HIBYTE(wMessage), HIBYTE(wMessage));
 		break;
 	}
 }
@@ -167,32 +152,34 @@ static void snd_msnd_eval_dsp_msg(struct snd_msnd *chip, u16 wMessage)
 static irqreturn_t snd_msnd_interrupt(int irq, void *dev_id)
 {
 	struct snd_msnd *chip = dev_id;
-	void *pwDSPQData = chip->mappedbase + DSPQ_DATA_BUFF;
+	void __iomem *pwDSPQData = chip->mappedbase + DSPQ_DATA_BUFF;
+	u16 head, tail, size;
 
 	/* Send ack to DSP */
 	/* inb(chip->io + HP_RXL); */
 
 	/* Evaluate queued DSP messages */
-	while (readw(chip->DSPQ + JQS_wTail) != readw(chip->DSPQ + JQS_wHead)) {
-		u16 wTmp;
-
-		snd_msnd_eval_dsp_msg(chip,
-			readw(pwDSPQData + 2 * readw(chip->DSPQ + JQS_wHead)));
-
-		wTmp = readw(chip->DSPQ + JQS_wHead) + 1;
-		if (wTmp > readw(chip->DSPQ + JQS_wSize))
-			writew(0, chip->DSPQ + JQS_wHead);
-		else
-			writew(wTmp, chip->DSPQ + JQS_wHead);
+	head = readw(chip->DSPQ + JQS_wHead);
+	tail = readw(chip->DSPQ + JQS_wTail);
+	size = readw(chip->DSPQ + JQS_wSize);
+	if (head > size || tail > size)
+		goto out;
+	while (head != tail) {
+		snd_msnd_eval_dsp_msg(chip, readw(pwDSPQData + 2 * head));
+		if (++head > size)
+			head = 0;
+		writew(head, chip->DSPQ + JQS_wHead);
 	}
+ out:
 	/* Send ack to DSP */
 	inb(chip->io + HP_RXL);
 	return IRQ_HANDLED;
 }
 
 
-static int snd_msnd_reset_dsp(long io, unsigned char *info)
+static int snd_msnd_reset_dsp(struct snd_msnd *chip, unsigned char *info)
 {
+	long io = chip->io;
 	int timeout = 100;
 
 	outb(HPDSPRESET_ON, io + HP_DSPR);
@@ -208,7 +195,7 @@ static int snd_msnd_reset_dsp(long io, unsigned char *info)
 			return 0;
 		msleep(1);
 	}
-	snd_printk(KERN_ERR LOGNAME ": Cannot reset DSP\n");
+	dev_err(chip->card->dev, LOGNAME ": Cannot reset DSP\n");
 
 	return -EIO;
 }
@@ -224,19 +211,19 @@ static int snd_msnd_probe(struct snd_card *card)
 #endif
 
 	if (!request_region(chip->io, DSP_NUMIO, "probing")) {
-		snd_printk(KERN_ERR LOGNAME ": I/O port conflict\n");
+		dev_err(card->dev, LOGNAME ": I/O port conflict\n");
 		return -ENODEV;
 	}
 
-	if (snd_msnd_reset_dsp(chip->io, &info) < 0) {
+	if (snd_msnd_reset_dsp(chip, &info) < 0) {
 		release_region(chip->io, DSP_NUMIO);
 		return -ENODEV;
 	}
 
 #ifdef MSND_CLASSIC
-	strcpy(card->shortname, "Classic/Tahiti/Monterey");
-	strcpy(card->longname, "Turtle Beach Multisound");
-	printk(KERN_INFO LOGNAME ": %s, "
+	strscpy(card->shortname, "Classic/Tahiti/Monterey");
+	strscpy(card->longname, "Turtle Beach Multisound");
+	dev_info(card->dev, LOGNAME ": %s, "
 	       "I/O 0x%lx-0x%lx, IRQ %d, memory mapped to 0x%lX-0x%lX\n",
 	       card->shortname,
 	       chip->io, chip->io + DSP_NUMIO - 1,
@@ -264,39 +251,39 @@ static int snd_msnd_probe(struct snd_card *card)
 	switch (info & 0x7) {
 	case 0x0:
 		rev = "I";
-		strcpy(card->shortname, pin);
+		strscpy(card->shortname, pin);
 		break;
 	case 0x1:
 		rev = "F";
-		strcpy(card->shortname, pin);
+		strscpy(card->shortname, pin);
 		break;
 	case 0x2:
 		rev = "G";
-		strcpy(card->shortname, pin);
+		strscpy(card->shortname, pin);
 		break;
 	case 0x3:
 		rev = "H";
-		strcpy(card->shortname, pin);
+		strscpy(card->shortname, pin);
 		break;
 	case 0x4:
 		rev = "E";
-		strcpy(card->shortname, fiji);
+		strscpy(card->shortname, fiji);
 		break;
 	case 0x5:
 		rev = "C";
-		strcpy(card->shortname, fiji);
+		strscpy(card->shortname, fiji);
 		break;
 	case 0x6:
 		rev = "D";
-		strcpy(card->shortname, fiji);
+		strscpy(card->shortname, fiji);
 		break;
 	case 0x7:
 		rev = "A-B (Fiji) or A-E (Pinnacle)";
-		strcpy(card->shortname, pinfiji);
+		strscpy(card->shortname, pinfiji);
 		break;
 	}
-	strcpy(card->longname, "Turtle Beach Multisound Pinnacle");
-	printk(KERN_INFO LOGNAME ": %s revision %s, Xilinx version %s, "
+	strscpy(card->longname, "Turtle Beach Multisound Pinnacle");
+	dev_info(card->dev, LOGNAME ": %s revision %s, Xilinx version %s, "
 	       "I/O 0x%lx-0x%lx, IRQ %d, memory mapped to 0x%lX-0x%lX\n",
 	       card->shortname,
 	       rev, xv,
@@ -313,7 +300,6 @@ static int snd_msnd_init_sma(struct snd_msnd *chip)
 {
 	static int initted;
 	u16 mastVolLeft, mastVolRight;
-	unsigned long flags;
 
 #ifdef MSND_CLASSIC
 	outb(chip->memid, chip->io + HP_MEMM);
@@ -330,11 +316,11 @@ static int snd_msnd_init_sma(struct snd_msnd *chip)
 	memset_io(chip->mappedbase, 0, 0x8000);
 
 	/* Critical section: bank 1 access */
-	spin_lock_irqsave(&chip->lock, flags);
-	outb(HPBLKSEL_1, chip->io + HP_BLKS);
-	memset_io(chip->mappedbase, 0, 0x8000);
-	outb(HPBLKSEL_0, chip->io + HP_BLKS);
-	spin_unlock_irqrestore(&chip->lock, flags);
+	scoped_guard(spinlock_irqsave, &chip->lock) {
+		outb(HPBLKSEL_1, chip->io + HP_BLKS);
+		memset_io(chip->mappedbase, 0, 0x8000);
+		outb(HPBLKSEL_0, chip->io + HP_BLKS);
+	}
 
 	/* Digital audio play queue */
 	chip->DAPQ = chip->mappedbase + DAPQ_OFFSET;
@@ -381,36 +367,30 @@ static int snd_msnd_init_sma(struct snd_msnd *chip)
 static int upload_dsp_code(struct snd_card *card)
 {
 	struct snd_msnd *chip = card->private_data;
-	const struct firmware *init_fw = NULL, *perm_fw = NULL;
+	const struct firmware *init_fw __free(firmware) = NULL;
+	const struct firmware *perm_fw __free(firmware) = NULL;
 	int err;
 
 	outb(HPBLKSEL_0, chip->io + HP_BLKS);
 
 	err = request_firmware(&init_fw, INITCODEFILE, card->dev);
 	if (err < 0) {
-		printk(KERN_ERR LOGNAME ": Error loading " INITCODEFILE);
-		goto cleanup1;
+		dev_err(card->dev, LOGNAME ": Error loading " INITCODEFILE);
+		return err;
 	}
 	err = request_firmware(&perm_fw, PERMCODEFILE, card->dev);
 	if (err < 0) {
-		printk(KERN_ERR LOGNAME ": Error loading " PERMCODEFILE);
-		goto cleanup;
+		dev_err(card->dev, LOGNAME ": Error loading " PERMCODEFILE);
+		return err;
 	}
 
 	memcpy_toio(chip->mappedbase, perm_fw->data, perm_fw->size);
 	if (snd_msnd_upload_host(chip, init_fw->data, init_fw->size) < 0) {
-		printk(KERN_WARNING LOGNAME ": Error uploading to DSP\n");
-		err = -ENODEV;
-		goto cleanup;
+		dev_warn(card->dev, LOGNAME ": Error uploading to DSP\n");
+		return -ENODEV;
 	}
-	printk(KERN_INFO LOGNAME ": DSP firmware uploaded\n");
-	err = 0;
-
-cleanup:
-	release_firmware(perm_fw);
-cleanup1:
-	release_firmware(init_fw);
-	return err;
+	dev_info(card->dev, LOGNAME ": DSP firmware uploaded\n");
+	return 0;
 }
 
 #ifdef MSND_CLASSIC
@@ -436,17 +416,17 @@ static int snd_msnd_initialize(struct snd_card *card)
 #endif
 	err = snd_msnd_init_sma(chip);
 	if (err < 0) {
-		printk(KERN_WARNING LOGNAME ": Cannot initialize SMA\n");
+		dev_warn(card->dev, LOGNAME ": Cannot initialize SMA\n");
 		return err;
 	}
 
-	err = snd_msnd_reset_dsp(chip->io, NULL);
+	err = snd_msnd_reset_dsp(chip, NULL);
 	if (err < 0)
 		return err;
 
 	err = upload_dsp_code(card);
 	if (err < 0) {
-		printk(KERN_WARNING LOGNAME ": Cannot upload DSP code\n");
+		dev_warn(card->dev, LOGNAME ": Cannot upload DSP code\n");
 		return err;
 	}
 
@@ -455,7 +435,7 @@ static int snd_msnd_initialize(struct snd_card *card)
 	while (readw(chip->mappedbase)) {
 		msleep(1);
 		if (!timeout--) {
-			snd_printd(KERN_ERR LOGNAME ": DSP reset timeout\n");
+			dev_err(card->dev, LOGNAME ": DSP reset timeout\n");
 			return -EIO;
 		}
 	}
@@ -477,17 +457,12 @@ static int snd_msnd_dsp_full_reset(struct snd_card *card)
 
 	rv = snd_msnd_initialize(card);
 	if (rv)
-		printk(KERN_WARNING LOGNAME ": DSP reset failed\n");
+		dev_warn(card->dev, LOGNAME ": DSP reset failed\n");
 	snd_msndmix_force_recsrc(chip, 0);
 	clear_bit(F_RESETTING, &chip->flags);
 	return rv;
 }
 
-static int snd_msnd_dev_free(struct snd_device *device)
-{
-	snd_printdd("snd_msnd_chip_free()\n");
-	return 0;
-}
 
 static int snd_msnd_send_dsp_cmd_chk(struct snd_msnd *chip, u8 cmd)
 {
@@ -499,7 +474,7 @@ static int snd_msnd_send_dsp_cmd_chk(struct snd_msnd *chip, u8 cmd)
 
 static int snd_msnd_calibrate_adc(struct snd_msnd *chip, u16 srate)
 {
-	snd_printdd("snd_msnd_calibrate_adc(%i)\n", srate);
+	dev_dbg(chip->card->dev, "snd_msnd_calibrate_adc(%i)\n", srate);
 	writew(srate, chip->SMA + SMA_wCalFreqAtoD);
 	if (chip->calibrate_signal == 0)
 		writew(readw(chip->SMA + SMA_wCurrHostStatusFlags)
@@ -512,7 +487,7 @@ static int snd_msnd_calibrate_adc(struct snd_msnd *chip, u16 srate)
 		schedule_timeout_interruptible(msecs_to_jiffies(333));
 		return 0;
 	}
-	printk(KERN_WARNING LOGNAME ": ADC calibration failed\n");
+	dev_warn(chip->card->dev, LOGNAME ": ADC calibration failed\n");
 	return -EIO;
 }
 
@@ -532,6 +507,19 @@ static void snd_msnd_mpu401_close(struct snd_mpu401 *mpu)
 	snd_msnd_disable_irq(mpu->private_data);
 }
 
+#ifdef CONFIG_PM
+static u8 snd_msnd_pm_recsrc(struct snd_msnd *chip)
+{
+	/* Convert recsrc to the Capture Source selector: 0=Analog, 1=MASS, 2=SPDIF. */
+	if (chip->recsrc & BIT(4))
+		return 1;
+	if ((chip->recsrc & BIT(17)) &&
+	    test_bit(F_HAVEDIGITAL, &chip->flags))
+		return 2;
+	return 0;
+}
+#endif
+
 static long mpu_io[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;
 static int mpu_irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;
 
@@ -539,57 +527,47 @@ static int snd_msnd_attach(struct snd_card *card)
 {
 	struct snd_msnd *chip = card->private_data;
 	int err;
-	static struct snd_device_ops ops = {
-		.dev_free =      snd_msnd_dev_free,
-		};
 
-	err = request_irq(chip->irq, snd_msnd_interrupt, 0, card->shortname,
-			  chip);
+	err = devm_request_irq(card->dev, chip->irq, snd_msnd_interrupt, 0,
+			       card->shortname, chip);
 	if (err < 0) {
-		printk(KERN_ERR LOGNAME ": Couldn't grab IRQ %d\n", chip->irq);
+		dev_err(card->dev, LOGNAME ": Couldn't grab IRQ %d\n", chip->irq);
 		return err;
 	}
-	if (request_region(chip->io, DSP_NUMIO, card->shortname) == NULL) {
-		free_irq(chip->irq, chip);
+	card->sync_irq = chip->irq;
+	if (!devm_request_region(card->dev, chip->io, DSP_NUMIO,
+				 card->shortname))
 		return -EBUSY;
-	}
 
-	if (!request_mem_region(chip->base, BUFFSIZE, card->shortname)) {
-		printk(KERN_ERR LOGNAME
+	if (!devm_request_mem_region(card->dev, chip->base, BUFFSIZE,
+				     card->shortname)) {
+		dev_err(card->dev, LOGNAME
 			": unable to grab memory region 0x%lx-0x%lx\n",
 			chip->base, chip->base + BUFFSIZE - 1);
-		release_region(chip->io, DSP_NUMIO);
-		free_irq(chip->irq, chip);
 		return -EBUSY;
 	}
-	chip->mappedbase = ioremap_nocache(chip->base, 0x8000);
+	chip->mappedbase = devm_ioremap(card->dev, chip->base, 0x8000);
 	if (!chip->mappedbase) {
-		printk(KERN_ERR LOGNAME
+		dev_err(card->dev, LOGNAME
 			": unable to map memory region 0x%lx-0x%lx\n",
 			chip->base, chip->base + BUFFSIZE - 1);
-		err = -EIO;
-		goto err_release_region;
+		return -EIO;
 	}
 
 	err = snd_msnd_dsp_full_reset(card);
 	if (err < 0)
-		goto err_release_region;
+		return err;
 
-	/* Register device */
-	err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops);
-	if (err < 0)
-		goto err_release_region;
-
-	err = snd_msnd_pcm(card, 0, NULL);
+	err = snd_msnd_pcm(card, 0);
 	if (err < 0) {
-		printk(KERN_ERR LOGNAME ": error creating new PCM device\n");
-		goto err_release_region;
+		dev_err(card->dev, LOGNAME ": error creating new PCM device\n");
+		return err;
 	}
 
 	err = snd_msndmix_new(card);
 	if (err < 0) {
-		printk(KERN_ERR LOGNAME ": error creating new Mixer device\n");
-		goto err_release_region;
+		dev_err(card->dev, LOGNAME ": error creating new Mixer device\n");
+		return err;
 	}
 
 
@@ -603,9 +581,9 @@ static int snd_msnd_attach(struct snd_card *card)
 					  mpu_irq[0],
 					  &chip->rmidi);
 		if (err < 0) {
-			printk(KERN_ERR LOGNAME
+			dev_err(card->dev, LOGNAME
 				": error creating new Midi device\n");
-			goto err_release_region;
+			return err;
 		}
 		mpu = chip->rmidi->private_data;
 
@@ -620,132 +598,114 @@ static int snd_msnd_attach(struct snd_card *card)
 
 	err = snd_card_register(card);
 	if (err < 0)
-		goto err_release_region;
+		return err;
 
 	return 0;
-
-err_release_region:
-	if (chip->mappedbase)
-		iounmap(chip->mappedbase);
-	release_mem_region(chip->base, BUFFSIZE);
-	release_region(chip->io, DSP_NUMIO);
-	free_irq(chip->irq, chip);
-	return err;
 }
 
-
-static void snd_msnd_unload(struct snd_card *card)
-{
-	struct snd_msnd *chip = card->private_data;
-
-	iounmap(chip->mappedbase);
-	release_mem_region(chip->base, BUFFSIZE);
-	release_region(chip->io, DSP_NUMIO);
-	free_irq(chip->irq, chip);
-	snd_card_free(card);
-}
 
 #ifndef MSND_CLASSIC
 
 /* Pinnacle/Fiji Logical Device Configuration */
 
-static int snd_msnd_write_cfg(int cfg, int reg, int value)
+static int snd_msnd_write_cfg(struct snd_msnd *chip, int cfg, int reg, int value)
 {
 	outb(reg, cfg);
 	outb(value, cfg + 1);
 	if (value != inb(cfg + 1)) {
-		printk(KERN_ERR LOGNAME ": snd_msnd_write_cfg: I/O error\n");
+		dev_err(chip->card->dev, LOGNAME ": %s: I/O error\n", __func__);
 		return -EIO;
 	}
 	return 0;
 }
 
-static int snd_msnd_write_cfg_io0(int cfg, int num, u16 io)
+static int snd_msnd_write_cfg_io0(struct snd_msnd *chip, int cfg, int num, u16 io)
 {
-	if (snd_msnd_write_cfg(cfg, IREG_LOGDEVICE, num))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_LOGDEVICE, num))
 		return -EIO;
-	if (snd_msnd_write_cfg(cfg, IREG_IO0_BASEHI, HIBYTE(io)))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_IO0_BASEHI, HIBYTE(io)))
 		return -EIO;
-	if (snd_msnd_write_cfg(cfg, IREG_IO0_BASELO, LOBYTE(io)))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_IO0_BASELO, LOBYTE(io)))
 		return -EIO;
 	return 0;
 }
 
-static int snd_msnd_write_cfg_io1(int cfg, int num, u16 io)
+static int snd_msnd_write_cfg_io1(struct snd_msnd *chip, int cfg, int num, u16 io)
 {
-	if (snd_msnd_write_cfg(cfg, IREG_LOGDEVICE, num))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_LOGDEVICE, num))
 		return -EIO;
-	if (snd_msnd_write_cfg(cfg, IREG_IO1_BASEHI, HIBYTE(io)))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_IO1_BASEHI, HIBYTE(io)))
 		return -EIO;
-	if (snd_msnd_write_cfg(cfg, IREG_IO1_BASELO, LOBYTE(io)))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_IO1_BASELO, LOBYTE(io)))
 		return -EIO;
 	return 0;
 }
 
-static int snd_msnd_write_cfg_irq(int cfg, int num, u16 irq)
+static int snd_msnd_write_cfg_irq(struct snd_msnd *chip, int cfg, int num, u16 irq)
 {
-	if (snd_msnd_write_cfg(cfg, IREG_LOGDEVICE, num))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_LOGDEVICE, num))
 		return -EIO;
-	if (snd_msnd_write_cfg(cfg, IREG_IRQ_NUMBER, LOBYTE(irq)))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_IRQ_NUMBER, LOBYTE(irq)))
 		return -EIO;
-	if (snd_msnd_write_cfg(cfg, IREG_IRQ_TYPE, IRQTYPE_EDGE))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_IRQ_TYPE, IRQTYPE_EDGE))
 		return -EIO;
 	return 0;
 }
 
-static int snd_msnd_write_cfg_mem(int cfg, int num, int mem)
+static int snd_msnd_write_cfg_mem(struct snd_msnd *chip, int cfg, int num, int mem)
 {
 	u16 wmem;
 
 	mem >>= 8;
 	wmem = (u16)(mem & 0xfff);
-	if (snd_msnd_write_cfg(cfg, IREG_LOGDEVICE, num))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_LOGDEVICE, num))
 		return -EIO;
-	if (snd_msnd_write_cfg(cfg, IREG_MEMBASEHI, HIBYTE(wmem)))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_MEMBASEHI, HIBYTE(wmem)))
 		return -EIO;
-	if (snd_msnd_write_cfg(cfg, IREG_MEMBASELO, LOBYTE(wmem)))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_MEMBASELO, LOBYTE(wmem)))
 		return -EIO;
-	if (wmem && snd_msnd_write_cfg(cfg, IREG_MEMCONTROL,
+	if (wmem && snd_msnd_write_cfg(chip, cfg, IREG_MEMCONTROL,
 				       MEMTYPE_HIADDR | MEMTYPE_16BIT))
 		return -EIO;
 	return 0;
 }
 
-static int snd_msnd_activate_logical(int cfg, int num)
+static int snd_msnd_activate_logical(struct snd_msnd *chip, int cfg, int num)
 {
-	if (snd_msnd_write_cfg(cfg, IREG_LOGDEVICE, num))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_LOGDEVICE, num))
 		return -EIO;
-	if (snd_msnd_write_cfg(cfg, IREG_ACTIVATE, LD_ACTIVATE))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_ACTIVATE, LD_ACTIVATE))
 		return -EIO;
 	return 0;
 }
 
-static int snd_msnd_write_cfg_logical(int cfg, int num, u16 io0,
+static int snd_msnd_write_cfg_logical(struct snd_msnd *chip,
+				      int cfg, int num, u16 io0,
 				      u16 io1, u16 irq, int mem)
 {
-	if (snd_msnd_write_cfg(cfg, IREG_LOGDEVICE, num))
+	if (snd_msnd_write_cfg(chip, cfg, IREG_LOGDEVICE, num))
 		return -EIO;
-	if (snd_msnd_write_cfg_io0(cfg, num, io0))
+	if (snd_msnd_write_cfg_io0(chip, cfg, num, io0))
 		return -EIO;
-	if (snd_msnd_write_cfg_io1(cfg, num, io1))
+	if (snd_msnd_write_cfg_io1(chip, cfg, num, io1))
 		return -EIO;
-	if (snd_msnd_write_cfg_irq(cfg, num, irq))
+	if (snd_msnd_write_cfg_irq(chip, cfg, num, irq))
 		return -EIO;
-	if (snd_msnd_write_cfg_mem(cfg, num, mem))
+	if (snd_msnd_write_cfg_mem(chip, cfg, num, mem))
 		return -EIO;
-	if (snd_msnd_activate_logical(cfg, num))
+	if (snd_msnd_activate_logical(chip, cfg, num))
 		return -EIO;
 	return 0;
 }
 
-static int snd_msnd_pinnacle_cfg_reset(int cfg)
+static int snd_msnd_pinnacle_cfg_reset(struct snd_msnd *chip, int cfg)
 {
 	int i;
 
 	/* Reset devices if told to */
-	printk(KERN_INFO LOGNAME ": Resetting all devices\n");
+	dev_info(chip->card->dev, LOGNAME ": Resetting all devices\n");
 	for (i = 0; i < 4; ++i)
-		if (snd_msnd_write_cfg_logical(cfg, i, 0, 0, 0, 0))
+		if (snd_msnd_write_cfg_logical(chip, cfg, i, 0, 0, 0, 0))
 			return -EIO;
 
 	return 0;
@@ -755,9 +715,9 @@ static int snd_msnd_pinnacle_cfg_reset(int cfg)
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
 
-module_param_array(index, int, NULL, S_IRUGO);
+module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for msnd_pinnacle soundcard.");
-module_param_array(id, charp, NULL, S_IRUGO);
+module_param_array(id, charp, NULL, 0444);
 MODULE_PARM_DESC(id, "ID string for msnd_pinnacle soundcard.");
 
 static long io[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;
@@ -799,22 +759,22 @@ MODULE_LICENSE("GPL");
 MODULE_FIRMWARE(INITCODEFILE);
 MODULE_FIRMWARE(PERMCODEFILE);
 
-module_param_array(io, long, NULL, S_IRUGO);
+module_param_hw_array(io, long, ioport, NULL, 0444);
 MODULE_PARM_DESC(io, "IO port #");
-module_param_array(irq, int, NULL, S_IRUGO);
-module_param_array(mem, long, NULL, S_IRUGO);
-module_param_array(write_ndelay, int, NULL, S_IRUGO);
-module_param(calibrate_signal, int, S_IRUGO);
+module_param_hw_array(irq, int, irq, NULL, 0444);
+module_param_hw_array(mem, long, iomem, NULL, 0444);
+module_param_array(write_ndelay, int, NULL, 0444);
+module_param(calibrate_signal, int, 0444);
 #ifndef MSND_CLASSIC
-module_param_array(digital, int, NULL, S_IRUGO);
-module_param_array(cfg, long, NULL, S_IRUGO);
-module_param_array(reset, int, 0, S_IRUGO);
-module_param_array(mpu_io, long, NULL, S_IRUGO);
-module_param_array(mpu_irq, int, NULL, S_IRUGO);
-module_param_array(ide_io0, long, NULL, S_IRUGO);
-module_param_array(ide_io1, long, NULL, S_IRUGO);
-module_param_array(ide_irq, int, NULL, S_IRUGO);
-module_param_array(joystick_io, long, NULL, S_IRUGO);
+module_param_array(digital, int, NULL, 0444);
+module_param_hw_array(cfg, long, ioport, NULL, 0444);
+module_param_array(reset, int, NULL, 0444);
+module_param_hw_array(mpu_io, long, ioport, NULL, 0444);
+module_param_hw_array(mpu_irq, int, irq, NULL, 0444);
+module_param_hw_array(ide_io0, long, ioport, NULL, 0444);
+module_param_hw_array(ide_io1, long, ioport, NULL, 0444);
+module_param_hw_array(ide_irq, int, irq, NULL, 0444);
+module_param_hw_array(joystick_io, long, ioport, NULL, 0444);
 #endif
 
 
@@ -824,7 +784,7 @@ static int snd_msnd_isa_match(struct device *pdev, unsigned int i)
 		return 0;
 
 	if (irq[i] == SNDRV_AUTO_PORT || mem[i] == SNDRV_AUTO_PORT) {
-		printk(KERN_WARNING LOGNAME ": io, irq and mem must be set\n");
+		dev_warn(pdev, LOGNAME ": io, irq and mem must be set\n");
 		return 0;
 	}
 
@@ -837,14 +797,14 @@ static int snd_msnd_isa_match(struct device *pdev, unsigned int i)
 	      io[i] == 0x220 ||
 	      io[i] == 0x210 ||
 	      io[i] == 0x3e0)) {
-		printk(KERN_ERR LOGNAME ": \"io\" - DSP I/O base must be set "
+		dev_err(pdev, LOGNAME ": \"io\" - DSP I/O base must be set "
 			" to 0x210, 0x220, 0x230, 0x240, 0x250, 0x260, 0x290, "
 			"or 0x3E0\n");
 		return 0;
 	}
 #else
 	if (io[i] < 0x100 || io[i] > 0x3e0 || (io[i] % 0x10) != 0) {
-		printk(KERN_ERR LOGNAME
+		dev_err(pdev, LOGNAME
 			": \"io\" - DSP I/O base must within the range 0x100 "
 			"to 0x3E0 and must be evenly divisible by 0x10\n");
 		return 0;
@@ -857,7 +817,7 @@ static int snd_msnd_isa_match(struct device *pdev, unsigned int i)
 	      irq[i] == 10 ||
 	      irq[i] == 11 ||
 	      irq[i] == 12)) {
-		printk(KERN_ERR LOGNAME
+		dev_err(pdev, LOGNAME
 			": \"irq\" - must be set to 5, 7, 9, 10, 11 or 12\n");
 		return 0;
 	}
@@ -868,7 +828,7 @@ static int snd_msnd_isa_match(struct device *pdev, unsigned int i)
 	      mem[i] == 0xd8000 ||
 	      mem[i] == 0xe0000 ||
 	      mem[i] == 0xe8000)) {
-		printk(KERN_ERR LOGNAME ": \"mem\" - must be set to "
+		dev_err(pdev, LOGNAME ": \"mem\" - must be set to "
 		       "0xb0000, 0xc8000, 0xd0000, 0xd8000, 0xe0000 or "
 		       "0xe8000\n");
 		return 0;
@@ -876,9 +836,9 @@ static int snd_msnd_isa_match(struct device *pdev, unsigned int i)
 
 #ifndef MSND_CLASSIC
 	if (cfg[i] == SNDRV_AUTO_PORT) {
-		printk(KERN_INFO LOGNAME ": Assuming PnP mode\n");
+		dev_info(pdev, LOGNAME ": Assuming PnP mode\n");
 	} else if (cfg[i] != 0x250 && cfg[i] != 0x260 && cfg[i] != 0x270) {
-		printk(KERN_INFO LOGNAME
+		dev_info(pdev, LOGNAME
 			": Config port must be 0x250, 0x260 or 0x270 "
 			"(or unspecified for PnP mode)\n");
 		return 0;
@@ -899,16 +859,15 @@ static int snd_msnd_isa_probe(struct device *pdev, unsigned int idx)
 	    || cfg[idx] == SNDRV_AUTO_PORT
 #endif
 	    ) {
-		printk(KERN_INFO LOGNAME ": Assuming PnP mode\n");
+		dev_info(pdev, LOGNAME ": Assuming PnP mode\n");
 		return -ENODEV;
 	}
 
-	err = snd_card_create(index[idx], id[idx], THIS_MODULE,
-			      sizeof(struct snd_msnd), &card);
+	err = snd_devm_card_new(pdev, index[idx], id[idx], THIS_MODULE,
+				sizeof(struct snd_msnd), &card);
 	if (err < 0)
 		return err;
 
-	snd_card_set_dev(card, pdev);
 	chip = card->private_data;
 	chip->card = card;
 
@@ -943,73 +902,70 @@ static int snd_msnd_isa_probe(struct device *pdev, unsigned int idx)
 		chip->memid = HPMEM_E800; break;
 	}
 #else
-	printk(KERN_INFO LOGNAME ": Non-PnP mode: configuring at port 0x%lx\n",
-			cfg[idx]);
+	dev_info(pdev, LOGNAME ": Non-PnP mode: configuring at port 0x%lx\n",
+		 cfg[idx]);
 
-	if (!request_region(cfg[idx], 2, "Pinnacle/Fiji Config")) {
-		printk(KERN_ERR LOGNAME ": Config port 0x%lx conflict\n",
-			   cfg[idx]);
-		snd_card_free(card);
+	if (!devm_request_region(card->dev, cfg[idx], 2,
+				 "Pinnacle/Fiji Config")) {
+		dev_err(pdev, LOGNAME ": Config port 0x%lx conflict\n",
+			cfg[idx]);
 		return -EIO;
 	}
 	if (reset[idx])
-		if (snd_msnd_pinnacle_cfg_reset(cfg[idx])) {
-			err = -EIO;
-			goto cfg_error;
-		}
+		if (snd_msnd_pinnacle_cfg_reset(chip, cfg[idx]))
+			return -EIO;
 
 	/* DSP */
-	err = snd_msnd_write_cfg_logical(cfg[idx], 0,
+	err = snd_msnd_write_cfg_logical(chip, cfg[idx], 0,
 					 io[idx], 0,
 					 irq[idx], mem[idx]);
 
 	if (err)
-		goto cfg_error;
+		return err;
 
 	/* The following are Pinnacle specific */
 
 	/* MPU */
 	if (mpu_io[idx] != SNDRV_AUTO_PORT
 	    && mpu_irq[idx] != SNDRV_AUTO_IRQ) {
-		printk(KERN_INFO LOGNAME
+		dev_info(pdev, LOGNAME
 		       ": Configuring MPU to I/O 0x%lx IRQ %d\n",
 		       mpu_io[idx], mpu_irq[idx]);
-		err = snd_msnd_write_cfg_logical(cfg[idx], 1,
+		err = snd_msnd_write_cfg_logical(chip, cfg[idx], 1,
 						 mpu_io[idx], 0,
 						 mpu_irq[idx], 0);
 
 		if (err)
-			goto cfg_error;
+			return err;
 	}
 
 	/* IDE */
 	if (ide_io0[idx] != SNDRV_AUTO_PORT
 	    && ide_io1[idx] != SNDRV_AUTO_PORT
 	    && ide_irq[idx] != SNDRV_AUTO_IRQ) {
-		printk(KERN_INFO LOGNAME
+		dev_info(pdev, LOGNAME
 		       ": Configuring IDE to I/O 0x%lx, 0x%lx IRQ %d\n",
 		       ide_io0[idx], ide_io1[idx], ide_irq[idx]);
-		err = snd_msnd_write_cfg_logical(cfg[idx], 2,
+		err = snd_msnd_write_cfg_logical(chip, cfg[idx], 2,
 						 ide_io0[idx], ide_io1[idx],
 						 ide_irq[idx], 0);
 
 		if (err)
-			goto cfg_error;
+			return err;
 	}
 
 	/* Joystick */
 	if (joystick_io[idx] != SNDRV_AUTO_PORT) {
-		printk(KERN_INFO LOGNAME
+		dev_info(pdev, LOGNAME
 		       ": Configuring joystick to I/O 0x%lx\n",
 		       joystick_io[idx]);
-		err = snd_msnd_write_cfg_logical(cfg[idx], 3,
+		err = snd_msnd_write_cfg_logical(chip, cfg[idx], 3,
 						 joystick_io[idx], 0,
 						 0, 0);
 
 		if (err)
-			goto cfg_error;
+			return err;
 	}
-	release_region(cfg[idx], 2);
 
 #endif /* MSND_CLASSIC */
 
@@ -1038,43 +994,87 @@ static int snd_msnd_isa_probe(struct device *pdev, unsigned int idx)
 	spin_lock_init(&chip->lock);
 	err = snd_msnd_probe(card);
 	if (err < 0) {
-		printk(KERN_ERR LOGNAME ": Probe failed\n");
-		snd_card_free(card);
+		dev_err(pdev, LOGNAME ": Probe failed\n");
 		return err;
 	}
 
 	err = snd_msnd_attach(card);
 	if (err < 0) {
-		printk(KERN_ERR LOGNAME ": Attach failed\n");
-		snd_card_free(card);
+		dev_err(pdev, LOGNAME ": Attach failed\n");
 		return err;
 	}
 	dev_set_drvdata(pdev, card);
 
 	return 0;
-
-#ifndef MSND_CLASSIC
-cfg_error:
-	release_region(cfg[idx], 2);
-	snd_card_free(card);
-	return err;
-#endif
 }
 
-static int snd_msnd_isa_remove(struct device *pdev, unsigned int dev)
+#ifdef CONFIG_PM
+static int snd_msnd_card_suspend(struct snd_card *card)
 {
-	snd_msnd_unload(dev_get_drvdata(pdev));
-	dev_set_drvdata(pdev, NULL);
+	struct snd_msnd *chip = card->private_data;
+	struct snd_mpu401 *mpu;
+	int err;
+
+	mpu = chip->rmidi ? chip->rmidi->private_data : NULL;
+	chip->pm_recsrc = snd_msnd_pm_recsrc(chip);
+	chip->pm_mpu_input = mpu && test_bit(MPU401_MODE_BIT_INPUT, &mpu->mode);
+	if (chip->pm_mpu_input)
+		snd_msnd_send_dsp_cmd(chip, HDEX_MIDI_IN_STOP);
+
+	err = snd_msnd_force_irq(chip, false);
+	if (err < 0) {
+		if (chip->pm_mpu_input)
+			snd_msnd_send_dsp_cmd(chip, HDEX_MIDI_IN_START);
+		return err;
+	}
+
+	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
 	return 0;
 }
 
-#define DEV_NAME "msnd-pinnacle"
+static int snd_msnd_card_resume(struct snd_card *card)
+{
+	struct snd_msnd *chip = card->private_data;
+	int err;
+
+	err = snd_msnd_initialize(card);
+	if (err < 0)
+		return err;
+
+	snd_msnd_calibrate_adc(chip, chip->play_sample_rate);
+	snd_msndmix_force_recsrc(chip, chip->pm_recsrc);
+
+	err = snd_msnd_force_irq(chip, true);
+	if (err < 0)
+		return err;
+
+	if (chip->pm_mpu_input)
+		snd_msnd_send_dsp_cmd(chip, HDEX_MIDI_IN_START);
+
+	chip->nresets = 0;
+	snd_power_change_state(card, SNDRV_CTL_POWER_D0);
+	return 0;
+}
+
+static int snd_msnd_isa_suspend(struct device *dev, unsigned int idx,
+				pm_message_t state)
+{
+	return snd_msnd_card_suspend(dev_get_drvdata(dev));
+}
+
+static int snd_msnd_isa_resume(struct device *dev, unsigned int idx)
+{
+	return snd_msnd_card_resume(dev_get_drvdata(dev));
+}
+#endif
 
 static struct isa_driver snd_msnd_driver = {
 	.match		= snd_msnd_isa_match,
 	.probe		= snd_msnd_isa_probe,
-	.remove		= snd_msnd_isa_remove,
-	/* FIXME: suspend, resume */
+#ifdef CONFIG_PM
+	.suspend	= snd_msnd_isa_suspend,
+	.resume		= snd_msnd_isa_resume,
+#endif
 	.driver		= {
 		.name	= DEV_NAME
 	},
@@ -1110,12 +1110,12 @@ static int snd_msnd_pnp_detect(struct pnp_card_link *pcard,
 		return -ENODEV;
 
 	if (!pnp_is_active(pnp_dev) && pnp_activate_dev(pnp_dev) < 0) {
-		printk(KERN_INFO "msnd_pinnacle: device is inactive\n");
+		dev_info(&pcard->card->dev, "msnd_pinnacle: device is inactive\n");
 		return -EBUSY;
 	}
 
 	if (!pnp_is_active(mpu_dev) && pnp_activate_dev(mpu_dev) < 0) {
-		printk(KERN_INFO "msnd_pinnacle: MPU device is inactive\n");
+		dev_info(&pcard->card->dev, "msnd_pinnacle: MPU device is inactive\n");
 		return -EBUSY;
 	}
 
@@ -1123,14 +1123,14 @@ static int snd_msnd_pnp_detect(struct pnp_card_link *pcard,
 	 * Create a new ALSA sound card entry, in anticipation
 	 * of detecting our hardware ...
 	 */
-	ret = snd_card_create(index[idx], id[idx], THIS_MODULE,
-			      sizeof(struct snd_msnd), &card);
+	ret = snd_devm_card_new(&pcard->card->dev,
+				index[idx], id[idx], THIS_MODULE,
+				sizeof(struct snd_msnd), &card);
 	if (ret < 0)
 		return ret;
 
 	chip = card->private_data;
 	chip->card = card;
-	snd_card_set_dev(card, &pcard->card->dev);
 
 	/*
 	 * Read the correct parameters off the ISA PnP bus ...
@@ -1166,35 +1166,37 @@ static int snd_msnd_pnp_detect(struct pnp_card_link *pcard,
 	spin_lock_init(&chip->lock);
 	ret = snd_msnd_probe(card);
 	if (ret < 0) {
-		printk(KERN_ERR LOGNAME ": Probe failed\n");
-		goto _release_card;
+		dev_err(&pcard->card->dev, LOGNAME ": Probe failed\n");
+		return ret;
 	}
 
 	ret = snd_msnd_attach(card);
 	if (ret < 0) {
-		printk(KERN_ERR LOGNAME ": Attach failed\n");
-		goto _release_card;
+		dev_err(&pcard->card->dev, LOGNAME ": Attach failed\n");
+		return ret;
 	}
 
 	pnp_set_card_drvdata(pcard, card);
 	++idx;
 	return 0;
-
-_release_card:
-	snd_card_free(card);
-	return ret;
 }
 
-static void snd_msnd_pnp_remove(struct pnp_card_link *pcard)
+#ifdef CONFIG_PM
+static int snd_msnd_pnp_suspend(struct pnp_card_link *pcard, pm_message_t state)
 {
-	snd_msnd_unload(pnp_get_card_drvdata(pcard));
-	pnp_set_card_drvdata(pcard, NULL);
+	return snd_msnd_card_suspend(pnp_get_card_drvdata(pcard));
 }
 
-static int isa_registered;
-static int pnp_registered;
+static int snd_msnd_pnp_resume(struct pnp_card_link *pcard)
+{
+	return snd_msnd_card_resume(pnp_get_card_drvdata(pcard));
+}
+#endif
 
-static struct pnp_card_device_id msnd_pnpids[] = {
+static int isa_registered __ro_after_init;
+static int pnp_registered __ro_after_init;
+
+static const struct pnp_card_device_id msnd_pnpids[] = {
 	/* Pinnacle PnP */
 	{ .id = "BVJ0440", .devs = { { "TBS0000" }, { "TBS0001" } } },
 	{ .id = "" }	/* end */
@@ -1207,7 +1209,10 @@ static struct pnp_card_driver msnd_pnpc_driver = {
 	.name = "msnd_pinnacle",
 	.id_table = msnd_pnpids,
 	.probe = snd_msnd_pnp_detect,
-	.remove = snd_msnd_pnp_remove,
+#ifdef CONFIG_PM
+	.suspend = snd_msnd_pnp_suspend,
+	.resume = snd_msnd_pnp_resume,
+#endif
 };
 #endif /* CONFIG_PNP */
 
@@ -1242,4 +1247,3 @@ static void __exit snd_msnd_exit(void)
 
 module_init(snd_msnd_init);
 module_exit(snd_msnd_exit);
-

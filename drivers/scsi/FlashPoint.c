@@ -29,27 +29,27 @@ struct sccb;
 typedef void (*CALL_BK_FN) (struct sccb *);
 
 struct sccb_mgr_info {
-	unsigned long si_baseaddr;
+	u32 si_baseaddr;
 	unsigned char si_present;
 	unsigned char si_intvect;
 	unsigned char si_id;
 	unsigned char si_lun;
-	unsigned short si_fw_revision;
-	unsigned short si_per_targ_init_sync;
-	unsigned short si_per_targ_fast_nego;
-	unsigned short si_per_targ_ultra_nego;
-	unsigned short si_per_targ_no_disc;
-	unsigned short si_per_targ_wide_nego;
-	unsigned short si_flags;
+	u16 si_fw_revision;
+	u16 si_per_targ_init_sync;
+	u16 si_per_targ_fast_nego;
+	u16 si_per_targ_ultra_nego;
+	u16 si_per_targ_no_disc;
+	u16 si_per_targ_wide_nego;
+	u16 si_mflags;
 	unsigned char si_card_family;
 	unsigned char si_bustype;
 	unsigned char si_card_model[3];
 	unsigned char si_relative_cardnum;
 	unsigned char si_reserved[4];
-	unsigned long si_OS_reserved;
+	u32 si_OS_reserved;
 	unsigned char si_XlatInfo[4];
-	unsigned long si_reserved2[5];
-	unsigned long si_secondary_range;
+	u32 si_reserved2[5];
+	u32 si_secondary_range;
 };
 
 #define SCSI_PARITY_ENA		  0x0001
@@ -70,14 +70,14 @@ struct sccb_mgr_info {
  * The UCB Manager treats the SCCB as it's 'native hardware structure' 
  */
 
-#pragma pack(1)
+/*#pragma pack(1)*/
 struct sccb {
 	unsigned char OperationCode;
 	unsigned char ControlByte;
 	unsigned char CdbLength;
 	unsigned char RequestSenseLength;
-	unsigned long DataLength;
-	unsigned long DataPointer;
+	u32 DataLength;
+	void *DataPointer;
 	unsigned char CcbRes[2];
 	unsigned char HostStatus;
 	unsigned char TargetStatus;
@@ -86,32 +86,32 @@ struct sccb {
 	unsigned char Cdb[12];
 	unsigned char CcbRes1;
 	unsigned char Reserved1;
-	unsigned long Reserved2;
-	unsigned long SensePointer;
+	u32 Reserved2;
+	u32 SensePointer;
 
 	CALL_BK_FN SccbCallback;	/* VOID (*SccbCallback)(); */
-	unsigned long SccbIOPort;	/* Identifies board base port */
+	u32 SccbIOPort;			/* Identifies board base port */
 	unsigned char SccbStatus;
 	unsigned char SCCBRes2;
-	unsigned short SccbOSFlags;
+	u16 SccbOSFlags;
 
-	unsigned long Sccb_XferCnt;	/* actual transfer count */
-	unsigned long Sccb_ATC;
-	unsigned long SccbVirtDataPtr;	/* virtual addr for OS/2 */
-	unsigned long Sccb_res1;
-	unsigned short Sccb_MGRFlags;
-	unsigned short Sccb_sgseg;
+	u32 Sccb_XferCnt;	/* actual transfer count */
+	u32 Sccb_ATC;
+	u32 SccbVirtDataPtr;	/* virtual addr for OS/2 */
+	u32 Sccb_res1;
+	u16 Sccb_MGRFlags;
+	u16 Sccb_sgseg;
 	unsigned char Sccb_scsimsg;	/* identify msg for selection */
 	unsigned char Sccb_tag;
 	unsigned char Sccb_scsistat;
 	unsigned char Sccb_idmsg;	/* image of last msg in */
 	struct sccb *Sccb_forwardlink;
 	struct sccb *Sccb_backlink;
-	unsigned long Sccb_savedATC;
+	u32 Sccb_savedATC;
 	unsigned char Save_Cdb[6];
 	unsigned char Save_CdbLen;
 	unsigned char Sccb_XferState;
-	unsigned long Sccb_SGoffset;
+	u32 Sccb_SGoffset;
 };
 
 #pragma pack()
@@ -223,15 +223,21 @@ struct sccb_mgr_tar_info {
 };
 
 struct nvram_info {
-	unsigned char niModel;	/* Model No. of card */
-	unsigned char niCardNo;	/* Card no. */
-	unsigned long niBaseAddr;	/* Port Address of card */
-	unsigned char niSysConf;	/* Adapter Configuration byte - Byte 16 of eeprom map */
-	unsigned char niScsiConf;	/* SCSI Configuration byte - Byte 17 of eeprom map */
-	unsigned char niScamConf;	/* SCAM Configuration byte - Byte 20 of eeprom map */
-	unsigned char niAdapId;	/* Host Adapter ID - Byte 24 of eerpom map */
-	unsigned char niSyncTbl[MAX_SCSI_TAR / 2];	/* Sync/Wide byte of targets */
-	unsigned char niScamTbl[MAX_SCSI_TAR][4];	/* Compressed Scam name string of Targets */
+	unsigned char niModel;		/* Model No. of card */
+	unsigned char niCardNo;		/* Card no. */
+	u32 niBaseAddr;			/* Port Address of card */
+	unsigned char niSysConf;	/* Adapter Configuration byte -
+					   Byte 16 of eeprom map */
+	unsigned char niScsiConf;	/* SCSI Configuration byte -
+					   Byte 17 of eeprom map */
+	unsigned char niScamConf;	/* SCAM Configuration byte -
+					   Byte 20 of eeprom map */
+	unsigned char niAdapId;		/* Host Adapter ID -
+					   Byte 24 of eerpom map */
+	unsigned char niSyncTbl[MAX_SCSI_TAR / 2];	/* Sync/Wide byte
+							   of targets */
+	unsigned char niScamTbl[MAX_SCSI_TAR][4];	/* Compressed Scam name
+							   string of Targets */
 };
 
 #define	MODEL_LT		1
@@ -243,7 +249,7 @@ struct sccb_card {
 	struct sccb *currentSCCB;
 	struct sccb_mgr_info *cardInfo;
 
-	unsigned long ioPort;
+	u32 ioPort;
 
 	unsigned short cmdCounter;
 	unsigned char discQCount;
@@ -298,40 +304,12 @@ typedef struct SCCBscam_info {
 
 } SCCBSCAM_INFO;
 
-#define  SCSI_REQUEST_SENSE      0x03
-#define  SCSI_READ               0x08
-#define  SCSI_WRITE              0x0A
-#define  SCSI_START_STOP_UNIT    0x1B
-#define  SCSI_READ_EXTENDED      0x28
-#define  SCSI_WRITE_EXTENDED     0x2A
-#define  SCSI_WRITE_AND_VERIFY   0x2E
-
-#define  SSGOOD                  0x00
-#define  SSCHECK                 0x02
-#define  SSQ_FULL                0x28
-
-#define  SMCMD_COMP              0x00
-#define  SMEXT                   0x01
-#define  SMSAVE_DATA_PTR         0x02
-#define  SMREST_DATA_PTR         0x03
-#define  SMDISC                  0x04
-#define  SMABORT                 0x06
-#define  SMREJECT                0x07
-#define  SMNO_OP                 0x08
-#define  SMPARITY                0x09
-#define  SMDEV_RESET             0x0C
-#define	SMABORT_TAG					0x0D
-#define	SMINIT_RECOVERY			0x0F
-#define	SMREL_RECOVERY				0x10
 
 #define  SMIDENT                 0x80
 #define  DISC_PRIV               0x40
 
-#define  SMSYNC                  0x01
-#define  SMWDTR                  0x03
 #define  SM8BIT                  0x00
 #define  SM16BIT                 0x01
-#define  SMIGNORWR               0x23	/* Ignore Wide Residue */
 
 #define  SIX_BYTE_CMD            0x06
 #define  TWELVE_BYTE_CMD         0x0C
@@ -780,37 +758,37 @@ typedef struct SCCBscam_info {
 #define MENABLE_INT(p_port) (WR_HARPOON(p_port+hp_page_ctrl, \
                              (RD_HARPOON(p_port+hp_page_ctrl) & ~G_INT_DISABLE)))
 
-static unsigned char FPT_sisyncn(unsigned long port, unsigned char p_card,
+static unsigned char FPT_sisyncn(u32 port, unsigned char p_card,
 				 unsigned char syncFlag);
-static void FPT_ssel(unsigned long port, unsigned char p_card);
-static void FPT_sres(unsigned long port, unsigned char p_card,
+static void FPT_ssel(u32 port, unsigned char p_card);
+static void FPT_sres(u32 port, unsigned char p_card,
 		     struct sccb_card *pCurrCard);
-static void FPT_shandem(unsigned long port, unsigned char p_card,
+static void FPT_shandem(u32 port, unsigned char p_card,
 			struct sccb *pCurrSCCB);
-static void FPT_stsyncn(unsigned long port, unsigned char p_card);
-static void FPT_sisyncr(unsigned long port, unsigned char sync_pulse,
+static void FPT_stsyncn(u32 port, unsigned char p_card);
+static void FPT_sisyncr(u32 port, unsigned char sync_pulse,
 			unsigned char offset);
-static void FPT_sssyncv(unsigned long p_port, unsigned char p_id,
+static void FPT_sssyncv(u32 p_port, unsigned char p_id,
 			unsigned char p_sync_value,
 			struct sccb_mgr_tar_info *currTar_Info);
-static void FPT_sresb(unsigned long port, unsigned char p_card);
-static void FPT_sxfrp(unsigned long p_port, unsigned char p_card);
-static void FPT_schkdd(unsigned long port, unsigned char p_card);
-static unsigned char FPT_RdStack(unsigned long port, unsigned char index);
-static void FPT_WrStack(unsigned long portBase, unsigned char index,
+static void FPT_sresb(u32 port, unsigned char p_card);
+static void FPT_sxfrp(u32 p_port, unsigned char p_card);
+static void FPT_schkdd(u32 port, unsigned char p_card);
+static unsigned char FPT_RdStack(u32 port, unsigned char index);
+static void FPT_WrStack(u32 portBase, unsigned char index,
 			unsigned char data);
-static unsigned char FPT_ChkIfChipInitialized(unsigned long ioPort);
+static unsigned char FPT_ChkIfChipInitialized(u32 ioPort);
 
-static void FPT_SendMsg(unsigned long port, unsigned char message);
+static void FPT_SendMsg(u32 port, unsigned char message);
 static void FPT_queueFlushTargSccb(unsigned char p_card, unsigned char thisTarg,
 				   unsigned char error_code);
 
 static void FPT_sinits(struct sccb *p_sccb, unsigned char p_card);
 static void FPT_RNVRamData(struct nvram_info *pNvRamInfo);
 
-static unsigned char FPT_siwidn(unsigned long port, unsigned char p_card);
-static void FPT_stwidn(unsigned long port, unsigned char p_card);
-static void FPT_siwidr(unsigned long port, unsigned char width);
+static unsigned char FPT_siwidn(u32 port, unsigned char p_card);
+static void FPT_stwidn(u32 port, unsigned char p_card);
+static void FPT_siwidr(u32 port, unsigned char width);
 
 static void FPT_queueSelectFail(struct sccb_card *pCurrCard,
 				unsigned char p_card);
@@ -827,45 +805,45 @@ static void FPT_utilUpdateResidual(struct sccb *p_SCCB);
 static unsigned short FPT_CalcCrc16(unsigned char buffer[]);
 static unsigned char FPT_CalcLrc(unsigned char buffer[]);
 
-static void FPT_Wait1Second(unsigned long p_port);
-static void FPT_Wait(unsigned long p_port, unsigned char p_delay);
-static void FPT_utilEEWriteOnOff(unsigned long p_port, unsigned char p_mode);
-static void FPT_utilEEWrite(unsigned long p_port, unsigned short ee_data,
+static void FPT_Wait1Second(u32 p_port);
+static void FPT_Wait(u32 p_port, unsigned char p_delay);
+static void FPT_utilEEWriteOnOff(u32 p_port, unsigned char p_mode);
+static void FPT_utilEEWrite(u32 p_port, unsigned short ee_data,
 			    unsigned short ee_addr);
-static unsigned short FPT_utilEERead(unsigned long p_port,
+static unsigned short FPT_utilEERead(u32 p_port,
 				     unsigned short ee_addr);
-static unsigned short FPT_utilEEReadOrg(unsigned long p_port,
+static unsigned short FPT_utilEEReadOrg(u32 p_port,
 					unsigned short ee_addr);
-static void FPT_utilEESendCmdAddr(unsigned long p_port, unsigned char ee_cmd,
+static void FPT_utilEESendCmdAddr(u32 p_port, unsigned char ee_cmd,
 				  unsigned short ee_addr);
 
-static void FPT_phaseDataOut(unsigned long port, unsigned char p_card);
-static void FPT_phaseDataIn(unsigned long port, unsigned char p_card);
-static void FPT_phaseCommand(unsigned long port, unsigned char p_card);
-static void FPT_phaseStatus(unsigned long port, unsigned char p_card);
-static void FPT_phaseMsgOut(unsigned long port, unsigned char p_card);
-static void FPT_phaseMsgIn(unsigned long port, unsigned char p_card);
-static void FPT_phaseIllegal(unsigned long port, unsigned char p_card);
+static void FPT_phaseDataOut(u32 port, unsigned char p_card);
+static void FPT_phaseDataIn(u32 port, unsigned char p_card);
+static void FPT_phaseCommand(u32 port, unsigned char p_card);
+static void FPT_phaseStatus(u32 port, unsigned char p_card);
+static void FPT_phaseMsgOut(u32 port, unsigned char p_card);
+static void FPT_phaseMsgIn(u32 port, unsigned char p_card);
+static void FPT_phaseIllegal(u32 port, unsigned char p_card);
 
-static void FPT_phaseDecode(unsigned long port, unsigned char p_card);
-static void FPT_phaseChkFifo(unsigned long port, unsigned char p_card);
-static void FPT_phaseBusFree(unsigned long p_port, unsigned char p_card);
+static void FPT_phaseDecode(u32 port, unsigned char p_card);
+static void FPT_phaseChkFifo(u32 port, unsigned char p_card);
+static void FPT_phaseBusFree(u32 p_port, unsigned char p_card);
 
-static void FPT_XbowInit(unsigned long port, unsigned char scamFlg);
-static void FPT_BusMasterInit(unsigned long p_port);
-static void FPT_DiagEEPROM(unsigned long p_port);
+static void FPT_XbowInit(u32 port, unsigned char scamFlg);
+static void FPT_BusMasterInit(u32 p_port);
+static void FPT_DiagEEPROM(u32 p_port);
 
-static void FPT_dataXferProcessor(unsigned long port,
+static void FPT_dataXferProcessor(u32 port,
 				  struct sccb_card *pCurrCard);
-static void FPT_busMstrSGDataXferStart(unsigned long port,
+static void FPT_busMstrSGDataXferStart(u32 port,
 				       struct sccb *pCurrSCCB);
-static void FPT_busMstrDataXferStart(unsigned long port,
+static void FPT_busMstrDataXferStart(u32 port,
 				     struct sccb *pCurrSCCB);
-static void FPT_hostDataXferAbort(unsigned long port, unsigned char p_card,
+static void FPT_hostDataXferAbort(u32 port, unsigned char p_card,
 				  struct sccb *pCurrSCCB);
 static void FPT_hostDataXferRestart(struct sccb *currSCCB);
 
-static unsigned char FPT_SccbMgr_bad_isr(unsigned long p_port,
+static unsigned char FPT_SccbMgr_bad_isr(u32 p_port,
 					 unsigned char p_card,
 					 struct sccb_card *pCurrCard,
 					 unsigned short p_int);
@@ -879,28 +857,28 @@ static void FPT_SccbMgrTableInitTarget(unsigned char p_card,
 static void FPT_scini(unsigned char p_card, unsigned char p_our_id,
 		      unsigned char p_power_up);
 
-static int FPT_scarb(unsigned long p_port, unsigned char p_sel_type);
-static void FPT_scbusf(unsigned long p_port);
-static void FPT_scsel(unsigned long p_port);
-static void FPT_scasid(unsigned char p_card, unsigned long p_port);
-static unsigned char FPT_scxferc(unsigned long p_port, unsigned char p_data);
-static unsigned char FPT_scsendi(unsigned long p_port,
+static int FPT_scarb(u32 p_port, unsigned char p_sel_type);
+static void FPT_scbusf(u32 p_port);
+static void FPT_scsel(u32 p_port);
+static void FPT_scasid(unsigned char p_card, u32 p_port);
+static unsigned char FPT_scxferc(u32 p_port, unsigned char p_data);
+static unsigned char FPT_scsendi(u32 p_port,
 				 unsigned char p_id_string[]);
-static unsigned char FPT_sciso(unsigned long p_port,
+static unsigned char FPT_sciso(u32 p_port,
 			       unsigned char p_id_string[]);
-static void FPT_scwirod(unsigned long p_port, unsigned char p_data_bit);
-static void FPT_scwiros(unsigned long p_port, unsigned char p_data_bit);
+static void FPT_scwirod(u32 p_port, unsigned char p_data_bit);
+static void FPT_scwiros(u32 p_port, unsigned char p_data_bit);
 static unsigned char FPT_scvalq(unsigned char p_quintet);
-static unsigned char FPT_scsell(unsigned long p_port, unsigned char targ_id);
-static void FPT_scwtsel(unsigned long p_port);
-static void FPT_inisci(unsigned char p_card, unsigned long p_port,
+static unsigned char FPT_scsell(u32 p_port, unsigned char targ_id);
+static void FPT_scwtsel(u32 p_port);
+static void FPT_inisci(unsigned char p_card, u32 p_port,
 		       unsigned char p_our_id);
-static void FPT_scsavdi(unsigned char p_card, unsigned long p_port);
+static void FPT_scsavdi(unsigned char p_card, u32 p_port);
 static unsigned char FPT_scmachid(unsigned char p_card,
 				  unsigned char p_id_string[]);
 
-static void FPT_autoCmdCmplt(unsigned long p_port, unsigned char p_card);
-static void FPT_autoLoadDefaultMap(unsigned long p_port);
+static void FPT_autoCmdCmplt(u32 p_port, unsigned char p_card);
+static void FPT_autoLoadDefaultMap(u32 p_port);
 
 static struct sccb_mgr_tar_info FPT_sccbMgrTbl[MAX_CARDS][MAX_SCSI_TAR] =
     { {{0}} };
@@ -918,7 +896,7 @@ static unsigned char FPT_scamHAString[] =
 
 static unsigned short FPT_default_intena = 0;
 
-static void (*FPT_s_PhaseTbl[8]) (unsigned long, unsigned char) = {
+static void (*FPT_s_PhaseTbl[8]) (u32, unsigned char) = {
 0};
 
 /*---------------------------------------------------------------------
@@ -935,7 +913,7 @@ static int FlashPoint_ProbeHostAdapter(struct sccb_mgr_info *pCardInfo)
 
 	unsigned char i, j, id, ScamFlg;
 	unsigned short temp, temp2, temp3, temp4, temp5, temp6;
-	unsigned long ioport;
+	u32 ioport;
 	struct nvram_info *pCurrNvRam;
 
 	ioport = pCardInfo->si_baseaddr;
@@ -1028,11 +1006,14 @@ static int FlashPoint_ProbeHostAdapter(struct sccb_mgr_info *pCardInfo)
 			temp6 >>= 1;
 			switch (temp & 0x3) {
 			case AUTO_RATE_20:	/* Synchronous, 20 mega-transfers/second */
-				temp6 |= 0x8000;	/* Fall through */
+				temp6 |= 0x8000;
+				fallthrough;
 			case AUTO_RATE_10:	/* Synchronous, 10 mega-transfers/second */
-				temp5 |= 0x8000;	/* Fall through */
+				temp5 |= 0x8000;
+				fallthrough;
 			case AUTO_RATE_05:	/* Synchronous, 5 mega-transfers/second */
-				temp2 |= 0x8000;	/* Fall through */
+				temp2 |= 0x8000;
+				fallthrough;
 			case AUTO_RATE_00:	/* Asynchronous */
 				break;
 			}
@@ -1064,22 +1045,22 @@ static int FlashPoint_ProbeHostAdapter(struct sccb_mgr_info *pCardInfo)
 		ScamFlg =
 		    (unsigned char)FPT_utilEERead(ioport, SCAM_CONFIG / 2);
 
-	pCardInfo->si_flags = 0x0000;
+	pCardInfo->si_mflags = 0x0000;
 
 	if (i & 0x01)
-		pCardInfo->si_flags |= SCSI_PARITY_ENA;
+		pCardInfo->si_mflags |= SCSI_PARITY_ENA;
 
 	if (!(i & 0x02))
-		pCardInfo->si_flags |= SOFT_RESET;
+		pCardInfo->si_mflags |= SOFT_RESET;
 
 	if (i & 0x10)
-		pCardInfo->si_flags |= EXTENDED_TRANSLATION;
+		pCardInfo->si_mflags |= EXTENDED_TRANSLATION;
 
 	if (ScamFlg & SCAM_ENABLED)
-		pCardInfo->si_flags |= FLAG_SCAM_ENABLED;
+		pCardInfo->si_mflags |= FLAG_SCAM_ENABLED;
 
 	if (ScamFlg & SCAM_LEVEL2)
-		pCardInfo->si_flags |= FLAG_SCAM_LEVEL2;
+		pCardInfo->si_mflags |= FLAG_SCAM_LEVEL2;
 
 	j = (RD_HARPOON(ioport + hp_bm_ctrl) & ~SCSI_TERM_ENA_L);
 	if (i & 0x04) {
@@ -1095,7 +1076,7 @@ static int FlashPoint_ProbeHostAdapter(struct sccb_mgr_info *pCardInfo)
 
 	if (!(RD_HARPOON(ioport + hp_page_ctrl) & NARROW_SCSI_CARD))
 
-		pCardInfo->si_flags |= SUPPORT_16TAR_32LUN;
+		pCardInfo->si_mflags |= SUPPORT_16TAR_32LUN;
 
 	pCardInfo->si_card_family = HARPOON_FAMILY;
 	pCardInfo->si_bustype = BUSTYPE_PCI;
@@ -1131,15 +1112,15 @@ static int FlashPoint_ProbeHostAdapter(struct sccb_mgr_info *pCardInfo)
 
 	if (pCardInfo->si_card_model[1] == '3') {
 		if (RD_HARPOON(ioport + hp_ee_ctrl) & BIT(7))
-			pCardInfo->si_flags |= LOW_BYTE_TERM;
+			pCardInfo->si_mflags |= LOW_BYTE_TERM;
 	} else if (pCardInfo->si_card_model[2] == '0') {
 		temp = RD_HARPOON(ioport + hp_xfer_pad);
 		WR_HARPOON(ioport + hp_xfer_pad, (temp & ~BIT(4)));
 		if (RD_HARPOON(ioport + hp_ee_ctrl) & BIT(7))
-			pCardInfo->si_flags |= LOW_BYTE_TERM;
+			pCardInfo->si_mflags |= LOW_BYTE_TERM;
 		WR_HARPOON(ioport + hp_xfer_pad, (temp | BIT(4)));
 		if (RD_HARPOON(ioport + hp_ee_ctrl) & BIT(7))
-			pCardInfo->si_flags |= HIGH_BYTE_TERM;
+			pCardInfo->si_mflags |= HIGH_BYTE_TERM;
 		WR_HARPOON(ioport + hp_xfer_pad, temp);
 	} else {
 		temp = RD_HARPOON(ioport + hp_ee_ctrl);
@@ -1157,9 +1138,9 @@ static int FlashPoint_ProbeHostAdapter(struct sccb_mgr_info *pCardInfo)
 		WR_HARPOON(ioport + hp_ee_ctrl, temp);
 		WR_HARPOON(ioport + hp_xfer_pad, temp2);
 		if (!(temp3 & BIT(7)))
-			pCardInfo->si_flags |= LOW_BYTE_TERM;
+			pCardInfo->si_mflags |= LOW_BYTE_TERM;
 		if (!(temp3 & BIT(6)))
-			pCardInfo->si_flags |= HIGH_BYTE_TERM;
+			pCardInfo->si_mflags |= HIGH_BYTE_TERM;
 	}
 
 	ARAM_ACCESS(ioport);
@@ -1201,23 +1182,21 @@ static int FlashPoint_ProbeHostAdapter(struct sccb_mgr_info *pCardInfo)
  *
  *---------------------------------------------------------------------*/
 
-static unsigned long FlashPoint_HardwareResetHostAdapter(struct sccb_mgr_info
+static void *FlashPoint_HardwareResetHostAdapter(struct sccb_mgr_info
 							 *pCardInfo)
 {
 	struct sccb_card *CurrCard = NULL;
 	struct nvram_info *pCurrNvRam;
 	unsigned char i, j, thisCard, ScamFlg;
 	unsigned short temp, sync_bit_map, id;
-	unsigned long ioport;
+	u32 ioport;
 
 	ioport = pCardInfo->si_baseaddr;
 
 	for (thisCard = 0; thisCard <= MAX_CARDS; thisCard++) {
 
-		if (thisCard == MAX_CARDS) {
-
-			return FAILURE;
-		}
+		if (thisCard == MAX_CARDS)
+			return (void *)FAILURE;
 
 		if (FPT_BL_Card[thisCard].ioPort == ioport) {
 
@@ -1268,7 +1247,7 @@ static unsigned long FlashPoint_HardwareResetHostAdapter(struct sccb_mgr_info
 	WR_HARPOON(ioport + hp_arb_id, pCardInfo->si_id);
 	CurrCard->ourId = pCardInfo->si_id;
 
-	i = (unsigned char)pCardInfo->si_flags;
+	i = (unsigned char)pCardInfo->si_mflags;
 	if (i & SCSI_PARITY_ENA)
 		WR_HARPOON(ioport + hp_portctrl_1, (HOST_MODE8 | CHK_SCSI_P));
 
@@ -1282,14 +1261,14 @@ static unsigned long FlashPoint_HardwareResetHostAdapter(struct sccb_mgr_info
 		j |= SCSI_TERM_ENA_H;
 	WR_HARPOON(ioport + hp_ee_ctrl, j);
 
-	if (!(pCardInfo->si_flags & SOFT_RESET)) {
+	if (!(pCardInfo->si_mflags & SOFT_RESET)) {
 
 		FPT_sresb(ioport, thisCard);
 
 		FPT_scini(thisCard, pCardInfo->si_id, 0);
 	}
 
-	if (pCardInfo->si_flags & POST_ALL_UNDERRRUNS)
+	if (pCardInfo->si_mflags & POST_ALL_UNDERRRUNS)
 		CurrCard->globalFlags |= F_NO_FILTER;
 
 	if (pCurrNvRam) {
@@ -1384,16 +1363,16 @@ static unsigned long FlashPoint_HardwareResetHostAdapter(struct sccb_mgr_info
 		   (unsigned char)(RD_HARPOON((ioport + hp_semaphore)) |
 				   SCCB_MGR_PRESENT));
 
-	return (unsigned long)CurrCard;
+	return (void *)CurrCard;
 }
 
-static void FlashPoint_ReleaseHostAdapter(unsigned long pCurrCard)
+static void FlashPoint_ReleaseHostAdapter(void *pCurrCard)
 {
 	unsigned char i;
-	unsigned long portBase;
-	unsigned long regOffset;
-	unsigned long scamData;
-	unsigned long *pScamTbl;
+	u32 portBase;
+	u32 regOffset;
+	u32 scamData;
+	u32 *pScamTbl;
 	struct nvram_info *pCurrNvRam;
 
 	pCurrNvRam = ((struct sccb_card *)pCurrCard)->pNvRamInfo;
@@ -1414,7 +1393,7 @@ static void FlashPoint_ReleaseHostAdapter(unsigned long pCurrCard)
 
 		for (i = 0; i < MAX_SCSI_TAR; i++) {
 			regOffset = hp_aramBase + 64 + i * 4;
-			pScamTbl = (unsigned long *)&pCurrNvRam->niScamTbl[i];
+			pScamTbl = (u32 *)&pCurrNvRam->niScamTbl[i];
 			scamData = *pScamTbl;
 			WR_HARP32(portBase, regOffset, scamData);
 		}
@@ -1427,10 +1406,10 @@ static void FlashPoint_ReleaseHostAdapter(unsigned long pCurrCard)
 static void FPT_RNVRamData(struct nvram_info *pNvRamInfo)
 {
 	unsigned char i;
-	unsigned long portBase;
-	unsigned long regOffset;
-	unsigned long scamData;
-	unsigned long *pScamTbl;
+	u32 portBase;
+	u32 regOffset;
+	u32 scamData;
+	u32 *pScamTbl;
 
 	pNvRamInfo->niModel = FPT_RdStack(pNvRamInfo->niBaseAddr, 0);
 	pNvRamInfo->niSysConf = FPT_RdStack(pNvRamInfo->niBaseAddr, 1);
@@ -1447,26 +1426,25 @@ static void FPT_RNVRamData(struct nvram_info *pNvRamInfo)
 	for (i = 0; i < MAX_SCSI_TAR; i++) {
 		regOffset = hp_aramBase + 64 + i * 4;
 		RD_HARP32(portBase, regOffset, scamData);
-		pScamTbl = (unsigned long *)&pNvRamInfo->niScamTbl[i];
+		pScamTbl = (u32 *)&pNvRamInfo->niScamTbl[i];
 		*pScamTbl = scamData;
 	}
 
 }
 
-static unsigned char FPT_RdStack(unsigned long portBase, unsigned char index)
+static unsigned char FPT_RdStack(u32 portBase, unsigned char index)
 {
 	WR_HARPOON(portBase + hp_stack_addr, index);
 	return RD_HARPOON(portBase + hp_stack_data);
 }
 
-static void FPT_WrStack(unsigned long portBase, unsigned char index,
-			unsigned char data)
+static void FPT_WrStack(u32 portBase, unsigned char index, unsigned char data)
 {
 	WR_HARPOON(portBase + hp_stack_addr, index);
 	WR_HARPOON(portBase + hp_stack_data, data);
 }
 
-static unsigned char FPT_ChkIfChipInitialized(unsigned long ioPort)
+static unsigned char FPT_ChkIfChipInitialized(u32 ioPort)
 {
 	if ((RD_HARPOON(ioPort + hp_arb_id) & 0x0f) != FPT_RdStack(ioPort, 4))
 		return 0;
@@ -1489,15 +1467,16 @@ static unsigned char FPT_ChkIfChipInitialized(unsigned long ioPort)
  *              callback function.
  *
  *---------------------------------------------------------------------*/
-static void FlashPoint_StartCCB(unsigned long pCurrCard, struct sccb *p_Sccb)
+static void FlashPoint_StartCCB(void *curr_card, struct sccb *p_Sccb)
 {
-	unsigned long ioport;
+	u32 ioport;
 	unsigned char thisCard, lun;
 	struct sccb *pSaveSccb;
 	CALL_BK_FN callback;
+	struct sccb_card *pCurrCard = curr_card;
 
-	thisCard = ((struct sccb_card *)pCurrCard)->cardIndex;
-	ioport = ((struct sccb_card *)pCurrCard)->ioPort;
+	thisCard = pCurrCard->cardIndex;
+	ioport = pCurrCard->ioPort;
 
 	if ((p_Sccb->TargID >= MAX_SCSI_TAR) || (p_Sccb->Lun >= MAX_LUN)) {
 
@@ -1512,18 +1491,18 @@ static void FlashPoint_StartCCB(unsigned long pCurrCard, struct sccb *p_Sccb)
 
 	FPT_sinits(p_Sccb, thisCard);
 
-	if (!((struct sccb_card *)pCurrCard)->cmdCounter) {
+	if (!pCurrCard->cmdCounter) {
 		WR_HARPOON(ioport + hp_semaphore,
 			   (RD_HARPOON(ioport + hp_semaphore)
 			    | SCCB_MGR_ACTIVE));
 
-		if (((struct sccb_card *)pCurrCard)->globalFlags & F_GREEN_PC) {
+		if (pCurrCard->globalFlags & F_GREEN_PC) {
 			WR_HARPOON(ioport + hp_clkctrl_0, CLKCTRL_DEFAULT);
 			WR_HARPOON(ioport + hp_sys_ctrl, 0x00);
 		}
 	}
 
-	((struct sccb_card *)pCurrCard)->cmdCounter++;
+	pCurrCard->cmdCounter++;
 
 	if (RD_HARPOON(ioport + hp_semaphore) & BIOS_IN_USE) {
 
@@ -1532,10 +1511,10 @@ static void FlashPoint_StartCCB(unsigned long pCurrCard, struct sccb *p_Sccb)
 			    | TICKLE_ME));
 		if (p_Sccb->OperationCode == RESET_COMMAND) {
 			pSaveSccb =
-			    ((struct sccb_card *)pCurrCard)->currentSCCB;
-			((struct sccb_card *)pCurrCard)->currentSCCB = p_Sccb;
+			    pCurrCard->currentSCCB;
+			pCurrCard->currentSCCB = p_Sccb;
 			FPT_queueSelectFail(&FPT_BL_Card[thisCard], thisCard);
-			((struct sccb_card *)pCurrCard)->currentSCCB =
+			pCurrCard->currentSCCB =
 			    pSaveSccb;
 		} else {
 			FPT_queueAddSccb(p_Sccb, thisCard);
@@ -1546,10 +1525,10 @@ static void FlashPoint_StartCCB(unsigned long pCurrCard, struct sccb *p_Sccb)
 
 		if (p_Sccb->OperationCode == RESET_COMMAND) {
 			pSaveSccb =
-			    ((struct sccb_card *)pCurrCard)->currentSCCB;
-			((struct sccb_card *)pCurrCard)->currentSCCB = p_Sccb;
+			    pCurrCard->currentSCCB;
+			pCurrCard->currentSCCB = p_Sccb;
 			FPT_queueSelectFail(&FPT_BL_Card[thisCard], thisCard);
-			((struct sccb_card *)pCurrCard)->currentSCCB =
+			pCurrCard->currentSCCB =
 			    pSaveSccb;
 		} else {
 			FPT_queueAddSccb(p_Sccb, thisCard);
@@ -1560,34 +1539,29 @@ static void FlashPoint_StartCCB(unsigned long pCurrCard, struct sccb *p_Sccb)
 
 		MDISABLE_INT(ioport);
 
-		if ((((struct sccb_card *)pCurrCard)->globalFlags & F_CONLUN_IO)
-		    &&
+		if ((pCurrCard->globalFlags & F_CONLUN_IO) &&
 		    ((FPT_sccbMgrTbl[thisCard][p_Sccb->TargID].
 		      TarStatus & TAR_TAG_Q_MASK) != TAG_Q_TRYING))
 			lun = p_Sccb->Lun;
 		else
 			lun = 0;
-		if ((((struct sccb_card *)pCurrCard)->currentSCCB == NULL) &&
+		if ((pCurrCard->currentSCCB == NULL) &&
 		    (FPT_sccbMgrTbl[thisCard][p_Sccb->TargID].TarSelQ_Cnt == 0)
 		    && (FPT_sccbMgrTbl[thisCard][p_Sccb->TargID].TarLUNBusy[lun]
 			== 0)) {
 
-			((struct sccb_card *)pCurrCard)->currentSCCB = p_Sccb;
+			pCurrCard->currentSCCB = p_Sccb;
 			FPT_ssel(p_Sccb->SccbIOPort, thisCard);
 		}
 
 		else {
 
 			if (p_Sccb->OperationCode == RESET_COMMAND) {
-				pSaveSccb =
-				    ((struct sccb_card *)pCurrCard)->
-				    currentSCCB;
-				((struct sccb_card *)pCurrCard)->currentSCCB =
-				    p_Sccb;
+				pSaveSccb = pCurrCard->currentSCCB;
+				pCurrCard->currentSCCB = p_Sccb;
 				FPT_queueSelectFail(&FPT_BL_Card[thisCard],
 						    thisCard);
-				((struct sccb_card *)pCurrCard)->currentSCCB =
-				    pSaveSccb;
+				pCurrCard->currentSCCB = pSaveSccb;
 			} else {
 				FPT_queueAddSccb(p_Sccb, thisCard);
 			}
@@ -1607,13 +1581,12 @@ static void FlashPoint_StartCCB(unsigned long pCurrCard, struct sccb *p_Sccb)
  *              callback function.
  *
  *---------------------------------------------------------------------*/
-static int FlashPoint_AbortCCB(unsigned long pCurrCard, struct sccb *p_Sccb)
+static int FlashPoint_AbortCCB(void *pCurrCard, struct sccb *p_Sccb)
 {
-	unsigned long ioport;
+	u32 ioport;
 
 	unsigned char thisCard;
 	CALL_BK_FN callback;
-	unsigned char TID;
 	struct sccb *pSaveSCCB;
 	struct sccb_mgr_tar_info *currTar_Info;
 
@@ -1650,9 +1623,6 @@ static int FlashPoint_AbortCCB(unsigned long pCurrCard, struct sccb *p_Sccb)
 			}
 
 			else {
-
-				TID = p_Sccb->TargID;
-
 				if (p_Sccb->Sccb_tag) {
 					MDISABLE_INT(ioport);
 					if (((struct sccb_card *)pCurrCard)->
@@ -1662,7 +1632,7 @@ static int FlashPoint_AbortCCB(unsigned long pCurrCard, struct sccb *p_Sccb)
 						p_Sccb->Sccb_scsistat =
 						    ABORT_ST;
 						p_Sccb->Sccb_scsimsg =
-						    SMABORT_TAG;
+						    ABORT_TASK;
 
 						if (((struct sccb_card *)
 						     pCurrCard)->currentSCCB ==
@@ -1715,9 +1685,9 @@ static int FlashPoint_AbortCCB(unsigned long pCurrCard, struct sccb *p_Sccb)
  *              interrupt for this card and disable the IRQ Pin if so.
  *
  *---------------------------------------------------------------------*/
-static unsigned char FlashPoint_InterruptPending(unsigned long pCurrCard)
+static unsigned char FlashPoint_InterruptPending(void *pCurrCard)
 {
-	unsigned long ioport;
+	u32 ioport;
 
 	ioport = ((struct sccb_card *)pCurrCard)->ioPort;
 
@@ -1739,38 +1709,36 @@ static unsigned char FlashPoint_InterruptPending(unsigned long pCurrCard)
  *              us.
  *
  *---------------------------------------------------------------------*/
-static int FlashPoint_HandleInterrupt(unsigned long pCurrCard)
+static int FlashPoint_HandleInterrupt(void *pcard)
 {
 	struct sccb *currSCCB;
-	unsigned char thisCard, result, bm_status, bm_int_st;
+	unsigned char thisCard, result, bm_status;
 	unsigned short hp_int;
 	unsigned char i, target;
-	unsigned long ioport;
+	struct sccb_card *pCurrCard = pcard;
+	u32 ioport;
 
-	thisCard = ((struct sccb_card *)pCurrCard)->cardIndex;
-	ioport = ((struct sccb_card *)pCurrCard)->ioPort;
+	thisCard = pCurrCard->cardIndex;
+	ioport = pCurrCard->ioPort;
 
 	MDISABLE_INT(ioport);
 
-	if ((bm_int_st = RD_HARPOON(ioport + hp_int_status)) & EXT_STATUS_ON)
-		bm_status =
-		    RD_HARPOON(ioport +
-			       hp_ext_status) & (unsigned char)BAD_EXT_STATUS;
+	if (RD_HARPOON(ioport + hp_int_status) & EXT_STATUS_ON)
+		bm_status = RD_HARPOON(ioport + hp_ext_status) &
+					(unsigned char)BAD_EXT_STATUS;
 	else
 		bm_status = 0;
 
 	WR_HARPOON(ioport + hp_int_mask, (INT_CMD_COMPL | SCSI_INTERRUPT));
 
-	while ((hp_int =
-		RDW_HARPOON((ioport +
-			     hp_intstat)) & FPT_default_intena) | bm_status) {
+	while ((hp_int = RDW_HARPOON((ioport + hp_intstat)) &
+				FPT_default_intena) | bm_status) {
 
-		currSCCB = ((struct sccb_card *)pCurrCard)->currentSCCB;
+		currSCCB = pCurrCard->currentSCCB;
 
 		if (hp_int & (FIFO | TIMEOUT | RESET | SCAM_SEL) || bm_status) {
 			result =
-			    FPT_SccbMgr_bad_isr(ioport, thisCard,
-						((struct sccb_card *)pCurrCard),
+			    FPT_SccbMgr_bad_isr(ioport, thisCard, pCurrCard,
 						hp_int);
 			WRW_HARPOON((ioport + hp_intstat),
 				    (FIFO | TIMEOUT | RESET | SCAM_SEL));
@@ -1796,8 +1764,7 @@ static int FlashPoint_HandleInterrupt(unsigned long pCurrCard)
 					(BUS_FREE | RSEL))) ;
 			}
 
-			if (((struct sccb_card *)pCurrCard)->
-			    globalFlags & F_HOST_XFER_ACT)
+			if (pCurrCard->globalFlags & F_HOST_XFER_ACT)
 
 				FPT_phaseChkFifo(ioport, thisCard);
 
@@ -1813,14 +1780,11 @@ static int FlashPoint_HandleInterrupt(unsigned long pCurrCard)
 
 		else if (hp_int & ITAR_DISC) {
 
-			if (((struct sccb_card *)pCurrCard)->
-			    globalFlags & F_HOST_XFER_ACT) {
-
+			if (pCurrCard->globalFlags & F_HOST_XFER_ACT)
 				FPT_phaseChkFifo(ioport, thisCard);
 
-			}
-
-			if (RD_HARPOON(ioport + hp_gp_reg_1) == SMSAVE_DATA_PTR) {
+			if (RD_HARPOON(ioport + hp_gp_reg_1) ==
+					SAVE_POINTERS) {
 
 				WR_HARPOON(ioport + hp_gp_reg_1, 0x00);
 				currSCCB->Sccb_XferState |= F_NO_DATA_YET;
@@ -1859,8 +1823,7 @@ static int FlashPoint_HandleInterrupt(unsigned long pCurrCard)
 			WRW_HARPOON((ioport + hp_intstat),
 				    (BUS_FREE | ITAR_DISC));
 
-			((struct sccb_card *)pCurrCard)->globalFlags |=
-			    F_NEW_SCCB_CMD;
+			pCurrCard->globalFlags |= F_NEW_SCCB_CMD;
 
 		}
 
@@ -1870,13 +1833,11 @@ static int FlashPoint_HandleInterrupt(unsigned long pCurrCard)
 				    (PROG_HLT | RSEL | PHASE | BUS_FREE));
 
 			if (RDW_HARPOON((ioport + hp_intstat)) & ITAR_DISC) {
-				if (((struct sccb_card *)pCurrCard)->
-				    globalFlags & F_HOST_XFER_ACT) {
+				if (pCurrCard->globalFlags & F_HOST_XFER_ACT)
 					FPT_phaseChkFifo(ioport, thisCard);
-				}
 
 				if (RD_HARPOON(ioport + hp_gp_reg_1) ==
-				    SMSAVE_DATA_PTR) {
+				    SAVE_POINTERS) {
 					WR_HARPOON(ioport + hp_gp_reg_1, 0x00);
 					currSCCB->Sccb_XferState |=
 					    F_NO_DATA_YET;
@@ -1890,8 +1851,7 @@ static int FlashPoint_HandleInterrupt(unsigned long pCurrCard)
 				FPT_queueDisconnect(currSCCB, thisCard);
 			}
 
-			FPT_sres(ioport, thisCard,
-				 ((struct sccb_card *)pCurrCard));
+			FPT_sres(ioport, thisCard, pCurrCard);
 			FPT_phaseDecode(ioport, thisCard);
 
 		}
@@ -1948,8 +1908,7 @@ static int FlashPoint_HandleInterrupt(unsigned long pCurrCard)
 
 			WRW_HARPOON((ioport + hp_intstat), BUS_FREE);
 
-			if (((struct sccb_card *)pCurrCard)->
-			    globalFlags & F_HOST_XFER_ACT) {
+			if (pCurrCard->globalFlags & F_HOST_XFER_ACT) {
 
 				FPT_hostDataXferAbort(ioport, thisCard,
 						      currSCCB);
@@ -1961,27 +1920,19 @@ static int FlashPoint_HandleInterrupt(unsigned long pCurrCard)
 		else if (hp_int & ITICKLE) {
 
 			WRW_HARPOON((ioport + hp_intstat), ITICKLE);
-			((struct sccb_card *)pCurrCard)->globalFlags |=
-			    F_NEW_SCCB_CMD;
+			pCurrCard->globalFlags |= F_NEW_SCCB_CMD;
 		}
 
 		if (((struct sccb_card *)pCurrCard)->
 		    globalFlags & F_NEW_SCCB_CMD) {
 
-			((struct sccb_card *)pCurrCard)->globalFlags &=
-			    ~F_NEW_SCCB_CMD;
+			pCurrCard->globalFlags &= ~F_NEW_SCCB_CMD;
 
-			if (((struct sccb_card *)pCurrCard)->currentSCCB ==
-			    NULL) {
+			if (pCurrCard->currentSCCB == NULL)
+				FPT_queueSearchSelect(pCurrCard, thisCard);
 
-				FPT_queueSearchSelect(((struct sccb_card *)
-						       pCurrCard), thisCard);
-			}
-
-			if (((struct sccb_card *)pCurrCard)->currentSCCB !=
-			    NULL) {
-				((struct sccb_card *)pCurrCard)->globalFlags &=
-				    ~F_NEW_SCCB_CMD;
+			if (pCurrCard->currentSCCB != NULL) {
+				pCurrCard->globalFlags &= ~F_NEW_SCCB_CMD;
 				FPT_ssel(ioport, thisCard);
 			}
 
@@ -2006,8 +1957,7 @@ static int FlashPoint_HandleInterrupt(unsigned long pCurrCard)
  *              processing time.
  *
  *---------------------------------------------------------------------*/
-static unsigned char FPT_SccbMgr_bad_isr(unsigned long p_port,
-					 unsigned char p_card,
+static unsigned char FPT_SccbMgr_bad_isr(u32 p_port, unsigned char p_card,
 					 struct sccb_card *pCurrCard,
 					 unsigned short p_int)
 {
@@ -2157,7 +2107,7 @@ static unsigned char FPT_SccbMgr_bad_isr(unsigned long p_port,
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_SccbMgrTableInitAll()
+static void FPT_SccbMgrTableInitAll(void)
 {
 	unsigned char thisCard;
 
@@ -2254,7 +2204,7 @@ static void FPT_SccbMgrTableInitTarget(unsigned char p_card,
  *
  *---------------------------------------------------------------------*/
 
-static unsigned char FPT_sfm(unsigned long port, struct sccb *pCurrSCCB)
+static unsigned char FPT_sfm(u32 port, struct sccb *pCurrSCCB)
 {
 	unsigned char message;
 	unsigned short TimeOutLoop;
@@ -2280,7 +2230,7 @@ static unsigned char FPT_sfm(unsigned long port, struct sccb *pCurrSCCB)
 		WR_HARPOON(port + hp_fiforead, 0);
 		WR_HARPOON(port + hp_fifowrite, 0);
 		if (pCurrSCCB != NULL) {
-			pCurrSCCB->Sccb_scsimsg = SMPARITY;
+			pCurrSCCB->Sccb_scsimsg = MSG_PARITY_ERROR;
 		}
 		message = 0x00;
 		do {
@@ -2322,12 +2272,12 @@ static unsigned char FPT_sfm(unsigned long port, struct sccb *pCurrSCCB)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_ssel(unsigned long port, unsigned char p_card)
+static void FPT_ssel(u32 port, unsigned char p_card)
 {
 
 	unsigned char auto_loaded, i, target, *theCCB;
 
-	unsigned long cdb_reg;
+	u32 cdb_reg;
 	struct sccb_card *CurrCard;
 	struct sccb *currSCCB;
 	struct sccb_mgr_tar_info *currTar_Info;
@@ -2433,7 +2383,7 @@ static void FPT_ssel(unsigned long port, unsigned char p_card)
 
 		WRW_HARPOON((port + ID_MSG_STRT + 2), BRH_OP + ALWAYS + NP);
 
-		currSCCB->Sccb_scsimsg = SMDEV_RESET;
+		currSCCB->Sccb_scsimsg = TARGET_RESET;
 
 		WR_HARPOON(port + hp_autostart_3, (SELECT + SELCHK_STRT));
 		auto_loaded = 1;
@@ -2621,7 +2571,7 @@ static void FPT_ssel(unsigned long port, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_sres(unsigned long port, unsigned char p_card,
+static void FPT_sres(u32 port, unsigned char p_card,
 		     struct sccb_card *pCurrCard)
 {
 
@@ -2681,7 +2631,6 @@ static void FPT_sres(unsigned long port, unsigned char p_card,
 	WRW_HARPOON((port + hp_fiforead), (unsigned short)0x00);
 
 	our_target = (unsigned char)(RD_HARPOON(port + hp_select_id) >> 4);
-	currTar_Info = &FPT_sccbMgrTbl[p_card][our_target];
 
 	msgRetryCount = 0;
 	do {
@@ -2780,9 +2729,9 @@ static void FPT_sres(unsigned long port, unsigned char p_card,
 		if (message == 0) {
 			msgRetryCount++;
 			if (msgRetryCount == 1) {
-				FPT_SendMsg(port, SMPARITY);
+				FPT_SendMsg(port, MSG_PARITY_ERROR);
 			} else {
-				FPT_SendMsg(port, SMDEV_RESET);
+				FPT_SendMsg(port, TARGET_RESET);
 
 				FPT_sssyncv(port, our_target, NARROW_SCSI,
 					    currTar_Info);
@@ -2857,7 +2806,7 @@ static void FPT_sres(unsigned long port, unsigned char p_card,
 	       (RD_HARPOON(port + hp_scsisig) & SCSI_BSY)) ;
 }
 
-static void FPT_SendMsg(unsigned long port, unsigned char message)
+static void FPT_SendMsg(u32 port, unsigned char message)
 {
 	while (!(RD_HARPOON(port + hp_scsisig) & SCSI_REQ)) {
 		if (!(RD_HARPOON(port + hp_scsisig) & SCSI_BSY)) {
@@ -2882,8 +2831,8 @@ static void FPT_SendMsg(unsigned long port, unsigned char message)
 
 		WR_HARPOON(port + hp_portctrl_0, 0x00);
 
-		if ((message == SMABORT) || (message == SMDEV_RESET) ||
-		    (message == SMABORT_TAG)) {
+		if ((message == ABORT_TASK_SET) || (message == TARGET_RESET) ||
+		    (message == ABORT_TASK)) {
 			while (!
 			       (RDW_HARPOON((port + hp_intstat)) &
 				(BUS_FREE | PHASE))) {
@@ -2904,8 +2853,7 @@ static void FPT_SendMsg(unsigned long port, unsigned char message)
  *              target device.
  *
  *---------------------------------------------------------------------*/
-static void FPT_sdecm(unsigned char message, unsigned long port,
-		      unsigned char p_card)
+static void FPT_sdecm(unsigned char message, u32 port, unsigned char p_card)
 {
 	struct sccb *currSCCB;
 	struct sccb_card *CurrCard;
@@ -2916,7 +2864,7 @@ static void FPT_sdecm(unsigned char message, unsigned long port,
 
 	currTar_Info = &FPT_sccbMgrTbl[p_card][currSCCB->TargID];
 
-	if (message == SMREST_DATA_PTR) {
+	if (message == RESTORE_POINTERS) {
 		if (!(currSCCB->Sccb_XferState & F_NO_DATA_YET)) {
 			currSCCB->Sccb_ATC = currSCCB->Sccb_savedATC;
 
@@ -2928,7 +2876,7 @@ static void FPT_sdecm(unsigned char message, unsigned long port,
 			   (AUTO_IMMED + DISCONNECT_START));
 	}
 
-	else if (message == SMCMD_COMP) {
+	else if (message == COMMAND_COMPLETE) {
 
 		if (currSCCB->Sccb_scsistat == SELECT_Q_ST) {
 			currTar_Info->TarStatus &=
@@ -2940,15 +2888,16 @@ static void FPT_sdecm(unsigned char message, unsigned long port,
 
 	}
 
-	else if ((message == SMNO_OP) || (message >= SMIDENT)
-		 || (message == SMINIT_RECOVERY) || (message == SMREL_RECOVERY)) {
+	else if ((message == NOP) || (message >= IDENTIFY_BASE) ||
+		 (message == INITIATE_RECOVERY) ||
+		 (message == RELEASE_RECOVERY)) {
 
 		ACCEPT_MSG(port);
 		WR_HARPOON(port + hp_autostart_1,
 			   (AUTO_IMMED + DISCONNECT_START));
 	}
 
-	else if (message == SMREJECT) {
+	else if (message == MESSAGE_REJECT) {
 
 		if ((currSCCB->Sccb_scsistat == SELECT_SN_ST) ||
 		    (currSCCB->Sccb_scsistat == SELECT_WN_ST) ||
@@ -2966,7 +2915,7 @@ static void FPT_sdecm(unsigned char message, unsigned long port,
 			}
 
 			if (currSCCB->Lun == 0x00) {
-				if ((currSCCB->Sccb_scsistat == SELECT_SN_ST)) {
+				if (currSCCB->Sccb_scsistat == SELECT_SN_ST) {
 
 					currTar_Info->TarStatus |=
 					    (unsigned char)SYNC_SUPPORTED;
@@ -2975,8 +2924,8 @@ static void FPT_sdecm(unsigned char message, unsigned long port,
 					    ~EE_SYNC_MASK;
 				}
 
-				else if ((currSCCB->Sccb_scsistat ==
-					  SELECT_WN_ST)) {
+				else if (currSCCB->Sccb_scsistat ==
+					  SELECT_WN_ST) {
 
 					currTar_Info->TarStatus =
 					    (currTar_Info->
@@ -3049,19 +2998,19 @@ static void FPT_sdecm(unsigned char message, unsigned long port,
 		}
 	}
 
-	else if (message == SMEXT) {
+	else if (message == EXTENDED_MESSAGE) {
 
 		ACCEPT_MSG(port);
 		FPT_shandem(port, p_card, currSCCB);
 	}
 
-	else if (message == SMIGNORWR) {
+	else if (message == IGNORE_WIDE_RESIDUE) {
 
 		ACCEPT_MSG(port);	/* ACK the RESIDUE MSG */
 
 		message = FPT_sfm(port, currSCCB);
 
-		if (currSCCB->Sccb_scsimsg != SMPARITY)
+		if (currSCCB->Sccb_scsimsg != MSG_PARITY_ERROR)
 			ACCEPT_MSG(port);
 		WR_HARPOON(port + hp_autostart_1,
 			   (AUTO_IMMED + DISCONNECT_START));
@@ -3070,7 +3019,7 @@ static void FPT_sdecm(unsigned char message, unsigned long port,
 	else {
 
 		currSCCB->HostStatus = SCCB_PHASE_SEQUENCE_FAIL;
-		currSCCB->Sccb_scsimsg = SMREJECT;
+		currSCCB->Sccb_scsimsg = MESSAGE_REJECT;
 
 		ACCEPT_MSG_ATN(port);
 		WR_HARPOON(port + hp_autostart_1,
@@ -3085,8 +3034,7 @@ static void FPT_sdecm(unsigned char message, unsigned long port,
  * Description: Decide what to do with the extended message.
  *
  *---------------------------------------------------------------------*/
-static void FPT_shandem(unsigned long port, unsigned char p_card,
-			struct sccb *pCurrSCCB)
+static void FPT_shandem(u32 port, unsigned char p_card, struct sccb *pCurrSCCB)
 {
 	unsigned char length, message;
 
@@ -3097,7 +3045,7 @@ static void FPT_shandem(unsigned long port, unsigned char p_card,
 		message = FPT_sfm(port, pCurrSCCB);
 		if (message) {
 
-			if (message == SMSYNC) {
+			if (message == EXTENDED_SDTR) {
 
 				if (length == 0x03) {
 
@@ -3105,10 +3053,10 @@ static void FPT_shandem(unsigned long port, unsigned char p_card,
 					FPT_stsyncn(port, p_card);
 				} else {
 
-					pCurrSCCB->Sccb_scsimsg = SMREJECT;
+					pCurrSCCB->Sccb_scsimsg = MESSAGE_REJECT;
 					ACCEPT_MSG_ATN(port);
 				}
-			} else if (message == SMWDTR) {
+			} else if (message == EXTENDED_WDTR) {
 
 				if (length == 0x02) {
 
@@ -3116,7 +3064,7 @@ static void FPT_shandem(unsigned long port, unsigned char p_card,
 					FPT_stwidn(port, p_card);
 				} else {
 
-					pCurrSCCB->Sccb_scsimsg = SMREJECT;
+					pCurrSCCB->Sccb_scsimsg = MESSAGE_REJECT;
 					ACCEPT_MSG_ATN(port);
 
 					WR_HARPOON(port + hp_autostart_1,
@@ -3125,20 +3073,20 @@ static void FPT_shandem(unsigned long port, unsigned char p_card,
 				}
 			} else {
 
-				pCurrSCCB->Sccb_scsimsg = SMREJECT;
+				pCurrSCCB->Sccb_scsimsg = MESSAGE_REJECT;
 				ACCEPT_MSG_ATN(port);
 
 				WR_HARPOON(port + hp_autostart_1,
 					   (AUTO_IMMED + DISCONNECT_START));
 			}
 		} else {
-			if (pCurrSCCB->Sccb_scsimsg != SMPARITY)
+			if (pCurrSCCB->Sccb_scsimsg != MSG_PARITY_ERROR)
 				ACCEPT_MSG(port);
 			WR_HARPOON(port + hp_autostart_1,
 				   (AUTO_IMMED + DISCONNECT_START));
 		}
 	} else {
-		if (pCurrSCCB->Sccb_scsimsg == SMPARITY)
+		if (pCurrSCCB->Sccb_scsimsg == MSG_PARITY_ERROR)
 			WR_HARPOON(port + hp_autostart_1,
 				   (AUTO_IMMED + DISCONNECT_START));
 	}
@@ -3153,7 +3101,7 @@ static void FPT_shandem(unsigned long port, unsigned char p_card,
  *
  *---------------------------------------------------------------------*/
 
-static unsigned char FPT_sisyncn(unsigned long port, unsigned char p_card,
+static unsigned char FPT_sisyncn(u32 port, unsigned char p_card,
 				 unsigned char syncFlag)
 {
 	struct sccb *currSCCB;
@@ -3172,10 +3120,10 @@ static unsigned char FPT_sisyncn(unsigned long port, unsigned char p_card,
 		WRW_HARPOON((port + ID_MSG_STRT + 2), BRH_OP + ALWAYS + CMDPZ);
 
 		WRW_HARPOON((port + SYNC_MSGS + 0),
-			    (MPM_OP + AMSG_OUT + SMEXT));
+			    (MPM_OP + AMSG_OUT + EXTENDED_MESSAGE));
 		WRW_HARPOON((port + SYNC_MSGS + 2), (MPM_OP + AMSG_OUT + 0x03));
 		WRW_HARPOON((port + SYNC_MSGS + 4),
-			    (MPM_OP + AMSG_OUT + SMSYNC));
+			    (MPM_OP + AMSG_OUT + EXTENDED_SDTR));
 
 		if ((currTar_Info->TarEEValue & EE_SYNC_MASK) == EE_SYNC_20MB)
 
@@ -3234,7 +3182,7 @@ static unsigned char FPT_sisyncn(unsigned long port, unsigned char p_card,
  *              necessary.
  *
  *---------------------------------------------------------------------*/
-static void FPT_stsyncn(unsigned long port, unsigned char p_card)
+static void FPT_stsyncn(u32 port, unsigned char p_card)
 {
 	unsigned char sync_msg, offset, sync_reg, our_sync_msg;
 	struct sccb *currSCCB;
@@ -3245,7 +3193,7 @@ static void FPT_stsyncn(unsigned long port, unsigned char p_card)
 
 	sync_msg = FPT_sfm(port, currSCCB);
 
-	if ((sync_msg == 0x00) && (currSCCB->Sccb_scsimsg == SMPARITY)) {
+	if ((sync_msg == 0x00) && (currSCCB->Sccb_scsimsg == MSG_PARITY_ERROR)) {
 		WR_HARPOON(port + hp_autostart_1,
 			   (AUTO_IMMED + DISCONNECT_START));
 		return;
@@ -3255,7 +3203,7 @@ static void FPT_stsyncn(unsigned long port, unsigned char p_card)
 
 	offset = FPT_sfm(port, currSCCB);
 
-	if ((offset == 0x00) && (currSCCB->Sccb_scsimsg == SMPARITY)) {
+	if ((offset == 0x00) && (currSCCB->Sccb_scsimsg == MSG_PARITY_ERROR)) {
 		WR_HARPOON(port + hp_autostart_1,
 			   (AUTO_IMMED + DISCONNECT_START));
 		return;
@@ -3363,13 +3311,15 @@ static void FPT_stsyncn(unsigned long port, unsigned char p_card)
  * Description: Answer the targets sync message.
  *
  *---------------------------------------------------------------------*/
-static void FPT_sisyncr(unsigned long port, unsigned char sync_pulse,
+static void FPT_sisyncr(u32 port, unsigned char sync_pulse,
 			unsigned char offset)
 {
 	ARAM_ACCESS(port);
-	WRW_HARPOON((port + SYNC_MSGS + 0), (MPM_OP + AMSG_OUT + SMEXT));
+	WRW_HARPOON((port + SYNC_MSGS + 0),
+		    (MPM_OP + AMSG_OUT + EXTENDED_MESSAGE));
 	WRW_HARPOON((port + SYNC_MSGS + 2), (MPM_OP + AMSG_OUT + 0x03));
-	WRW_HARPOON((port + SYNC_MSGS + 4), (MPM_OP + AMSG_OUT + SMSYNC));
+	WRW_HARPOON((port + SYNC_MSGS + 4),
+		    (MPM_OP + AMSG_OUT + EXTENDED_SDTR));
 	WRW_HARPOON((port + SYNC_MSGS + 6), (MPM_OP + AMSG_OUT + sync_pulse));
 	WRW_HARPOON((port + SYNC_MSGS + 8), (RAT_OP));
 	WRW_HARPOON((port + SYNC_MSGS + 10), (MPM_OP + AMSG_OUT + offset));
@@ -3394,7 +3344,7 @@ static void FPT_sisyncr(unsigned long port, unsigned char sync_pulse,
  *
  *---------------------------------------------------------------------*/
 
-static unsigned char FPT_siwidn(unsigned long port, unsigned char p_card)
+static unsigned char FPT_siwidn(u32 port, unsigned char p_card)
 {
 	struct sccb *currSCCB;
 	struct sccb_mgr_tar_info *currTar_Info;
@@ -3412,10 +3362,10 @@ static unsigned char FPT_siwidn(unsigned long port, unsigned char p_card)
 		WRW_HARPOON((port + ID_MSG_STRT + 2), BRH_OP + ALWAYS + CMDPZ);
 
 		WRW_HARPOON((port + SYNC_MSGS + 0),
-			    (MPM_OP + AMSG_OUT + SMEXT));
+			    (MPM_OP + AMSG_OUT + EXTENDED_MESSAGE));
 		WRW_HARPOON((port + SYNC_MSGS + 2), (MPM_OP + AMSG_OUT + 0x02));
 		WRW_HARPOON((port + SYNC_MSGS + 4),
-			    (MPM_OP + AMSG_OUT + SMWDTR));
+			    (MPM_OP + AMSG_OUT + EXTENDED_WDTR));
 		WRW_HARPOON((port + SYNC_MSGS + 6), (RAT_OP));
 		WRW_HARPOON((port + SYNC_MSGS + 8),
 			    (MPM_OP + AMSG_OUT + SM16BIT));
@@ -3449,7 +3399,7 @@ static unsigned char FPT_siwidn(unsigned long port, unsigned char p_card)
  *              necessary.
  *
  *---------------------------------------------------------------------*/
-static void FPT_stwidn(unsigned long port, unsigned char p_card)
+static void FPT_stwidn(u32 port, unsigned char p_card)
 {
 	unsigned char width;
 	struct sccb *currSCCB;
@@ -3460,7 +3410,7 @@ static void FPT_stwidn(unsigned long port, unsigned char p_card)
 
 	width = FPT_sfm(port, currSCCB);
 
-	if ((width == 0x00) && (currSCCB->Sccb_scsimsg == SMPARITY)) {
+	if ((width == 0x00) && (currSCCB->Sccb_scsimsg == MSG_PARITY_ERROR)) {
 		WR_HARPOON(port + hp_autostart_1,
 			   (AUTO_IMMED + DISCONNECT_START));
 		return;
@@ -3520,12 +3470,14 @@ static void FPT_stwidn(unsigned long port, unsigned char p_card)
  * Description: Answer the targets Wide nego message.
  *
  *---------------------------------------------------------------------*/
-static void FPT_siwidr(unsigned long port, unsigned char width)
+static void FPT_siwidr(u32 port, unsigned char width)
 {
 	ARAM_ACCESS(port);
-	WRW_HARPOON((port + SYNC_MSGS + 0), (MPM_OP + AMSG_OUT + SMEXT));
+	WRW_HARPOON((port + SYNC_MSGS + 0),
+		    (MPM_OP + AMSG_OUT + EXTENDED_MESSAGE));
 	WRW_HARPOON((port + SYNC_MSGS + 2), (MPM_OP + AMSG_OUT + 0x02));
-	WRW_HARPOON((port + SYNC_MSGS + 4), (MPM_OP + AMSG_OUT + SMWDTR));
+	WRW_HARPOON((port + SYNC_MSGS + 4),
+		    (MPM_OP + AMSG_OUT + EXTENDED_WDTR));
 	WRW_HARPOON((port + SYNC_MSGS + 6), (RAT_OP));
 	WRW_HARPOON((port + SYNC_MSGS + 8), (MPM_OP + AMSG_OUT + width));
 	WRW_HARPOON((port + SYNC_MSGS + 10), (BRH_OP + ALWAYS + NP));
@@ -3548,7 +3500,7 @@ static void FPT_siwidr(unsigned long port, unsigned char width)
  *              ID specified.
  *
  *---------------------------------------------------------------------*/
-static void FPT_sssyncv(unsigned long p_port, unsigned char p_id,
+static void FPT_sssyncv(u32 p_port, unsigned char p_id,
 			unsigned char p_sync_value,
 			struct sccb_mgr_tar_info *currTar_Info)
 {
@@ -3620,7 +3572,7 @@ static void FPT_sssyncv(unsigned long p_port, unsigned char p_id,
  * Description: Reset the desired card's SCSI bus.
  *
  *---------------------------------------------------------------------*/
-static void FPT_sresb(unsigned long port, unsigned char p_card)
+static void FPT_sresb(u32 port, unsigned char p_card)
 {
 	unsigned char scsiID, i;
 
@@ -3706,14 +3658,14 @@ static void FPT_ssenss(struct sccb_card *pCurrCard)
 	}
 
 	currSCCB->CdbLength = SIX_BYTE_CMD;
-	currSCCB->Cdb[0] = SCSI_REQUEST_SENSE;
+	currSCCB->Cdb[0] = REQUEST_SENSE;
 	currSCCB->Cdb[1] = currSCCB->Cdb[1] & (unsigned char)0xE0;	/*Keep LUN. */
 	currSCCB->Cdb[2] = 0x00;
 	currSCCB->Cdb[3] = 0x00;
 	currSCCB->Cdb[4] = currSCCB->RequestSenseLength;
 	currSCCB->Cdb[5] = 0x00;
 
-	currSCCB->Sccb_XferCnt = (unsigned long)currSCCB->RequestSenseLength;
+	currSCCB->Sccb_XferCnt = (u32)currSCCB->RequestSenseLength;
 
 	currSCCB->Sccb_ATC = 0x00;
 
@@ -3737,7 +3689,7 @@ static void FPT_ssenss(struct sccb_card *pCurrCard)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_sxfrp(unsigned long p_port, unsigned char p_card)
+static void FPT_sxfrp(u32 p_port, unsigned char p_card)
 {
 	unsigned char curr_phz;
 
@@ -3819,7 +3771,7 @@ static void FPT_sxfrp(unsigned long p_port, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_schkdd(unsigned long port, unsigned char p_card)
+static void FPT_schkdd(u32 port, unsigned char p_card)
 {
 	unsigned short TimeOutLoop;
 	unsigned char sPhase;
@@ -3963,13 +3915,9 @@ static void FPT_sinits(struct sccb *p_sccb, unsigned char p_card)
 */
 	if ((currTar_Info->TarStatus & TAR_ALLOW_DISC) ||
 	    (currTar_Info->TarStatus & TAG_Q_TRYING)) {
-		p_sccb->Sccb_idmsg =
-		    (unsigned char)(SMIDENT | DISC_PRIV) | p_sccb->Lun;
-	}
-
-	else {
-
-		p_sccb->Sccb_idmsg = (unsigned char)SMIDENT | p_sccb->Lun;
+		p_sccb->Sccb_idmsg = IDENTIFY(true, p_sccb->Lun);
+	} else {
+		p_sccb->Sccb_idmsg = IDENTIFY(false, p_sccb->Lun);
 	}
 
 	p_sccb->HostStatus = 0x00;
@@ -3986,7 +3934,7 @@ static void FPT_sinits(struct sccb *p_sccb, unsigned char p_card)
  */
 	p_sccb->Sccb_scsistat = BUS_FREE_ST;
 	p_sccb->SccbStatus = SCCB_IN_PROCESS;
-	p_sccb->Sccb_scsimsg = SMNO_OP;
+	p_sccb->Sccb_scsimsg = NOP;
 
 }
 
@@ -3998,10 +3946,10 @@ static void FPT_sinits(struct sccb *p_sccb, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_phaseDecode(unsigned long p_port, unsigned char p_card)
+static void FPT_phaseDecode(u32 p_port, unsigned char p_card)
 {
 	unsigned char phase_ref;
-	void (*phase) (unsigned long, unsigned char);
+	void (*phase) (u32, unsigned char);
 
 	DISABLE_AUTO(p_port);
 
@@ -4021,7 +3969,7 @@ static void FPT_phaseDecode(unsigned long p_port, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_phaseDataOut(unsigned long port, unsigned char p_card)
+static void FPT_phaseDataOut(u32 port, unsigned char p_card)
 {
 
 	struct sccb *currSCCB;
@@ -4062,7 +4010,7 @@ static void FPT_phaseDataOut(unsigned long port, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_phaseDataIn(unsigned long port, unsigned char p_card)
+static void FPT_phaseDataIn(u32 port, unsigned char p_card)
 {
 
 	struct sccb *currSCCB;
@@ -4106,10 +4054,10 @@ static void FPT_phaseDataIn(unsigned long port, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_phaseCommand(unsigned long p_port, unsigned char p_card)
+static void FPT_phaseCommand(u32 p_port, unsigned char p_card)
 {
 	struct sccb *currSCCB;
-	unsigned long cdb_reg;
+	u32 cdb_reg;
 	unsigned char i;
 
 	currSCCB = FPT_BL_Card[p_card].currentSCCB;
@@ -4157,7 +4105,7 @@ static void FPT_phaseCommand(unsigned long p_port, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_phaseStatus(unsigned long port, unsigned char p_card)
+static void FPT_phaseStatus(u32 port, unsigned char p_card)
 {
 	/* Start-up the automation to finish off this command and let the
 	   isr handle the interrupt for command complete when it comes in.
@@ -4178,7 +4126,7 @@ static void FPT_phaseStatus(unsigned long port, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_phaseMsgOut(unsigned long port, unsigned char p_card)
+static void FPT_phaseMsgOut(u32 port, unsigned char p_card)
 {
 	unsigned char message, scsiID;
 	struct sccb *currSCCB;
@@ -4191,7 +4139,7 @@ static void FPT_phaseMsgOut(unsigned long port, unsigned char p_card)
 		message = currSCCB->Sccb_scsimsg;
 		scsiID = currSCCB->TargID;
 
-		if (message == SMDEV_RESET) {
+		if (message == TARGET_RESET) {
 
 			currTar_Info = &FPT_sccbMgrTbl[p_card][scsiID];
 			currTar_Info->TarSyncCtrl = 0;
@@ -4227,7 +4175,7 @@ static void FPT_phaseMsgOut(unsigned long port, unsigned char p_card)
 
 		else if (currSCCB->Sccb_scsistat < COMMAND_ST) {
 
-			if (message == SMNO_OP) {
+			if (message == NOP) {
 				currSCCB->Sccb_MGRFlags |= F_DEV_SELECTED;
 
 				FPT_ssel(port, p_card);
@@ -4235,13 +4183,13 @@ static void FPT_phaseMsgOut(unsigned long port, unsigned char p_card)
 			}
 		} else {
 
-			if (message == SMABORT)
+			if (message == ABORT_TASK_SET)
 
 				FPT_queueFlushSccb(p_card, SCCB_COMPLETE);
 		}
 
 	} else {
-		message = SMABORT;
+		message = ABORT_TASK_SET;
 	}
 
 	WRW_HARPOON((port + hp_intstat), (BUS_FREE | PHASE | XFER_CNT_0));
@@ -4256,8 +4204,8 @@ static void FPT_phaseMsgOut(unsigned long port, unsigned char p_card)
 
 	WR_HARPOON(port + hp_portctrl_0, 0x00);
 
-	if ((message == SMABORT) || (message == SMDEV_RESET) ||
-	    (message == SMABORT_TAG)) {
+	if ((message == ABORT_TASK_SET) || (message == TARGET_RESET) ||
+	    (message == ABORT_TASK)) {
 
 		while (!(RDW_HARPOON((port + hp_intstat)) & (BUS_FREE | PHASE))) {
 		}
@@ -4299,8 +4247,8 @@ static void FPT_phaseMsgOut(unsigned long port, unsigned char p_card)
 
 	else {
 
-		if (message == SMPARITY) {
-			currSCCB->Sccb_scsimsg = SMNO_OP;
+		if (message == MSG_PARITY_ERROR) {
+			currSCCB->Sccb_scsimsg = NOP;
 			WR_HARPOON(port + hp_autostart_1,
 				   (AUTO_IMMED + DISCONNECT_START));
 		} else {
@@ -4317,7 +4265,7 @@ static void FPT_phaseMsgOut(unsigned long port, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_phaseMsgIn(unsigned long port, unsigned char p_card)
+static void FPT_phaseMsgIn(u32 port, unsigned char p_card)
 {
 	unsigned char message;
 	struct sccb *currSCCB;
@@ -4330,7 +4278,7 @@ static void FPT_phaseMsgIn(unsigned long port, unsigned char p_card)
 	}
 
 	message = RD_HARPOON(port + hp_scsidata_0);
-	if ((message == SMDISC) || (message == SMSAVE_DATA_PTR)) {
+	if ((message == DISCONNECT) || (message == SAVE_POINTERS)) {
 
 		WR_HARPOON(port + hp_autostart_1,
 			   (AUTO_IMMED + END_DATA_START));
@@ -4345,7 +4293,7 @@ static void FPT_phaseMsgIn(unsigned long port, unsigned char p_card)
 			FPT_sdecm(message, port, p_card);
 
 		} else {
-			if (currSCCB->Sccb_scsimsg != SMPARITY)
+			if (currSCCB->Sccb_scsimsg != MSG_PARITY_ERROR)
 				ACCEPT_MSG(port);
 			WR_HARPOON(port + hp_autostart_1,
 				   (AUTO_IMMED + DISCONNECT_START));
@@ -4364,7 +4312,7 @@ static void FPT_phaseMsgIn(unsigned long port, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_phaseIllegal(unsigned long port, unsigned char p_card)
+static void FPT_phaseIllegal(u32 port, unsigned char p_card)
 {
 	struct sccb *currSCCB;
 
@@ -4375,7 +4323,7 @@ static void FPT_phaseIllegal(unsigned long port, unsigned char p_card)
 
 		currSCCB->HostStatus = SCCB_PHASE_SEQUENCE_FAIL;
 		currSCCB->Sccb_scsistat = ABORT_ST;
-		currSCCB->Sccb_scsimsg = SMABORT;
+		currSCCB->Sccb_scsimsg = ABORT_TASK_SET;
 	}
 
 	ACCEPT_MSG_ATN(port);
@@ -4390,9 +4338,9 @@ static void FPT_phaseIllegal(unsigned long port, unsigned char p_card)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_phaseChkFifo(unsigned long port, unsigned char p_card)
+static void FPT_phaseChkFifo(u32 port, unsigned char p_card)
 {
-	unsigned long xfercnt;
+	u32 xfercnt;
 	struct sccb *currSCCB;
 
 	currSCCB = FPT_BL_Card[p_card].currentSCCB;
@@ -4461,7 +4409,7 @@ static void FPT_phaseChkFifo(unsigned long port, unsigned char p_card)
  *              because of command complete or from a disconnect.
  *
  *---------------------------------------------------------------------*/
-static void FPT_phaseBusFree(unsigned long port, unsigned char p_card)
+static void FPT_phaseBusFree(u32 port, unsigned char p_card)
 {
 	struct sccb *currSCCB;
 
@@ -4554,12 +4502,12 @@ static void FPT_phaseBusFree(unsigned long port, unsigned char p_card)
  *
  * Function: Auto Load Default Map
  *
- * Description: Load the Automation RAM with the defualt map values.
+ * Description: Load the Automation RAM with the default map values.
  *
  *---------------------------------------------------------------------*/
-static void FPT_autoLoadDefaultMap(unsigned long p_port)
+static void FPT_autoLoadDefaultMap(u32 p_port)
 {
-	unsigned long map_addr;
+	u32 map_addr;
 
 	ARAM_ACCESS(p_port);
 	map_addr = p_port + hp_aramBase;
@@ -4663,7 +4611,7 @@ static void FPT_autoLoadDefaultMap(unsigned long p_port)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_autoCmdCmplt(unsigned long p_port, unsigned char p_card)
+static void FPT_autoCmdCmplt(u32 p_port, unsigned char p_card)
 {
 	struct sccb *currSCCB;
 	unsigned char status_byte;
@@ -4674,9 +4622,9 @@ static void FPT_autoCmdCmplt(unsigned long p_port, unsigned char p_card)
 
 	FPT_sccbMgrTbl[p_card][currSCCB->TargID].TarLUN_CA = 0;
 
-	if (status_byte != SSGOOD) {
+	if (status_byte != SAM_STAT_GOOD) {
 
-		if (status_byte == SSQ_FULL) {
+		if (status_byte == SAM_STAT_TASK_SET_FULL) {
 
 			if (((FPT_BL_Card[p_card].globalFlags & F_CONLUN_IO) &&
 			     ((FPT_sccbMgrTbl[p_card][currSCCB->TargID].
@@ -4808,7 +4756,7 @@ static void FPT_autoCmdCmplt(unsigned long p_port, unsigned char p_card)
 
 		}
 
-		if (status_byte == SSCHECK) {
+		if (status_byte == SAM_STAT_CHECK_CONDITION) {
 			if (FPT_BL_Card[p_card].globalFlags & F_DO_RENEGO) {
 				if (FPT_sccbMgrTbl[p_card][currSCCB->TargID].
 				    TarEEValue & EE_SYNC_MASK) {
@@ -4830,7 +4778,7 @@ static void FPT_autoCmdCmplt(unsigned long p_port, unsigned char p_card)
 			currSCCB->SccbStatus = SCCB_ERROR;
 			currSCCB->TargetStatus = status_byte;
 
-			if (status_byte == SSCHECK) {
+			if (status_byte == SAM_STAT_CHECK_CONDITION) {
 
 				FPT_sccbMgrTbl[p_card][currSCCB->TargID].
 				    TarLUN_CA = 1;
@@ -4936,8 +4884,7 @@ static void FPT_autoCmdCmplt(unsigned long p_port, unsigned char p_card)
  *              
  *---------------------------------------------------------------------*/
 
-static void FPT_dataXferProcessor(unsigned long port,
-				  struct sccb_card *pCurrCard)
+static void FPT_dataXferProcessor(u32 port, struct sccb_card *pCurrCard)
 {
 	struct sccb *currSCCB;
 
@@ -4970,22 +4917,18 @@ static void FPT_dataXferProcessor(unsigned long port,
  * Description:
  *
  *---------------------------------------------------------------------*/
-static void FPT_busMstrSGDataXferStart(unsigned long p_port,
-				       struct sccb *pcurrSCCB)
+static void FPT_busMstrSGDataXferStart(u32 p_port, struct sccb *pcurrSCCB)
 {
-	unsigned long count, addr, tmpSGCnt;
+	u32 count, addr, tmpSGCnt;
 	unsigned int sg_index;
 	unsigned char sg_count, i;
-	unsigned long reg_offset;
+	u32 reg_offset;
+	struct blogic_sg_seg *segp;
 
-	if (pcurrSCCB->Sccb_XferState & F_HOST_XFER_DIR) {
-
-		count = ((unsigned long)HOST_RD_CMD) << 24;
-	}
-
-	else {
-		count = ((unsigned long)HOST_WRT_CMD) << 24;
-	}
+	if (pcurrSCCB->Sccb_XferState & F_HOST_XFER_DIR)
+		count = ((u32)HOST_RD_CMD) << 24;
+	else
+		count = ((u32)HOST_WRT_CMD) << 24;
 
 	sg_count = 0;
 	tmpSGCnt = 0;
@@ -4998,25 +4941,20 @@ static void FPT_busMstrSGDataXferStart(unsigned long p_port,
 	WR_HARPOON(p_port + hp_page_ctrl, i);
 
 	while ((sg_count < (unsigned char)SG_BUF_CNT) &&
-	       ((unsigned long)(sg_index * (unsigned int)SG_ELEMENT_SIZE) <
-		pcurrSCCB->DataLength)) {
+			((sg_index * (unsigned int)SG_ELEMENT_SIZE) <
+			pcurrSCCB->DataLength)) {
 
-		tmpSGCnt += *(((unsigned long *)pcurrSCCB->DataPointer) +
-			      (sg_index * 2));
-
-		count |= *(((unsigned long *)pcurrSCCB->DataPointer) +
-			   (sg_index * 2));
-
-		addr = *(((unsigned long *)pcurrSCCB->DataPointer) +
-			 ((sg_index * 2) + 1));
+		segp = (struct blogic_sg_seg *)(pcurrSCCB->DataPointer) +
+				sg_index;
+		tmpSGCnt += segp->segbytes;
+		count |= segp->segbytes;
+		addr = segp->segdata;
 
 		if ((!sg_count) && (pcurrSCCB->Sccb_SGoffset)) {
-
 			addr +=
 			    ((count & 0x00FFFFFFL) - pcurrSCCB->Sccb_SGoffset);
 			count =
 			    (count & 0xFF000000L) | pcurrSCCB->Sccb_SGoffset;
-
 			tmpSGCnt = count & 0x00FFFFFFL;
 		}
 
@@ -5072,17 +5010,15 @@ static void FPT_busMstrSGDataXferStart(unsigned long p_port,
  * Description: 
  *
  *---------------------------------------------------------------------*/
-static void FPT_busMstrDataXferStart(unsigned long p_port,
-				     struct sccb *pcurrSCCB)
+static void FPT_busMstrDataXferStart(u32 p_port, struct sccb *pcurrSCCB)
 {
-	unsigned long addr, count;
+	u32 addr, count;
 
 	if (!(pcurrSCCB->Sccb_XferState & F_AUTO_SENSE)) {
 
 		count = pcurrSCCB->Sccb_XferCnt;
 
-		addr =
-		    (unsigned long)pcurrSCCB->DataPointer + pcurrSCCB->Sccb_ATC;
+		addr = (u32)(unsigned long)pcurrSCCB->DataPointer + pcurrSCCB->Sccb_ATC;
 	}
 
 	else {
@@ -5127,7 +5063,7 @@ static void FPT_busMstrDataXferStart(unsigned long p_port,
  *               command busy is also time out, it'll just give up.
  *
  *---------------------------------------------------------------------*/
-static unsigned char FPT_busMstrTimeOut(unsigned long p_port)
+static unsigned char FPT_busMstrTimeOut(u32 p_port)
 {
 	unsigned long timeout;
 
@@ -5166,13 +5102,14 @@ static unsigned char FPT_busMstrTimeOut(unsigned long p_port)
  * Description: Abort any in progress transfer.
  *
  *---------------------------------------------------------------------*/
-static void FPT_hostDataXferAbort(unsigned long port, unsigned char p_card,
+static void FPT_hostDataXferAbort(u32 port, unsigned char p_card,
 				  struct sccb *pCurrSCCB)
 {
 
 	unsigned long timeout;
 	unsigned long remain_cnt;
-	unsigned int sg_ptr;
+	u32 sg_ptr;
+	struct blogic_sg_seg *segp;
 
 	FPT_BL_Card[p_card].globalFlags &= ~F_HOST_XFER_ACT;
 
@@ -5236,9 +5173,8 @@ static void FPT_hostDataXferAbort(unsigned long port, unsigned char p_card,
 			    (unsigned int)(pCurrSCCB->DataLength /
 					   SG_ELEMENT_SIZE)) {
 
-				sg_ptr =
-				    (unsigned int)(pCurrSCCB->DataLength /
-						   SG_ELEMENT_SIZE);
+				sg_ptr = (u32)(pCurrSCCB->DataLength /
+							SG_ELEMENT_SIZE);
 			}
 
 			remain_cnt = pCurrSCCB->Sccb_XferCnt;
@@ -5246,23 +5182,13 @@ static void FPT_hostDataXferAbort(unsigned long port, unsigned char p_card,
 			while (remain_cnt < 0x01000000L) {
 
 				sg_ptr--;
-
-				if (remain_cnt >
-				    (unsigned
-				     long)(*(((unsigned long *)pCurrSCCB->
-					      DataPointer) + (sg_ptr * 2)))) {
-
+				segp = (struct blogic_sg_seg *)(pCurrSCCB->
+						DataPointer) + (sg_ptr * 2);
+				if (remain_cnt > (unsigned long)segp->segbytes)
 					remain_cnt -=
-					    (unsigned
-					     long)(*(((unsigned long *)
-						      pCurrSCCB->DataPointer) +
-						     (sg_ptr * 2)));
-				}
-
-				else {
-
+						(unsigned long)segp->segbytes;
+				else
 					break;
-				}
 			}
 
 			if (remain_cnt < 0x01000000L) {
@@ -5418,23 +5344,18 @@ static void FPT_hostDataXferAbort(unsigned long port, unsigned char p_card,
 
 			pCurrSCCB->Sccb_SGoffset = 0x00;
 
-			if ((unsigned long)(pCurrSCCB->Sccb_sgseg *
-					    SG_ELEMENT_SIZE) >=
-			    pCurrSCCB->DataLength) {
+			if ((u32)(pCurrSCCB->Sccb_sgseg * SG_ELEMENT_SIZE) >=
+					pCurrSCCB->DataLength) {
 
 				pCurrSCCB->Sccb_XferState |= F_ALL_XFERRED;
-
 				pCurrSCCB->Sccb_sgseg =
 				    (unsigned short)(pCurrSCCB->DataLength /
 						     SG_ELEMENT_SIZE);
-
 			}
 		}
 
 		else {
-
 			if (!(pCurrSCCB->Sccb_XferState & F_AUTO_SENSE))
-
 				pCurrSCCB->Sccb_XferState |= F_ALL_XFERRED;
 		}
 	}
@@ -5454,21 +5375,22 @@ static void FPT_hostDataXferRestart(struct sccb *currSCCB)
 {
 	unsigned long data_count;
 	unsigned int sg_index;
-	unsigned long *sg_ptr;
+	struct blogic_sg_seg *segp;
 
 	if (currSCCB->Sccb_XferState & F_SG_XFER) {
 
 		currSCCB->Sccb_XferCnt = 0;
 
 		sg_index = 0xffff;	/*Index by long words into sg list. */
-		data_count = 0;	/*Running count of SG xfer counts. */
+		data_count = 0;		/*Running count of SG xfer counts. */
 
-		sg_ptr = (unsigned long *)currSCCB->DataPointer;
 
 		while (data_count < currSCCB->Sccb_ATC) {
 
 			sg_index++;
-			data_count += *(sg_ptr + (sg_index * 2));
+			segp = (struct blogic_sg_seg *)(currSCCB->DataPointer) +
+						(sg_index * 2);
+			data_count += segp->segbytes;
 		}
 
 		if (data_count == currSCCB->Sccb_ATC) {
@@ -5504,7 +5426,7 @@ static void FPT_scini(unsigned char p_card, unsigned char p_our_id,
 {
 
 	unsigned char loser, assigned_id;
-	unsigned long p_port;
+	u32 p_port;
 
 	unsigned char i, k, ScamFlg;
 	struct sccb_card *currCard;
@@ -5709,7 +5631,7 @@ static void FPT_scini(unsigned char p_card, unsigned char p_our_id,
  *
  *---------------------------------------------------------------------*/
 
-static int FPT_scarb(unsigned long p_port, unsigned char p_sel_type)
+static int FPT_scarb(u32 p_port, unsigned char p_sel_type)
 {
 	if (p_sel_type == INIT_SELTD) {
 
@@ -5771,7 +5693,7 @@ static int FPT_scarb(unsigned long p_port, unsigned char p_sel_type)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_scbusf(unsigned long p_port)
+static void FPT_scbusf(u32 p_port)
 {
 	WR_HARPOON(p_port + hp_page_ctrl,
 		   (RD_HARPOON(p_port + hp_page_ctrl) | G_INT_DISABLE));
@@ -5803,7 +5725,7 @@ static void FPT_scbusf(unsigned long p_port)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_scasid(unsigned char p_card, unsigned long p_port)
+static void FPT_scasid(unsigned char p_card, u32 p_port)
 {
 	unsigned char temp_id_string[ID_STRING_LENGTH];
 
@@ -5880,7 +5802,7 @@ static void FPT_scasid(unsigned char p_card, unsigned long p_port)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_scsel(unsigned long p_port)
+static void FPT_scsel(u32 p_port)
 {
 
 	WR_HARPOON(p_port + hp_scsisig, SCSI_SEL);
@@ -5914,7 +5836,7 @@ static void FPT_scsel(unsigned long p_port)
  *
  *---------------------------------------------------------------------*/
 
-static unsigned char FPT_scxferc(unsigned long p_port, unsigned char p_data)
+static unsigned char FPT_scxferc(u32 p_port, unsigned char p_data)
 {
 	unsigned char curr_data, ret_data;
 
@@ -5964,8 +5886,7 @@ static unsigned char FPT_scxferc(unsigned long p_port, unsigned char p_data)
  *
  *---------------------------------------------------------------------*/
 
-static unsigned char FPT_scsendi(unsigned long p_port,
-				 unsigned char p_id_string[])
+static unsigned char FPT_scsendi(u32 p_port, unsigned char p_id_string[])
 {
 	unsigned char ret_data, byte_cnt, bit_cnt, defer;
 
@@ -6016,8 +5937,7 @@ static unsigned char FPT_scsendi(unsigned long p_port,
  *
  *---------------------------------------------------------------------*/
 
-static unsigned char FPT_sciso(unsigned long p_port,
-			       unsigned char p_id_string[])
+static unsigned char FPT_sciso(u32 p_port, unsigned char p_id_string[])
 {
 	unsigned char ret_data, the_data, byte_cnt, bit_cnt;
 
@@ -6075,7 +5995,7 @@ static unsigned char FPT_sciso(unsigned long p_port,
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_scwirod(unsigned long p_port, unsigned char p_data_bit)
+static void FPT_scwirod(u32 p_port, unsigned char p_data_bit)
 {
 	unsigned char i;
 
@@ -6102,7 +6022,7 @@ static void FPT_scwirod(unsigned long p_port, unsigned char p_data_bit)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_scwiros(unsigned long p_port, unsigned char p_data_bit)
+static void FPT_scwiros(u32 p_port, unsigned char p_data_bit)
 {
 	unsigned char i;
 
@@ -6154,7 +6074,7 @@ static unsigned char FPT_scvalq(unsigned char p_quintet)
  *
  *---------------------------------------------------------------------*/
 
-static unsigned char FPT_scsell(unsigned long p_port, unsigned char targ_id)
+static unsigned char FPT_scsell(u32 p_port, unsigned char targ_id)
 {
 	unsigned long i;
 
@@ -6236,7 +6156,7 @@ static unsigned char FPT_scsell(unsigned long p_port, unsigned char targ_id)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_scwtsel(unsigned long p_port)
+static void FPT_scwtsel(u32 p_port)
 {
 	while (!(RDW_HARPOON((p_port + hp_intstat)) & SCAM_SEL)) {
 	}
@@ -6250,8 +6170,7 @@ static void FPT_scwtsel(unsigned long p_port)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_inisci(unsigned char p_card, unsigned long p_port,
-		       unsigned char p_our_id)
+static void FPT_inisci(unsigned char p_card, u32 p_port, unsigned char p_our_id)
 {
 	unsigned char i, k, max_id;
 	unsigned short ee_data;
@@ -6437,7 +6356,7 @@ static unsigned char FPT_scmachid(unsigned char p_card,
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_scsavdi(unsigned char p_card, unsigned long p_port)
+static void FPT_scsavdi(unsigned char p_card, u32 p_port)
 {
 	unsigned char i, k, max_id;
 	unsigned short ee_data, sum_data;
@@ -6482,7 +6401,7 @@ static void FPT_scsavdi(unsigned char p_card, unsigned long p_port)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_XbowInit(unsigned long port, unsigned char ScamFlg)
+static void FPT_XbowInit(u32 port, unsigned char ScamFlg)
 {
 	unsigned char i;
 
@@ -6531,7 +6450,7 @@ static void FPT_XbowInit(unsigned long port, unsigned char ScamFlg)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_BusMasterInit(unsigned long p_port)
+static void FPT_BusMasterInit(u32 p_port)
 {
 
 	WR_HARPOON(p_port + hp_sys_ctrl, DRVR_RST);
@@ -6558,7 +6477,7 @@ static void FPT_BusMasterInit(unsigned long p_port)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_DiagEEPROM(unsigned long p_port)
+static void FPT_DiagEEPROM(u32 p_port)
 {
 	unsigned short index, temp, max_wd_cnt;
 
@@ -6921,14 +6840,14 @@ static void FPT_queueCmdComplete(struct sccb_card *pCurrCard,
 		if ((p_sccb->
 		     ControlByte & (SCCB_DATA_XFER_OUT | SCCB_DATA_XFER_IN))
 		    && (p_sccb->HostStatus == SCCB_COMPLETE)
-		    && (p_sccb->TargetStatus != SSCHECK))
+		    && (p_sccb->TargetStatus != SAM_STAT_CHECK_CONDITION))
 
-			if ((SCSIcmd == SCSI_READ) ||
-			    (SCSIcmd == SCSI_WRITE) ||
-			    (SCSIcmd == SCSI_READ_EXTENDED) ||
-			    (SCSIcmd == SCSI_WRITE_EXTENDED) ||
-			    (SCSIcmd == SCSI_WRITE_AND_VERIFY) ||
-			    (SCSIcmd == SCSI_START_STOP_UNIT) ||
+			if ((SCSIcmd == READ_6) ||
+			    (SCSIcmd == WRITE_6) ||
+			    (SCSIcmd == READ_10) ||
+			    (SCSIcmd == WRITE_10) ||
+			    (SCSIcmd == WRITE_VERIFY) ||
+			    (SCSIcmd == START_STOP) ||
 			    (pCurrCard->globalFlags & F_NO_FILTER)
 			    )
 				p_sccb->HostStatus = SCCB_DATA_UNDER_RUN;
@@ -7206,7 +7125,7 @@ static void FPT_utilUpdateResidual(struct sccb *p_SCCB)
 {
 	unsigned long partial_cnt;
 	unsigned int sg_index;
-	unsigned long *sg_ptr;
+	struct blogic_sg_seg *segp;
 
 	if (p_SCCB->Sccb_XferState & F_ALL_XFERRED) {
 
@@ -7219,7 +7138,6 @@ static void FPT_utilUpdateResidual(struct sccb *p_SCCB)
 
 		sg_index = p_SCCB->Sccb_sgseg;
 
-		sg_ptr = (unsigned long *)p_SCCB->DataPointer;
 
 		if (p_SCCB->Sccb_SGoffset) {
 
@@ -7229,8 +7147,9 @@ static void FPT_utilUpdateResidual(struct sccb *p_SCCB)
 
 		while (((unsigned long)sg_index *
 			(unsigned long)SG_ELEMENT_SIZE) < p_SCCB->DataLength) {
-
-			partial_cnt += *(sg_ptr + (sg_index * 2));
+			segp = (struct blogic_sg_seg *)(p_SCCB->DataPointer) +
+					(sg_index * 2);
+			partial_cnt += segp->segbytes;
 			sg_index++;
 		}
 
@@ -7251,7 +7170,7 @@ static void FPT_utilUpdateResidual(struct sccb *p_SCCB)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_Wait1Second(unsigned long p_port)
+static void FPT_Wait1Second(u32 p_port)
 {
 	unsigned char i;
 
@@ -7275,7 +7194,7 @@ static void FPT_Wait1Second(unsigned long p_port)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_Wait(unsigned long p_port, unsigned char p_delay)
+static void FPT_Wait(u32 p_port, unsigned char p_delay)
 {
 	unsigned char old_timer;
 	unsigned char green_flag;
@@ -7321,7 +7240,7 @@ static void FPT_Wait(unsigned long p_port, unsigned char p_delay)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_utilEEWriteOnOff(unsigned long p_port, unsigned char p_mode)
+static void FPT_utilEEWriteOnOff(u32 p_port, unsigned char p_mode)
 {
 	unsigned char ee_value;
 
@@ -7350,7 +7269,7 @@ static void FPT_utilEEWriteOnOff(unsigned long p_port, unsigned char p_mode)
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_utilEEWrite(unsigned long p_port, unsigned short ee_data,
+static void FPT_utilEEWrite(u32 p_port, unsigned short ee_data,
 			    unsigned short ee_addr)
 {
 
@@ -7401,7 +7320,7 @@ static void FPT_utilEEWrite(unsigned long p_port, unsigned short ee_data,
  *
  *---------------------------------------------------------------------*/
 
-static unsigned short FPT_utilEERead(unsigned long p_port,
+static unsigned short FPT_utilEERead(u32 p_port,
 				     unsigned short ee_addr)
 {
 	unsigned short i, ee_data1, ee_data2;
@@ -7431,8 +7350,7 @@ static unsigned short FPT_utilEERead(unsigned long p_port,
  *
  *---------------------------------------------------------------------*/
 
-static unsigned short FPT_utilEEReadOrg(unsigned long p_port,
-					unsigned short ee_addr)
+static unsigned short FPT_utilEEReadOrg(u32 p_port, unsigned short ee_addr)
 {
 
 	unsigned char ee_value;
@@ -7479,7 +7397,7 @@ static unsigned short FPT_utilEEReadOrg(unsigned long p_port,
  *
  *---------------------------------------------------------------------*/
 
-static void FPT_utilEESendCmdAddr(unsigned long p_port, unsigned char ee_cmd,
+static void FPT_utilEESendCmdAddr(u32 p_port, unsigned char ee_cmd,
 				  unsigned short ee_addr)
 {
 	unsigned char ee_value;
@@ -7573,47 +7491,45 @@ static unsigned char FPT_CalcLrc(unsigned char buffer[])
 */
 
 static inline unsigned char
-FlashPoint__ProbeHostAdapter(struct FlashPoint_Info *FlashPointInfo)
+FlashPoint__ProbeHostAdapter(struct fpoint_info *FlashPointInfo)
 {
 	return FlashPoint_ProbeHostAdapter((struct sccb_mgr_info *)
 					   FlashPointInfo);
 }
 
-static inline FlashPoint_CardHandle_T
-FlashPoint__HardwareResetHostAdapter(struct FlashPoint_Info *FlashPointInfo)
+static inline void *
+FlashPoint__HardwareResetHostAdapter(struct fpoint_info *FlashPointInfo)
 {
 	return FlashPoint_HardwareResetHostAdapter((struct sccb_mgr_info *)
 						   FlashPointInfo);
 }
 
 static inline void
-FlashPoint__ReleaseHostAdapter(FlashPoint_CardHandle_T CardHandle)
+FlashPoint__ReleaseHostAdapter(void *CardHandle)
 {
 	FlashPoint_ReleaseHostAdapter(CardHandle);
 }
 
 static inline void
-FlashPoint__StartCCB(FlashPoint_CardHandle_T CardHandle,
-		     struct BusLogic_CCB *CCB)
+FlashPoint__StartCCB(void *CardHandle, struct blogic_ccb *CCB)
 {
 	FlashPoint_StartCCB(CardHandle, (struct sccb *)CCB);
 }
 
 static inline void
-FlashPoint__AbortCCB(FlashPoint_CardHandle_T CardHandle,
-		     struct BusLogic_CCB *CCB)
+FlashPoint__AbortCCB(void *CardHandle, struct blogic_ccb *CCB)
 {
 	FlashPoint_AbortCCB(CardHandle, (struct sccb *)CCB);
 }
 
 static inline bool
-FlashPoint__InterruptPending(FlashPoint_CardHandle_T CardHandle)
+FlashPoint__InterruptPending(void *CardHandle)
 {
 	return FlashPoint_InterruptPending(CardHandle);
 }
 
 static inline int
-FlashPoint__HandleInterrupt(FlashPoint_CardHandle_T CardHandle)
+FlashPoint__HandleInterrupt(void *CardHandle)
 {
 	return FlashPoint_HandleInterrupt(CardHandle);
 }
@@ -7632,13 +7548,12 @@ FlashPoint__HandleInterrupt(FlashPoint_CardHandle_T CardHandle)
   Define prototypes for the FlashPoint SCCB Manager Functions.
 */
 
-extern unsigned char FlashPoint_ProbeHostAdapter(struct FlashPoint_Info *);
-extern FlashPoint_CardHandle_T
-FlashPoint_HardwareResetHostAdapter(struct FlashPoint_Info *);
-extern void FlashPoint_StartCCB(FlashPoint_CardHandle_T, struct BusLogic_CCB *);
-extern int FlashPoint_AbortCCB(FlashPoint_CardHandle_T, struct BusLogic_CCB *);
-extern bool FlashPoint_InterruptPending(FlashPoint_CardHandle_T);
-extern int FlashPoint_HandleInterrupt(FlashPoint_CardHandle_T);
-extern void FlashPoint_ReleaseHostAdapter(FlashPoint_CardHandle_T);
+extern unsigned char FlashPoint_ProbeHostAdapter(struct fpoint_info *);
+extern void *FlashPoint_HardwareResetHostAdapter(struct fpoint_info *);
+extern void FlashPoint_StartCCB(void *, struct blogic_ccb *);
+extern int FlashPoint_AbortCCB(void *, struct blogic_ccb *);
+extern bool FlashPoint_InterruptPending(void *);
+extern int FlashPoint_HandleInterrupt(void *);
+extern void FlashPoint_ReleaseHostAdapter(void *);
 
 #endif				/* CONFIG_SCSI_FLASHPOINT */

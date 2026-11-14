@@ -1,25 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
- * alloc.h - persistent object (dat entry/disk inode) allocator/deallocator
+ * Persistent object (dat entry/disk inode) allocator/deallocator
  *
  * Copyright (C) 2006-2008 Nippon Telegraph and Telephone Corporation.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- *
- * Original code was written by Koji Sato <koji@osrg.net>.
- * Two allocators were unified by Ryusuke Konishi <ryusuke@osrg.net>,
- *                                Amagai Yoshiji <amagai@osrg.net>.
+ * Originally written by Koji Sato.
+ * Two allocators were unified by Ryusuke Konishi and Amagai Yoshiji.
  */
 
 #ifndef _NILFS_ALLOC_H
@@ -35,6 +21,8 @@
  *
  * The number of entries per group is defined by the number of bits
  * that a bitmap block can maintain.
+ *
+ * Return: Number of entries per group.
  */
 static inline unsigned long
 nilfs_palloc_entries_per_group(const struct inode *inode)
@@ -42,14 +30,16 @@ nilfs_palloc_entries_per_group(const struct inode *inode)
 	return 1UL << (inode->i_blkbits + 3 /* log2(8 = CHAR_BITS) */);
 }
 
-int nilfs_palloc_init_blockgroup(struct inode *, unsigned);
+int nilfs_palloc_init_blockgroup(struct inode *, unsigned int);
 int nilfs_palloc_get_entry_block(struct inode *, __u64, int,
 				 struct buffer_head **);
-void *nilfs_palloc_block_get_entry(const struct inode *, __u64,
-				   const struct buffer_head *, void *);
+size_t nilfs_palloc_entry_offset(const struct inode *inode, __u64 nr,
+				 const struct buffer_head *bh);
+
+int nilfs_palloc_count_max_entries(struct inode *, u64, u64 *);
 
 /**
- * nilfs_palloc_req - persistent allocator request and reply
+ * struct nilfs_palloc_req - persistent allocator request and reply
  * @pr_entry_nr: entry number (vblocknr or inode number)
  * @pr_desc_bh: buffer head of the buffer containing block group descriptors
  * @pr_bitmap_bh: buffer head of the buffer containing a block group bitmap
@@ -62,8 +52,8 @@ struct nilfs_palloc_req {
 	struct buffer_head *pr_entry_bh;
 };
 
-int nilfs_palloc_prepare_alloc_entry(struct inode *,
-				     struct nilfs_palloc_req *);
+int nilfs_palloc_prepare_alloc_entry(struct inode *inode,
+				     struct nilfs_palloc_req *req, bool wrap);
 void nilfs_palloc_commit_alloc_entry(struct inode *,
 				     struct nilfs_palloc_req *);
 void nilfs_palloc_abort_alloc_entry(struct inode *, struct nilfs_palloc_req *);
@@ -75,6 +65,7 @@ int nilfs_palloc_freev(struct inode *, __u64 *, size_t);
 #define nilfs_set_bit_atomic		ext2_set_bit_atomic
 #define nilfs_clear_bit_atomic		ext2_clear_bit_atomic
 #define nilfs_find_next_zero_bit	find_next_zero_bit_le
+#define nilfs_find_next_bit		find_next_bit_le
 
 /**
  * struct nilfs_bh_assoc - block offset and buffer head association

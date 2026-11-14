@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * You SHOULD NOT be including this unless you're vsyscall
  * handling code or timekeeping internal code!
@@ -10,104 +11,186 @@
 #include <linux/jiffies.h>
 #include <linux/time.h>
 
-/* Structure holding internal timekeeping values. */
-struct timekeeper {
-	/* Current clocksource used for timekeeping. */
-	struct clocksource	*clock;
-	/* NTP adjusted clock multiplier */
-	u32			mult;
-	/* The shift value of the current clocksource. */
-	u32			shift;
-	/* Number of clock cycles in one NTP interval. */
-	cycle_t			cycle_interval;
-	/* Last cycle value (also stored in clock->cycle_last) */
-	cycle_t			cycle_last;
-	/* Number of clock shifted nano seconds in one NTP interval. */
-	u64			xtime_interval;
-	/* shifted nano seconds left over when rounding cycle_interval */
-	s64			xtime_remainder;
-	/* Raw nano seconds accumulated per NTP interval. */
-	u32			raw_interval;
-
-	/* Current CLOCK_REALTIME time in seconds */
-	u64			xtime_sec;
-	/* Clock shifted nano seconds */
-	u64			xtime_nsec;
-
-	/* Difference between accumulated time and NTP time in ntp
-	 * shifted nano seconds. */
-	s64			ntp_error;
-	/* Shift conversion between clock shifted nano seconds and
-	 * ntp shifted nano seconds. */
-	u32			ntp_error_shift;
-
-	/*
-	 * wall_to_monotonic is what we need to add to xtime (or xtime corrected
-	 * for sub jiffie times) to get to monotonic time.  Monotonic is pegged
-	 * at zero at system boot time, so wall_to_monotonic will be negative,
-	 * however, we will ALWAYS keep the tv_nsec part positive so we can use
-	 * the usual normalization.
-	 *
-	 * wall_to_monotonic is moved after resume from suspend for the
-	 * monotonic time not to jump. We need to add total_sleep_time to
-	 * wall_to_monotonic to get the real boot based time offset.
-	 *
-	 * - wall_to_monotonic is no longer the boot time, getboottime must be
-	 * used instead.
-	 */
-	struct timespec		wall_to_monotonic;
-	/* Offset clock monotonic -> clock realtime */
-	ktime_t			offs_real;
-	/* time spent in suspend */
-	struct timespec		total_sleep_time;
-	/* Offset clock monotonic -> clock boottime */
-	ktime_t			offs_boot;
-	/* The raw monotonic time for the CLOCK_MONOTONIC_RAW posix clock. */
-	struct timespec		raw_time;
-	/* The current UTC to TAI offset in seconds */
-	s32			tai_offset;
-	/* Offset clock monotonic -> clock tai */
-	ktime_t			offs_tai;
-
+/**
+ * timekeeper_ids - IDs for various time keepers in the kernel
+ * @TIMEKEEPER_CORE:		The central core timekeeper managing system time
+ * @TIMEKEEPER_AUX_FIRST:	The first AUX timekeeper
+ * @TIMEKEEPER_AUX_LAST:	The last AUX timekeeper
+ * @TIMEKEEPERS_MAX:		The maximum number of timekeepers managed
+ */
+enum timekeeper_ids {
+	TIMEKEEPER_CORE,
+#ifdef CONFIG_POSIX_AUX_CLOCKS
+	TIMEKEEPER_AUX_FIRST,
+	TIMEKEEPER_AUX_LAST = TIMEKEEPER_AUX_FIRST + MAX_AUX_CLOCKS - 1,
+#endif
+	TIMEKEEPERS_MAX,
 };
 
-static inline struct timespec tk_xtime(struct timekeeper *tk)
-{
-	struct timespec ts;
+/**
+ * struct tk_read_base - base structure for timekeeping readout
+ * @clock:	Current clocksource used for timekeeping.
+ * @mask:	Bitmask for two's complement subtraction of non 64bit clocks
+ * @cycle_last: @clock cycle value at last update
+ * @mult:	(NTP adjusted) multiplier for scaled math conversion
+ * @shift:	Shift value for scaled math conversion
+ * @xtime_nsec: Shifted (fractional) nano seconds offset for readout
+ * @base:	ktime_t (nanoseconds) base time for readout
+ * @base_real:	Nanoseconds base value for clock REALTIME readout
+ *
+ * This struct has size 56 byte on 64 bit. Together with a seqcount it
+ * occupies a single 64byte cache line.
+ *
+ * The struct is separate from struct timekeeper as it is also used
+ * for the fast NMI safe accessors.
+ *
+ * @base_real is for the fast NMI safe accessor to allow reading clock
+ * realtime from any context.
+ */
+struct tk_read_base {
+	struct clocksource	*clock;
+	u64			mask;
+	u64			cycle_last;
+	u32			mult;
+	u32			shift;
+	u64			xtime_nsec;
+	ktime_t			base;
+	u64			base_real;
+};
 
-	ts.tv_sec = tk->xtime_sec;
-	ts.tv_nsec = (long)(tk->xtime_nsec >> tk->shift);
-	return ts;
-}
+/**
+ * struct timekeeper - Structure holding internal timekeeping values.
+ * @tkr_mono:			The readout base structure for CLOCK_MONOTONIC
+ * @xtime_sec:			Current CLOCK_REALTIME time in seconds
+ * @ktime_sec:			Current CLOCK_MONOTONIC time in seconds
+ * @wall_to_monotonic:		CLOCK_REALTIME to CLOCK_MONOTONIC offset
+ * @offs_real:			Offset clock monotonic -> clock realtime
+ * @offs_boot:			Offset clock monotonic -> clock boottime
+ * @offs_tai:			Offset clock monotonic -> clock tai
+ * @offs_aux:			Offset clock monotonic -> clock AUX
+ * @coarse_nsec:		The nanoseconds part for coarse time getters
+ * @id:				The timekeeper ID
+ * @tkr_raw:			The readout base structure for CLOCK_MONOTONIC_RAW
+ * @raw_sec:			CLOCK_MONOTONIC_RAW  time in seconds
+ * @cs_id:			The ID of the current clocksource
+ * @cs_ns_to_cyc_mult:		Multiplicator for nanoseconds to cycles conversion
+ * @cs_ns_to_cyc_shift:		Shift value for nanoseconds to cycles conversion
+ * @cs_ns_to_cyc_maxns:		Maximum nanoseconds to cyles conversion range
+ * @clock_was_set_seq:		The sequence number of clock was set events
+ * @cs_was_changed_seq:		The sequence number of clocksource change events
+ * @clock_valid:		Indicator for valid clock
+ * @monotonic_to_boot:		CLOCK_MONOTONIC to CLOCK_BOOTTIME offset
+ * @monotonic_to_aux:		CLOCK_MONOTONIC to CLOCK_AUX offset
+ * @cycle_interval:		Number of clock cycles in one NTP interval
+ * @xtime_interval:		Number of clock shifted nano seconds in one NTP
+ *				interval.
+ * @raw_interval:		Shifted raw nano seconds accumulated per NTP interval.
+ * @next_leap_ktime:		CLOCK_MONOTONIC time value of a pending leap-second
+ * @ntp_tick:			The ntp_tick_length() value currently being
+ *				used. This cached copy ensures we consistently
+ *				apply the tick length for an entire tick, as
+ *				ntp_tick_length may change mid-tick, and we don't
+ *				want to apply that new value to the tick in
+ *				progress.
+ * @ntp_error:			Difference between accumulated time and NTP time in ntp
+ *				shifted nano seconds.
+ * @ntp_error_shift:		Shift conversion between clock shifted nano seconds and
+ *				ntp shifted nano seconds.
+ * @ntp_err_mult:		Multiplication factor for scaled math conversion
+ * @cs_tick_adj:		Per-second adjustment handed to NTP via ntp_clear()
+ *				accounting for the difference between the nominal
+ *				NTP interval and the real time taken by the
+ *				clocksource's integer @cycle_interval (upscaled).
+ * @skip_second_overflow:	Flag used to avoid updating NTP twice with same second
+ * @tai_offset:			The current UTC to TAI offset in seconds
+ *
+ * Note: For timespec(64) based interfaces wall_to_monotonic is what
+ * we need to add to xtime (or xtime corrected for sub jiffy times)
+ * to get to monotonic time.  Monotonic is pegged at zero at system
+ * boot time, so wall_to_monotonic will be negative, however, we will
+ * ALWAYS keep the tv_nsec part positive so we can use the usual
+ * normalization.
+ *
+ * wall_to_monotonic is moved after resume from suspend for the
+ * monotonic time not to jump. We need to add total_sleep_time to
+ * wall_to_monotonic to get the real boot based time offset.
+ *
+ * wall_to_monotonic is no longer the boot time, getboottime must be
+ * used instead.
+ *
+ * @monotonic_to_boottime is a timespec64 representation of @offs_boot to
+ * accelerate the VDSO update for CLOCK_BOOTTIME.
+ *
+ * @offs_aux is used by the auxiliary timekeepers which do not utilize any
+ * of the regular timekeeper offset fields.
+ *
+ * @monotonic_to_aux is a timespec64 representation of @offs_aux to
+ * accelerate the VDSO update for CLOCK_AUX.
+ *
+ * The cacheline ordering of the structure is optimized for in kernel usage of
+ * the ktime_get() and ktime_get_ts64() family of time accessors. Struct
+ * timekeeper is prepended in the core timekeeping code with a sequence count,
+ * which results in the following cacheline layout:
+ *
+ * 0:	seqcount, tkr_mono
+ * 1:	xtime_sec ... id
+ * 2:	tkr_raw, raw_sec
+ * 3,4: Internal variables
+ *
+ * Cacheline 0,1 contain the data which is used for accessing
+ * CLOCK_MONOTONIC/REALTIME/BOOTTIME/TAI, while cacheline 2 contains the
+ * data for accessing CLOCK_MONOTONIC_RAW.  Cacheline 3,4 are internal
+ * variables which are only accessed during timekeeper updates once per
+ * tick.
+ */
+struct timekeeper {
+	/* Cacheline 0 (together with prepended seqcount of timekeeper core): */
+	struct tk_read_base	tkr_mono;
 
+	/* Cacheline 1: */
+	u64			xtime_sec;
+	unsigned long		ktime_sec;
+	struct timespec64	wall_to_monotonic;
+	ktime_t			offs_real;
+	ktime_t			offs_boot;
+	union {
+		ktime_t		offs_tai;
+		ktime_t		offs_aux;
+	};
+	u32			coarse_nsec;
+	enum timekeeper_ids	id;
 
-#ifdef CONFIG_GENERIC_TIME_VSYSCALL
+	/* Cacheline 2: */
+	struct tk_read_base	tkr_raw;
+	u64			raw_sec;
 
-extern void update_vsyscall(struct timekeeper *tk);
-extern void update_vsyscall_tz(void);
+	/* Cachline 3 and 4 (timekeeping internal variables): */
+	enum clocksource_ids	cs_id;
+	u32			cs_ns_to_cyc_mult;
+	u32			cs_ns_to_cyc_shift;
+	u64			cs_ns_to_cyc_maxns;
+	u32			clock_was_set_seq;
+	u8			cs_was_changed_seq;
+	u8			clock_valid;
 
-#elif defined(CONFIG_GENERIC_TIME_VSYSCALL_OLD)
+	union {
+		struct timespec64	monotonic_to_boot;
+		struct timespec64	monotonic_to_aux;
+	};
 
-extern void update_vsyscall_old(struct timespec *ts, struct timespec *wtm,
-				struct clocksource *c, u32 mult);
-extern void update_vsyscall_tz(void);
+	u64			cycle_interval;
+	u64			xtime_interval;
+	u64			raw_interval;
 
-static inline void update_vsyscall(struct timekeeper *tk)
-{
-	struct timespec xt;
-
-	xt = tk_xtime(tk);
-	update_vsyscall_old(&xt, &tk->wall_to_monotonic, tk->clock, tk->mult);
-}
-
-#else
-
-static inline void update_vsyscall(struct timekeeper *tk)
-{
-}
-static inline void update_vsyscall_tz(void)
-{
-}
-#endif
+	ktime_t			next_leap_ktime;
+	u64			ntp_tick;
+	s64			ntp_error;
+	u32			ntp_error_shift;
+	u32			ntp_err_mult;
+	s64			cs_tick_adj;
+	u32			skip_second_overflow;
+	s64			skew_delta;
+	s32			tai_offset;
+};
 
 #endif /* _LINUX_TIMEKEEPER_INTERNAL_H */

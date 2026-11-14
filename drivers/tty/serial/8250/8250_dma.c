@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * 8250_dma.c - DMA Engine API support for 8250.c
  *
  * Copyright (C) 2013 Intel Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
@@ -19,110 +15,180 @@ static void __dma_tx_complete(void *param)
 {
 	struct uart_8250_port	*p = param;
 	struct uart_8250_dma	*dma = p->dma;
-	struct circ_buf		*xmit = &p->port.state->xmit;
+	struct tty_port		*tport = &p->port.state->port;
+	unsigned long	flags;
+	int		ret;
+
+	dma_sync_single_for_cpu(dmaengine_get_dma_device(dma->txchan), dma->tx_addr,
+				UART_XMIT_SIZE, DMA_TO_DEVICE);
+
+	uart_port_lock_irqsave(&p->port, &flags);
 
 	dma->tx_running = 0;
 
-	dma_sync_single_for_cpu(dma->txchan->device->dev, dma->tx_addr,
-				UART_XMIT_SIZE, DMA_TO_DEVICE);
+	uart_xmit_advance(&p->port, dma->tx_size);
 
-	xmit->tail += dma->tx_size;
-	xmit->tail &= UART_XMIT_SIZE - 1;
-	p->port.icount.tx += dma->tx_size;
-
-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
 		uart_write_wakeup(&p->port);
 
-	if (!uart_circ_empty(xmit) && !uart_tx_stopped(&p->port))
-		serial8250_tx_dma(p);
+	ret = serial8250_tx_dma(p);
+	if (ret || !dma->tx_running)
+		serial8250_set_THRI(p);
+
+	uart_port_unlock_irqrestore(&p->port, flags);
 }
 
-static void __dma_rx_complete(void *param)
+static void __dma_rx_complete(struct uart_8250_port *p)
 {
-	struct uart_8250_port	*p = param;
 	struct uart_8250_dma	*dma = p->dma;
 	struct tty_port		*tty_port = &p->port.state->port;
 	struct dma_tx_state	state;
+	enum dma_status		dma_status;
 	int			count;
 
-	dma_sync_single_for_cpu(dma->rxchan->device->dev, dma->rx_addr,
-				dma->rx_size, DMA_FROM_DEVICE);
-
-	dmaengine_tx_status(dma->rxchan, dma->rx_cookie, &state);
-	dmaengine_terminate_all(dma->rxchan);
+	/*
+	 * New DMA Rx can be started during the completion handler before it
+	 * could acquire port's lock and it might still be ongoing. Don't to
+	 * anything in such case.
+	 */
+	dma_status = dmaengine_tx_status(dma->rxchan, dma->rx_cookie, &state);
+	if (dma_status == DMA_IN_PROGRESS)
+		return;
 
 	count = dma->rx_size - state.residue;
 
 	tty_insert_flip_string(tty_port, dma->rx_buf, count);
 	p->port.icount.rx += count;
+	dma->rx_running = 0;
 
 	tty_flip_buffer_push(tty_port);
+}
+
+static void dma_rx_complete(void *param)
+{
+	struct uart_8250_port *p = param;
+	struct uart_8250_dma *dma = p->dma;
+	unsigned long flags;
+
+	uart_port_lock_irqsave(&p->port, &flags);
+	if (dma->rx_running)
+		__dma_rx_complete(p);
+
+	/*
+	 * Cannot be combined with the previous check because __dma_rx_complete()
+	 * changes dma->rx_running.
+	 */
+	if (!dma->rx_running && (serial_lsr_in(p) & UART_LSR_DR))
+		p->dma->rx_dma(p);
+	uart_port_unlock_irqrestore(&p->port, flags);
 }
 
 int serial8250_tx_dma(struct uart_8250_port *p)
 {
 	struct uart_8250_dma		*dma = p->dma;
-	struct circ_buf			*xmit = &p->port.state->xmit;
+	struct tty_port			*tport = &p->port.state->port;
 	struct dma_async_tx_descriptor	*desc;
+	struct uart_port		*up = &p->port;
+	struct scatterlist		*sg;
+	struct scatterlist		sgl[2];
+	int i;
+	int ret;
 
-	if (uart_tx_stopped(&p->port) || dma->tx_running ||
-	    uart_circ_empty(xmit))
+	if (dma->tx_running) {
+		if (up->x_char) {
+			dmaengine_pause(dma->txchan);
+			uart_xchar_out(up, UART_TX);
+			dmaengine_resume(dma->txchan);
+		}
 		return 0;
+	} else if (up->x_char) {
+		uart_xchar_out(up, UART_TX);
+	}
 
-	dma->tx_size = CIRC_CNT_TO_END(xmit->head, xmit->tail, UART_XMIT_SIZE);
+	if (uart_tx_stopped(&p->port) || kfifo_is_empty(&tport->xmit_fifo)) {
+		/* We have been called from __dma_tx_complete() */
+		return 0;
+	}
 
-	desc = dmaengine_prep_slave_single(dma->txchan,
-					   dma->tx_addr + xmit->tail,
-					   dma->tx_size, DMA_MEM_TO_DEV,
-					   DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
-	if (!desc)
-		return -EBUSY;
+	serial8250_do_prepare_tx_dma(p);
+
+	sg_init_table(sgl, ARRAY_SIZE(sgl));
+
+	ret = kfifo_dma_out_prepare_mapped(&tport->xmit_fifo, sgl, ARRAY_SIZE(sgl),
+					   UART_XMIT_SIZE, dma->tx_addr);
+
+	dma->tx_size = 0;
+
+	for_each_sg(sgl, sg, ret, i)
+		dma->tx_size += sg_dma_len(sg);
+
+	desc = dmaengine_prep_slave_sg(dma->txchan, sgl, ret,
+				       DMA_MEM_TO_DEV,
+				       DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+	if (!desc) {
+		ret = -EBUSY;
+		goto err;
+	}
 
 	dma->tx_running = 1;
-
 	desc->callback = __dma_tx_complete;
 	desc->callback_param = p;
 
 	dma->tx_cookie = dmaengine_submit(desc);
 
-	dma_sync_single_for_device(dma->txchan->device->dev, dma->tx_addr,
+	dma_sync_single_for_device(dmaengine_get_dma_device(dma->txchan), dma->tx_addr,
 				   UART_XMIT_SIZE, DMA_TO_DEVICE);
 
 	dma_async_issue_pending(dma->txchan);
+	serial8250_clear_THRI(p);
+	dma->tx_err = 0;
 
 	return 0;
+err:
+	dma->tx_err = 1;
+	return ret;
 }
-EXPORT_SYMBOL_GPL(serial8250_tx_dma);
 
-int serial8250_rx_dma(struct uart_8250_port *p, unsigned int iir)
+void serial8250_tx_dma_flush(struct uart_8250_port *p)
+{
+	struct uart_8250_dma *dma = p->dma;
+
+	if (!dma->tx_running)
+		return;
+
+	/*
+	 * kfifo_reset() has been called by the serial core, avoid
+	 * advancing and underflowing in __dma_tx_complete().
+	 */
+	dma->tx_size = 0;
+
+	/*
+	 * We can't use `dmaengine_terminate_sync` because `uart_flush_buffer` is
+	 * holding the uart port spinlock.
+	 */
+	dmaengine_terminate_async(dma->txchan);
+
+	/*
+	 * The callback might or might not run. If it doesn't run, we need to ensure
+	 * that `tx_running` is cleared so that we can schedule new transactions.
+	 * If it does run, then the zombie callback will clear `tx_running` again
+	 * and perform a no-op since `tx_size` was cleared above.
+	 *
+	 * In either case, we ASSUME the DMA transaction will terminate before we
+	 * issue a new `serial8250_tx_dma`.
+	 */
+	dma->tx_running = 0;
+}
+
+int serial8250_rx_dma(struct uart_8250_port *p)
 {
 	struct uart_8250_dma		*dma = p->dma;
 	struct dma_async_tx_descriptor	*desc;
-	struct dma_tx_state		state;
-	int				dma_status;
 
-	dma_status = dmaengine_tx_status(dma->rxchan, dma->rx_cookie, &state);
-
-	switch (iir & 0x3f) {
-	case UART_IIR_RLSI:
-		/* 8250_core handles errors and break interrupts */
-		return -EIO;
-	case UART_IIR_RX_TIMEOUT:
-		/*
-		 * If RCVR FIFO trigger level was not reached, complete the
-		 * transfer and let 8250_core copy the remaining data.
-		 */
-		if (dma_status == DMA_IN_PROGRESS) {
-			dmaengine_pause(dma->rxchan);
-			__dma_rx_complete(p);
-		}
-		return -ETIMEDOUT;
-	default:
-		break;
-	}
-
-	if (dma_status)
+	if (dma->rx_running)
 		return 0;
+
+	serial8250_do_prepare_rx_dma(p);
 
 	desc = dmaengine_prep_slave_single(dma->rxchan, dma->rx_addr,
 					   dma->rx_size, DMA_DEV_TO_MEM,
@@ -130,33 +196,51 @@ int serial8250_rx_dma(struct uart_8250_port *p, unsigned int iir)
 	if (!desc)
 		return -EBUSY;
 
-	desc->callback = __dma_rx_complete;
+	dma->rx_running = 1;
+	desc->callback = dma_rx_complete;
 	desc->callback_param = p;
 
 	dma->rx_cookie = dmaengine_submit(desc);
-
-	dma_sync_single_for_device(dma->rxchan->device->dev, dma->rx_addr,
-				   dma->rx_size, DMA_FROM_DEVICE);
 
 	dma_async_issue_pending(dma->rxchan);
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(serial8250_rx_dma);
+
+void serial8250_rx_dma_flush(struct uart_8250_port *p)
+{
+	struct uart_8250_dma *dma = p->dma;
+
+	if (!dma || !dma->rxchan || !dma->rx_running)
+		return;
+
+	dmaengine_pause(dma->rxchan);
+	__dma_rx_complete(p);
+	dmaengine_terminate_async(dma->rxchan);
+}
+EXPORT_SYMBOL_GPL(serial8250_rx_dma_flush);
 
 int serial8250_request_dma(struct uart_8250_port *p)
 {
 	struct uart_8250_dma	*dma = p->dma;
+	struct device *rx_dev;
+	struct device *tx_dev;
+	phys_addr_t rx_dma_addr = dma->rx_dma_addr ?
+				  dma->rx_dma_addr : p->port.mapbase;
+	phys_addr_t tx_dma_addr = dma->tx_dma_addr ?
+				  dma->tx_dma_addr : p->port.mapbase;
 	dma_cap_mask_t		mask;
+	struct dma_slave_caps	caps;
+	int			ret;
 
 	/* Default slave configuration parameters */
 	dma->rxconf.direction		= DMA_DEV_TO_MEM;
 	dma->rxconf.src_addr_width	= DMA_SLAVE_BUSWIDTH_1_BYTE;
-	dma->rxconf.src_addr		= p->port.mapbase + UART_RX;
+	dma->rxconf.src_addr		= rx_dma_addr + UART_RX;
 
 	dma->txconf.direction		= DMA_MEM_TO_DEV;
 	dma->txconf.dst_addr_width	= DMA_SLAVE_BUSWIDTH_1_BYTE;
-	dma->txconf.dst_addr		= p->port.mapbase + UART_TX;
+	dma->txconf.dst_addr		= tx_dma_addr + UART_TX;
 
 	dma_cap_zero(mask);
 	dma_cap_set(DMA_SLAVE, mask);
@@ -168,6 +252,16 @@ int serial8250_request_dma(struct uart_8250_port *p)
 	if (!dma->rxchan)
 		return -ENODEV;
 
+	/* 8250 rx dma requires dmaengine driver to support pause/terminate */
+	ret = dma_get_slave_caps(dma->rxchan, &caps);
+	if (ret)
+		goto release_rx;
+	if (!caps.cmd_pause || !caps.cmd_terminate ||
+	    caps.residue_granularity == DMA_RESIDUE_GRANULARITY_DESCRIPTOR) {
+		ret = -EINVAL;
+		goto release_rx;
+	}
+
 	dmaengine_slave_config(dma->rxchan, &dma->rxconf);
 
 	/* Get a channel for TX */
@@ -175,33 +269,53 @@ int serial8250_request_dma(struct uart_8250_port *p)
 						       dma->fn, dma->tx_param,
 						       p->port.dev, "tx");
 	if (!dma->txchan) {
-		dma_release_channel(dma->rxchan);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto release_rx;
+	}
+
+	/* 8250 tx dma requires dmaengine driver to support terminate */
+	ret = dma_get_slave_caps(dma->txchan, &caps);
+	if (ret)
+		goto err;
+	if (!caps.cmd_terminate) {
+		ret = -EINVAL;
+		goto err;
 	}
 
 	dmaengine_slave_config(dma->txchan, &dma->txconf);
+
+	rx_dev = dmaengine_get_dma_device(dma->rxchan);
+	tx_dev = dmaengine_get_dma_device(dma->txchan);
 
 	/* RX buffer */
 	if (!dma->rx_size)
 		dma->rx_size = PAGE_SIZE;
 
-	dma->rx_buf = dma_alloc_coherent(dma->rxchan->device->dev, dma->rx_size,
-					&dma->rx_addr, GFP_KERNEL);
+	dma->rx_buf = dma_alloc_coherent(rx_dev, dma->rx_size, &dma->rx_addr,
+					 GFP_KERNEL);
 	if (!dma->rx_buf) {
-		dma_release_channel(dma->rxchan);
-		dma_release_channel(dma->txchan);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err;
 	}
 
 	/* TX buffer */
-	dma->tx_addr = dma_map_single(dma->txchan->device->dev,
-					p->port.state->xmit.buf,
-					UART_XMIT_SIZE,
-					DMA_TO_DEVICE);
+	dma->tx_addr = dma_map_single(tx_dev, p->port.state->port.xmit_buf,
+				      UART_XMIT_SIZE, DMA_TO_DEVICE);
+	if (dma_mapping_error(tx_dev, dma->tx_addr)) {
+		dma_free_coherent(rx_dev, dma->rx_size,
+				  dma->rx_buf, dma->rx_addr);
+		ret = -ENOMEM;
+		goto err;
+	}
 
 	dev_dbg_ratelimited(p->port.dev, "got both dma channels\n");
 
 	return 0;
+err:
+	dma_release_channel(dma->txchan);
+release_rx:
+	dma_release_channel(dma->rxchan);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(serial8250_request_dma);
 
@@ -213,15 +327,16 @@ void serial8250_release_dma(struct uart_8250_port *p)
 		return;
 
 	/* Release RX resources */
-	dmaengine_terminate_all(dma->rxchan);
-	dma_free_coherent(dma->rxchan->device->dev, dma->rx_size, dma->rx_buf,
-			  dma->rx_addr);
+	dmaengine_terminate_sync(dma->rxchan);
+	dma->rx_running = 0;
+	dma_free_coherent(dmaengine_get_dma_device(dma->rxchan), dma->rx_size,
+			  dma->rx_buf, dma->rx_addr);
 	dma_release_channel(dma->rxchan);
 	dma->rxchan = NULL;
 
 	/* Release TX resources */
-	dmaengine_terminate_all(dma->txchan);
-	dma_unmap_single(dma->txchan->device->dev, dma->tx_addr,
+	dmaengine_terminate_sync(dma->txchan);
+	dma_unmap_single(dmaengine_get_dma_device(dma->txchan), dma->tx_addr,
 			 UART_XMIT_SIZE, DMA_TO_DEVICE);
 	dma_release_channel(dma->txchan);
 	dma->txchan = NULL;

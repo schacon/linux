@@ -9,12 +9,16 @@
  */
 
 #include <linux/init.h>
+#include <linux/of_clk.h>
+#include <linux/clocksource.h>
 #include <linux/string.h>
 #include <linux/seq_file.h>
 #include <linux/cpu.h>
 #include <linux/initrd.h>
 #include <linux/console.h>
 #include <linux/debugfs.h>
+#include <linux/of_fdt.h>
+#include <linux/pgtable.h>
 
 #include <asm/setup.h>
 #include <asm/sections.h>
@@ -24,14 +28,12 @@
 #include <linux/param.h>
 #include <linux/pci.h>
 #include <linux/cache.h>
-#include <linux/of_platform.h>
+#include <linux/of.h>
 #include <linux/dma-mapping.h>
 #include <asm/cacheflush.h>
 #include <asm/entry.h>
 #include <asm/cpuinfo.h>
 
-#include <asm/prom.h>
-#include <asm/pgtable.h>
 
 DEFINE_PER_CPU(unsigned int, KSP);	/* Saved kernel stack pointer */
 DEFINE_PER_CPU(unsigned int, KM);	/* Kernel/user mode */
@@ -39,17 +41,18 @@ DEFINE_PER_CPU(unsigned int, ENTRY_SP);	/* Saved SP on kernel entry */
 DEFINE_PER_CPU(unsigned int, R11_SAVE);	/* Temp variable for entry */
 DEFINE_PER_CPU(unsigned int, CURRENT_SAVE);	/* Saved current pointer */
 
-unsigned int boot_cpuid;
 /*
  * Placed cmd_line to .data section because can be initialized from
  * ASM code. Default position is BSS section which is cleared
  * in machine_early_init().
  */
-char cmd_line[COMMAND_LINE_SIZE] __attribute__ ((section(".data")));
+char cmd_line[COMMAND_LINE_SIZE] __section(".data");
 
 void __init setup_arch(char **cmdline_p)
 {
-	*cmdline_p = cmd_line;
+	*cmdline_p = boot_command_line;
+
+	setup_memory();
 
 	console_verbose();
 
@@ -59,26 +62,7 @@ void __init setup_arch(char **cmdline_p)
 
 	microblaze_cache_init();
 
-	setup_memory();
-
-#ifdef CONFIG_EARLY_PRINTK
-	/* remap early console to virtual address */
-	remap_early_printk();
-#endif
-
 	xilinx_pci_init();
-
-#if defined(CONFIG_SELFMOD_INTC) || defined(CONFIG_SELFMOD_TIMER)
-	pr_notice("Self modified code enable\n");
-#endif
-
-#ifdef CONFIG_VT
-#if defined(CONFIG_XILINX_CONSOLE)
-	conswitchp = &xil_con;
-#elif defined(CONFIG_DUMMY_CONSOLE)
-	conswitchp = &dummy_con;
-#endif
-#endif
 }
 
 #ifdef CONFIG_MTD_UCLINUX
@@ -135,14 +119,8 @@ void __init machine_early_init(const char *cmdline, unsigned int ram,
 	memset(__bss_start, 0, __bss_stop-__bss_start);
 	memset(_ssbss, 0, _esbss-_ssbss);
 
-	lockdep_init();
-
 /* initialize device tree for usage in early_printk */
-	early_init_devtree((void *)_fdt_start);
-
-#ifdef CONFIG_EARLY_PRINTK
-	setup_early_printk(NULL);
-#endif
+	early_init_devtree(_fdt_start);
 
 	/* setup kernel_tlb after BSS cleaning
 	 * Maybe worth to move to asm code */
@@ -154,8 +132,7 @@ void __init machine_early_init(const char *cmdline, unsigned int ram,
 	if (fdt)
 		pr_info("FDT at 0x%08x\n", fdt);
 	else
-		pr_info("Compiled-in FDT at 0x%08x\n",
-					(unsigned int)_fdt_start);
+		pr_info("Compiled-in FDT at %p\n", _fdt_start);
 
 #ifdef CONFIG_MTD_UCLINUX
 	pr_info("Found romfs @ 0x%08x (0x%08x)\n",
@@ -177,7 +154,7 @@ void __init machine_early_init(const char *cmdline, unsigned int ram,
 #else
 	if (!msr) {
 		pr_info("!!!Your kernel not setup MSR instruction but ");
-		pr_cont"CPU have it %x\n", msr);
+		pr_cont("CPU have it %x\n", msr);
 	}
 #endif
 
@@ -196,59 +173,27 @@ void __init machine_early_init(const char *cmdline, unsigned int ram,
 	per_cpu(CURRENT_SAVE, 0) = (unsigned long)current;
 }
 
+void __init time_init(void)
+{
+	of_clk_init(NULL);
+	setup_cpuinfo_clk();
+	timer_probe();
+}
+
 #ifdef CONFIG_DEBUG_FS
 struct dentry *of_debugfs_root;
 
 static int microblaze_debugfs_init(void)
 {
 	of_debugfs_root = debugfs_create_dir("microblaze", NULL);
-
-	return of_debugfs_root == NULL;
+	return 0;
 }
 arch_initcall(microblaze_debugfs_init);
 
-# ifdef CONFIG_MMU
 static int __init debugfs_tlb(void)
 {
-	struct dentry *d;
-
-	if (!of_debugfs_root)
-		return -ENODEV;
-
-	d = debugfs_create_u32("tlb_skip", S_IRUGO, of_debugfs_root, &tlb_skip);
-	if (!d)
-		return -ENOMEM;
-
+	debugfs_create_u32("tlb_skip", S_IRUGO, of_debugfs_root, &tlb_skip);
 	return 0;
 }
 device_initcall(debugfs_tlb);
-# endif
 #endif
-
-static int dflt_bus_notify(struct notifier_block *nb,
-				unsigned long action, void *data)
-{
-	struct device *dev = data;
-
-	/* We are only intereted in device addition */
-	if (action != BUS_NOTIFY_ADD_DEVICE)
-		return 0;
-
-	set_dma_ops(dev, &dma_direct_ops);
-
-	return NOTIFY_DONE;
-}
-
-static struct notifier_block dflt_plat_bus_notifier = {
-	.notifier_call = dflt_bus_notify,
-	.priority = INT_MAX,
-};
-
-static int __init setup_bus_notifier(void)
-{
-	bus_register_notifier(&platform_bus_type, &dflt_plat_bus_notifier);
-
-	return 0;
-}
-
-arch_initcall(setup_bus_notifier);

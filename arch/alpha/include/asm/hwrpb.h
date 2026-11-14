@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ALPHA_HWRPB_H
 #define __ALPHA_HWRPB_H
 
@@ -134,7 +135,7 @@ struct crb_struct {
 	/* virtual->physical map */
 	unsigned long map_entries;
 	unsigned long map_pages;
-	struct vf_map_struct map[1];
+	struct vf_map_struct map[];
 };
 
 struct memclust_struct {
@@ -151,7 +152,7 @@ struct memdesc_struct {
 	unsigned long chksum;
 	unsigned long optional_pa;
 	unsigned long numclusters;
-	struct memclust_struct cluster[0];
+	struct memclust_struct cluster[];
 };
 
 struct dsr_struct {

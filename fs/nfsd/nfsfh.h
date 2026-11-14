@@ -1,9 +1,124 @@
-/* Copyright (C) 1995, 1996, 1997 Olaf Kirch <okir@monad.swb.de> */
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * Copyright (C) 1995, 1996, 1997 Olaf Kirch <okir@monad.swb.de>
+ *
+ * This file describes the layout of the file handles as passed
+ * over the wire.
+ */
+#ifndef _LINUX_NFSD_NFSFH_H
+#define _LINUX_NFSD_NFSFH_H
 
-#ifndef _LINUX_NFSD_FH_INT_H
-#define _LINUX_NFSD_FH_INT_H
+#include <linux/crc32.h>
+#include <linux/sunrpc/svc.h>
+#include <linux/iversion.h>
+#include <linux/exportfs.h>
+#include <linux/nfs4.h>
 
-#include <linux/nfsd/nfsfh.h>
+#include "export.h"
+
+/*
+ * The file handle starts with a sequence of four-byte words.
+ * The first word contains a version number (1) and three descriptor bytes
+ * that tell how the remaining 3 variable length fields should be handled.
+ * These three bytes are auth_type, fsid_type and fileid_type.
+ *
+ * All four-byte values are in host-byte-order.
+ *
+ * The auth_type field is deprecated and must be set to 0.
+ *
+ * The fsid_type identifies how the filesystem (or export point) is
+ *    encoded.
+ *  Current values:
+ *     0  - 4 byte device id (ms-2-bytes major, ls-2-bytes minor), 4byte inode number
+ *        NOTE: we cannot use the kdev_t device id value, because kdev_t.h
+ *              says we mustn't.  We must break it up and reassemble.
+ *     1  - 4 byte user specified identifier
+ *     2  - 4 byte major, 4 byte minor, 4 byte inode number - DEPRECATED
+ *     3  - 4 byte device id, encoded for user-space, 4 byte inode number
+ *     4  - 4 byte inode number and 4 byte uuid
+ *     5  - 8 byte uuid
+ *     6  - 16 byte uuid
+ *     7  - 8 byte inode number and 16 byte uuid
+ *
+ * The fileid_type identifies how the file within the filesystem is encoded.
+ *   The values for this field are filesystem specific, exccept that
+ *   filesystems must not use the values '0' or '0xff'. 'See enum fid_type'
+ *   in include/linux/exportfs.h for currently registered values.
+ */
+
+struct knfsd_fh {
+	unsigned int	fh_size;	/*
+					 * Points to the current size while
+					 * building a new file handle.
+					 */
+	u8		fh_raw[NFS4_FHSIZE];
+};
+
+#define fh_version		fh_raw[0]
+#define fh_auth_type		fh_raw[1]
+#define fh_fsid_type		fh_raw[2]
+#define fh_fileid_type		fh_raw[3]
+
+static inline u32 *fh_fsid(const struct knfsd_fh *fh)
+{
+	return (u32 *)&fh->fh_raw[4];
+}
+
+static inline __u32 ino_t_to_u32(ino_t ino)
+{
+	return (__u32) ino;
+}
+
+static inline ino_t u32_to_ino_t(__u32 uino)
+{
+	return (ino_t) uino;
+}
+
+/*
+ * This is the internal representation of an NFS handle used in knfsd.
+ * pre_mtime/post_version will be used to support wcc_attr's in NFSv3.
+ */
+typedef struct svc_fh {
+	struct knfsd_fh		fh_handle;	/* FH data */
+	int			fh_maxsize;	/* max size for fh_handle */
+	struct dentry *		fh_dentry;	/* validated dentry */
+	struct svc_export *	fh_export;	/* export pointer */
+
+	bool			fh_want_write;	/* remount protection taken */
+	bool			fh_no_wcc;	/* no wcc data needed */
+	bool			fh_no_atomic_attr;
+						/*
+						 * wcc data is not atomic with
+						 * operation
+						 */
+	bool			fh_use_wgather;	/* NFSv2 wgather option */
+	bool			fh_64bit_cookies;/* readdir cookie size */
+	int			fh_flags;	/* FH flags */
+	bool			fh_post_saved;	/* post-op attrs saved */
+	bool			fh_pre_saved;	/* pre-op attrs saved */
+
+	/* Pre-op attributes saved when inode is locked */
+	__u64			fh_pre_size;	/* size before operation */
+	struct timespec64	fh_pre_mtime;	/* mtime before oper */
+	struct timespec64	fh_pre_ctime;	/* ctime before oper */
+	/*
+	 * pre-op nfsv4 change attr: note must check IS_I_VERSION(inode)
+	 *  to find out if it is valid.
+	 */
+	u64			fh_pre_change;
+
+	/* Post-op attributes saved in fh_fill_post_attrs() */
+	struct kstat		fh_post_attr;	/* full attrs after operation */
+	u64			fh_post_change; /* nfsv4 change; see above */
+} svc_fh;
+
+struct nfsd_fhandle {
+	struct svc_fh		fh;
+};
+
+#define NFSD4_FH_FOREIGN (1<<0)
+#define SET_FH_FLAG(c, f) ((c)->fh_flags |= (f))
+#define HAS_FH_FLAG(c, f) ((c)->fh_flags & (f))
 
 enum nfsd_fsid {
 	FSID_DEV = 0,
@@ -21,11 +136,20 @@ enum fsid_source {
 	FSIDSOURCE_FSID,
 	FSIDSOURCE_UUID,
 };
-extern enum fsid_source fsid_source(struct svc_fh *fhp);
+extern enum fsid_source fsid_source_fh(const struct knfsd_fh *fh,
+				       struct svc_export *exp);
+extern enum fsid_source fsid_source(const struct svc_fh *fhp);
 
 
-/* This might look a little large to "inline" but in all calls except
+/*
+ * This might look a little large to "inline" but in all calls except
  * one, 'vers' is constant so moste of the function disappears.
+ *
+ * In some cases the values are considered to be host endian and in
+ * others, net endian. fsidv is always considered to be u32 as the
+ * callers don't know which it will be. So we must use __force to keep
+ * sparse from complaining. Since these values are opaque to the
+ * client, that shouldn't be a problem.
  */
 static inline void mk_fsid(int vers, u32 *fsidv, dev_t dev, ino_t ino,
 			   u32 fsid, unsigned char *uuid)
@@ -33,7 +157,7 @@ static inline void mk_fsid(int vers, u32 *fsidv, dev_t dev, ino_t ino,
 	u32 *up;
 	switch(vers) {
 	case FSID_DEV:
-		fsidv[0] = htonl((MAJOR(dev)<<16) |
+		fsidv[0] = (__force __u32)htonl((MAJOR(dev)<<16) |
 				 MINOR(dev));
 		fsidv[1] = ino_t_to_u32(ino);
 		break;
@@ -41,8 +165,8 @@ static inline void mk_fsid(int vers, u32 *fsidv, dev_t dev, ino_t ino,
 		fsidv[0] = fsid;
 		break;
 	case FSID_MAJOR_MINOR:
-		fsidv[0] = htonl(MAJOR(dev));
-		fsidv[1] = htonl(MINOR(dev));
+		fsidv[0] = (__force __u32)htonl(MAJOR(dev));
+		fsidv[1] = (__force __u32)htonl(MINOR(dev));
 		fsidv[2] = ino_t_to_u32(ino);
 		break;
 
@@ -103,26 +227,44 @@ extern char * SVCFH_fmt(struct svc_fh *fhp);
  * Function prototypes
  */
 __be32	fh_verify(struct svc_rqst *, struct svc_fh *, umode_t, int);
+__be32	fh_verify_local(struct net *, struct svc_cred *, struct auth_domain *,
+			struct svc_fh *, umode_t, int);
+__be32	fh_getattr(const struct svc_fh *fhp, struct kstat *stat);
 __be32	fh_compose(struct svc_fh *, struct svc_export *, struct dentry *, struct svc_fh *);
 __be32	fh_update(struct svc_fh *);
 void	fh_put(struct svc_fh *);
+bool	fh_append_mac(struct knfsd_fh *fh, int fh_maxsize, struct net *net);
 
 static __inline__ struct svc_fh *
-fh_copy(struct svc_fh *dst, struct svc_fh *src)
+fh_copy(struct svc_fh *dst, const struct svc_fh *src)
 {
-	WARN_ON(src->fh_dentry || src->fh_locked);
-			
+	WARN_ON(src->fh_dentry);
+
 	*dst = *src;
 	return dst;
 }
 
 static inline void
-fh_copy_shallow(struct knfsd_fh *dst, struct knfsd_fh *src)
+fh_copy_shallow(struct knfsd_fh *dst, const struct knfsd_fh *src)
 {
 	dst->fh_size = src->fh_size;
-	memcpy(&dst->fh_base, &src->fh_base, src->fh_size);
+	memcpy(&dst->fh_raw, &src->fh_raw, src->fh_size);
 }
 
+#define NFSD_FHSIZE_UNSPEC	0
+
+/**
+ * fh_init - Prepare a file handle for fh_compose() or fh_verify()
+ * @fhp: File handle to initialize
+ * @maxsize: Largest file handle, in bytes, to build in @fhp
+ *
+ * @maxsize bounds the handle fh_compose() may build: NFS_FHSIZE,
+ * NFS3_FHSIZE, and NFS4_FHSIZE additionally select version-specific
+ * handling in fh_verify(). Callers that only verify an incoming
+ * handle pass NFSD_FHSIZE_UNSPEC, which cannot be composed.
+ *
+ * Return: @fhp
+ */
 static __inline__ struct svc_fh *
 fh_init(struct svc_fh *fhp, int maxsize)
 {
@@ -131,76 +273,101 @@ fh_init(struct svc_fh *fhp, int maxsize)
 	return fhp;
 }
 
-#ifdef CONFIG_NFSD_V3
-/*
- * Fill in the pre_op attr for the wcc data
- */
-static inline void
-fill_pre_wcc(struct svc_fh *fhp)
+static inline bool fh_match(const struct knfsd_fh *fh1,
+			    const struct knfsd_fh *fh2)
 {
-	struct inode    *inode;
+	if (fh1->fh_size != fh2->fh_size)
+		return false;
+	if (memcmp(fh1->fh_raw, fh2->fh_raw, fh1->fh_size) != 0)
+		return false;
+	return true;
+}
 
-	inode = fhp->fh_dentry->d_inode;
-	if (!fhp->fh_pre_saved) {
-		fhp->fh_pre_mtime = inode->i_mtime;
-		fhp->fh_pre_ctime = inode->i_ctime;
-		fhp->fh_pre_size  = inode->i_size;
-		fhp->fh_pre_change = inode->i_version;
-		fhp->fh_pre_saved = 1;
+static inline bool fh_fsid_match(const struct knfsd_fh *fh1,
+				 const struct knfsd_fh *fh2)
+{
+	u32 *fsid1 = fh_fsid(fh1);
+	u32 *fsid2 = fh_fsid(fh2);
+
+	if (fh1->fh_fsid_type != fh2->fh_fsid_type)
+		return false;
+	if (memcmp(fsid1, fsid2, key_len(fh1->fh_fsid_type)) != 0)
+		return false;
+	return true;
+}
+
+/**
+ * fh_want_write - Get write access to an export
+ * @fhp: File handle of file to be written
+ *
+ * Caller must invoke fh_drop_write() when its write operation
+ * is complete.
+ *
+ * Returns 0 if the file handle's export can be written to. Otherwise
+ * the export is not prepared for updates, and the returned negative
+ * errno value reflects the reason for the failure.
+ */
+static inline int fh_want_write(struct svc_fh *fhp)
+{
+	int ret;
+
+	if (fhp->fh_want_write)
+		return 0;
+	ret = mnt_want_write(fhp->fh_export->ex_path.mnt);
+	if (!ret)
+		fhp->fh_want_write = true;
+	return ret;
+}
+
+/**
+ * fh_drop_write - Release write access on an export
+ * @fhp: File handle of file on which fh_want_write() was previously called
+ */
+static inline void fh_drop_write(struct svc_fh *fhp)
+{
+	if (fhp->fh_want_write) {
+		fhp->fh_want_write = false;
+		mnt_drop_write(fhp->fh_export->ex_path.mnt);
 	}
 }
 
-extern void fill_post_wcc(struct svc_fh *);
-#else
-#define	fill_pre_wcc(ignored)
-#define fill_post_wcc(notused)
-#endif /* CONFIG_NFSD_V3 */
-
-
-/*
- * Lock a file handle/inode
- * NOTE: both fh_lock and fh_unlock are done "by hand" in
- * vfs.c:nfsd_rename as it needs to grab 2 i_mutex's at once
- * so, any changes here should be reflected there.
+/**
+ * knfsd_fh_hash - calculate the crc32 hash for the filehandle
+ * @fh - pointer to filehandle
+ *
+ * returns a crc32 hash for the filehandle that is compatible with
+ * the one displayed by "wireshark".
  */
-
-static inline void
-fh_lock_nested(struct svc_fh *fhp, unsigned int subclass)
+static inline u32 knfsd_fh_hash(const struct knfsd_fh *fh)
 {
-	struct dentry	*dentry = fhp->fh_dentry;
-	struct inode	*inode;
-
-	BUG_ON(!dentry);
-
-	if (fhp->fh_locked) {
-		printk(KERN_WARNING "fh_lock: %s/%s already locked!\n",
-			dentry->d_parent->d_name.name, dentry->d_name.name);
-		return;
-	}
-
-	inode = dentry->d_inode;
-	mutex_lock_nested(&inode->i_mutex, subclass);
-	fill_pre_wcc(fhp);
-	fhp->fh_locked = 1;
+	return ~crc32_le(0xFFFFFFFF, fh->fh_raw, fh->fh_size);
 }
 
-static inline void
-fh_lock(struct svc_fh *fhp)
-{
-	fh_lock_nested(fhp, I_MUTEX_NORMAL);
-}
-
-/*
- * Unlock a file handle/inode
+/**
+ * fh_clear_pre_post_attrs - Reset pre/post attributes
+ * @fhp: file handle to be updated
+ *
  */
-static inline void
-fh_unlock(struct svc_fh *fhp)
+static inline void fh_clear_pre_post_attrs(struct svc_fh *fhp)
 {
-	if (fhp->fh_locked) {
-		fill_post_wcc(fhp);
-		mutex_unlock(&fhp->fh_dentry->d_inode->i_mutex);
-		fhp->fh_locked = 0;
-	}
+	fhp->fh_post_saved = false;
+	fhp->fh_pre_saved = false;
 }
 
-#endif /* _LINUX_NFSD_FH_INT_H */
+u64 nfsd4_change_attribute(const struct kstat *stat);
+__be32 __must_check fh_fill_pre_attrs(struct svc_fh *fhp);
+__be32 __must_check fh_fill_pre_attrs_unlocked(struct svc_fh *fhp);
+__be32 fh_fill_post_attrs(struct svc_fh *fhp);
+
+/**
+ * fh_fill_post_noop - Copy pre attrs to post attrs
+ * @fhp: file handle to be updated
+ *
+ * This is used when the directory wasn't changed, but wcc attributes
+ * are needed anyway.
+ */
+static inline void fh_fill_post_noop(struct svc_fh *fhp)
+{
+	fhp->fh_post_saved = true;
+}
+#endif /* _LINUX_NFSD_NFSFH_H */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPICCISS_IOCTLH
 #define _UAPICCISS_IOCTLH
 
@@ -84,5 +85,6 @@ typedef struct _LogvolInfo_struct{
 #define CCISS_RESCANDISK   _IO(CCISS_IOC_MAGIC, 16)
 #define CCISS_GETLUNINFO   _IOR(CCISS_IOC_MAGIC, 17, LogvolInfo_struct)
 #define CCISS_BIG_PASSTHRU _IOWR(CCISS_IOC_MAGIC, 18, BIG_IOCTL_Command_struct)
+#define CCISS_BIG_PASSTHRU_SUPPORTED _IO(CCISS_IOC_MAGIC, 19)
 
 #endif /* _UAPICCISS_IOCTLH */

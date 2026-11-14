@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * sun4m irq support
  *
@@ -9,10 +10,12 @@
  *  Copyright (C) 1996 Dave Redman (djhr@tadpole.co.uk)
  */
 
+#include <linux/slab.h>
+#include <linux/sched/debug.h>
+#include <linux/pgtable.h>
+
 #include <asm/timer.h>
 #include <asm/traps.h>
-#include <asm/pgalloc.h>
-#include <asm/pgtable.h>
 #include <asm/irq.h>
 #include <asm/io.h>
 #include <asm/cacheflush.h>
@@ -186,9 +189,10 @@ static unsigned long sun4m_imask[0x50] = {
 
 static void sun4m_mask_irq(struct irq_data *data)
 {
-	struct sun4m_handler_data *handler_data = data->handler_data;
+	struct sun4m_handler_data *handler_data;
 	int cpu = smp_processor_id();
 
+	handler_data = irq_data_get_irq_handler_data(data);
 	if (handler_data->mask) {
 		unsigned long flags;
 
@@ -204,9 +208,10 @@ static void sun4m_mask_irq(struct irq_data *data)
 
 static void sun4m_unmask_irq(struct irq_data *data)
 {
-	struct sun4m_handler_data *handler_data = data->handler_data;
+	struct sun4m_handler_data *handler_data;
 	int cpu = smp_processor_id();
 
+	handler_data = irq_data_get_irq_handler_data(data);
 	if (handler_data->mask) {
 		unsigned long flags;
 
@@ -263,7 +268,7 @@ static unsigned int sun4m_build_device_irq(struct platform_device *op,
 	if (unlikely(handler_data))
 		goto out;
 
-	handler_data = kzalloc(sizeof(struct sun4m_handler_data), GFP_ATOMIC);
+	handler_data = kzalloc_obj(struct sun4m_handler_data, GFP_ATOMIC);
 	if (unlikely(!handler_data)) {
 		prom_printf("IRQ: kzalloc(sun4m_handler_data) failed.\n");
 		prom_halt();

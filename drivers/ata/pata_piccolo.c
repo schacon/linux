@@ -18,7 +18,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <scsi/scsi_host.h>
@@ -63,7 +62,7 @@ static void tosh_set_dmamode(struct ata_port *ap, struct ata_device *adev)
 }
 
 
-static struct scsi_host_template tosh_sht = {
+static const struct scsi_host_template tosh_sht = {
 	ATA_BMDMA_SHT(DRV_NAME),
 };
 
@@ -75,7 +74,7 @@ static struct ata_port_operations tosh_port_ops = {
 };
 
 /**
- *	ata_tosh_init		-	attach generic IDE
+ *	ata_tosh_init_one		-	attach generic IDE
  *	@dev: PCI device found
  *	@id: match entry
  *
@@ -98,7 +97,7 @@ static int ata_tosh_init_one(struct pci_dev *dev, const struct pci_device_id *id
 	return ata_pci_bmdma_init_one(dev, ppi, &tosh_sht, NULL, 0);
 }
 
-static struct pci_device_id ata_tosh[] = {
+static const struct pci_device_id ata_tosh[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_TOSHIBA,PCI_DEVICE_ID_TOSHIBA_PICCOLO_1), },
 	{ PCI_DEVICE(PCI_VENDOR_ID_TOSHIBA,PCI_DEVICE_ID_TOSHIBA_PICCOLO_2),  },
 	{ PCI_DEVICE(PCI_VENDOR_ID_TOSHIBA,PCI_DEVICE_ID_TOSHIBA_PICCOLO_3),  },
@@ -111,7 +110,7 @@ static struct pci_driver ata_tosh_pci_driver = {
 	.id_table	= ata_tosh,
 	.probe 		= ata_tosh_init_one,
 	.remove		= ata_pci_remove_one,
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	.suspend	= ata_pci_device_suspend,
 	.resume		= ata_pci_device_resume,
 #endif

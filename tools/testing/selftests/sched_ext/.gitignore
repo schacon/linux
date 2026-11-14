@@ -1,0 +1,10 @@
+*
+!*.c
+!*.h
+!Makefile
+!.gitignore
+!config
+!test_modules/
+!test_modules/scx_enq_blocked_test.c
+!test_modules/Makefile
+test_modules/*.mod.c

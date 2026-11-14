@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * FIXME: add wdrtas_get_status and wdrtas_get_boot_status as soon as
  * RTAS calls are available
@@ -10,20 +11,6 @@
  * device driver to exploit watchdog RTAS functions
  *
  * Authors : Utz Bacher <utz.bacher@de.ibm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -48,8 +35,6 @@
 MODULE_AUTHOR("Utz Bacher <utz.bacher@de.ibm.com>");
 MODULE_DESCRIPTION("RTAS watchdog driver");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
-MODULE_ALIAS_MISCDEV(TEMP_MINOR);
 
 static bool wdrtas_nowayout = WATCHDOG_NOWAYOUT;
 static atomic_t wdrtas_miscdev_open = ATOMIC_INIT(0);
@@ -162,31 +147,6 @@ static void wdrtas_timer_stop(void)
 }
 
 /**
- * wdrtas_log_scanned_event - logs an event we received during keepalive
- *
- * wdrtas_log_scanned_event prints a message to the log buffer dumping
- * the results of the last event-scan call
- */
-static void wdrtas_log_scanned_event(void)
-{
-	int i;
-
-	for (i = 0; i < WDRTAS_LOGBUFFER_LEN; i += 16)
-		pr_info("dumping event (line %i/%i), data = "
-			"%02x %02x %02x %02x  %02x %02x %02x %02x   "
-			"%02x %02x %02x %02x  %02x %02x %02x %02x\n",
-			(i / 16) + 1, (WDRTAS_LOGBUFFER_LEN / 16),
-			wdrtas_logbuffer[i + 0], wdrtas_logbuffer[i + 1],
-			wdrtas_logbuffer[i + 2], wdrtas_logbuffer[i + 3],
-			wdrtas_logbuffer[i + 4], wdrtas_logbuffer[i + 5],
-			wdrtas_logbuffer[i + 6], wdrtas_logbuffer[i + 7],
-			wdrtas_logbuffer[i + 8], wdrtas_logbuffer[i + 9],
-			wdrtas_logbuffer[i + 10], wdrtas_logbuffer[i + 11],
-			wdrtas_logbuffer[i + 12], wdrtas_logbuffer[i + 13],
-			wdrtas_logbuffer[i + 14], wdrtas_logbuffer[i + 15]);
-}
-
-/**
  * wdrtas_timer_keepalive - resets watchdog timer to keep system alive
  *
  * wdrtas_timer_keepalive restarts the watchdog timer by calling the
@@ -205,7 +165,9 @@ static void wdrtas_timer_keepalive(void)
 		if (result < 0)
 			pr_err("event-scan failed: %li\n", result);
 		if (result == 0)
-			wdrtas_log_scanned_event();
+			print_hex_dump(KERN_INFO, "dumping event, data: ",
+				DUMP_PREFIX_OFFSET, 16, 1,
+				wdrtas_logbuffer, WDRTAS_LOGBUFFER_LEN, false);
 	} while (result == 0);
 }
 
@@ -370,7 +332,7 @@ static long wdrtas_ioctl(struct file *file, unsigned int cmd,
 			wdrtas_interval = i;
 		else
 			wdrtas_interval = wdrtas_get_interval(i);
-		/* fallthrough */
+		fallthrough;
 
 	case WDIOC_GETTIMEOUT:
 		return put_user(wdrtas_interval, argp);
@@ -401,7 +363,7 @@ static int wdrtas_open(struct inode *inode, struct file *file)
 	wdrtas_timer_start();
 	wdrtas_timer_keepalive();
 
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 /**
@@ -467,7 +429,7 @@ static ssize_t wdrtas_temp_read(struct file *file, char __user *buf,
  */
 static int wdrtas_temp_open(struct inode *inode, struct file *file)
 {
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 /**
@@ -507,9 +469,9 @@ static int wdrtas_reboot(struct notifier_block *this,
 
 static const struct file_operations wdrtas_fops = {
 	.owner		= THIS_MODULE,
-	.llseek		= no_llseek,
 	.write		= wdrtas_write,
 	.unlocked_ioctl	= wdrtas_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= wdrtas_open,
 	.release	= wdrtas_close,
 };
@@ -522,7 +484,6 @@ static struct miscdevice wdrtas_miscdev = {
 
 static const struct file_operations wdrtas_temp_fops = {
 	.owner		= THIS_MODULE,
-	.llseek		= no_llseek,
 	.read		= wdrtas_temp_read,
 	.open		= wdrtas_temp_open,
 	.release	= wdrtas_temp_close,

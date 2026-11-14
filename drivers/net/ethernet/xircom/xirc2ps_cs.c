@@ -27,8 +27,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  *
  *
  * ALTERNATIVELY, this driver may be distributed under the terms of
@@ -89,7 +88,7 @@
 #include <pcmcia/ciscode.h>
 
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #ifndef MANFID_COMPAQ
   #define MANFID_COMPAQ 	   0x0138
@@ -267,7 +266,7 @@ static void xirc2ps_detach(struct pcmcia_device *p_dev);
 
 static irqreturn_t xirc2ps_interrupt(int irq, void *dev_id);
 
-typedef struct local_info_t {
+struct local_info {
 	struct net_device	*dev;
 	struct pcmcia_device	*p_dev;
 
@@ -282,14 +281,14 @@ typedef struct local_info_t {
     unsigned last_ptr_value; /* last packets transmitted value */
     const char *manf_str;
     struct work_struct tx_timeout_task;
-} local_info_t;
+};
 
 /****************
  * Some more prototypes
  */
 static netdev_tx_t do_start_xmit(struct sk_buff *skb,
 				       struct net_device *dev);
-static void xirc_tx_timeout(struct net_device *dev);
+static void xirc_tx_timeout(struct net_device *dev, unsigned int txqueue);
 static void xirc2ps_tx_timeout_task(struct work_struct *work);
 static void set_addresses(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
@@ -465,9 +464,8 @@ static const struct net_device_ops netdev_ops = {
 	.ndo_start_xmit		= do_start_xmit,
 	.ndo_tx_timeout 	= xirc_tx_timeout,
 	.ndo_set_config		= do_config,
-	.ndo_do_ioctl		= do_ioctl,
+	.ndo_eth_ioctl		= do_ioctl,
 	.ndo_set_rx_mode	= set_multicast_list,
-	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_set_mac_address 	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 };
@@ -476,12 +474,12 @@ static int
 xirc2ps_probe(struct pcmcia_device *link)
 {
     struct net_device *dev;
-    local_info_t *local;
+    struct local_info *local;
 
     dev_dbg(&link->dev, "attach()\n");
 
     /* Allocate the device structure */
-    dev = alloc_etherdev(sizeof(local_info_t));
+    dev = alloc_etherdev(sizeof(struct local_info));
     if (!dev)
 	    return -ENOMEM;
     local = netdev_priv(dev);
@@ -505,6 +503,11 @@ static void
 xirc2ps_detach(struct pcmcia_device *link)
 {
     struct net_device *dev = link->priv;
+    struct local_info *local = netdev_priv(dev);
+
+    netif_carrier_off(dev);
+    netif_tx_disable(dev);
+    cancel_work_sync(&local->tx_timeout_task);
 
     dev_dbg(&link->dev, "detach\n");
 
@@ -537,7 +540,7 @@ static int
 set_card_type(struct pcmcia_device *link)
 {
     struct net_device *dev = link->priv;
-    local_info_t *local = netdev_priv(dev);
+    struct local_info *local = netdev_priv(dev);
     u8 *buf;
     unsigned int cisrev, mediaid, prodid;
     size_t len;
@@ -673,7 +676,6 @@ static int pcmcia_get_mac_ce(struct pcmcia_device *p_dev,
 			     void *priv)
 {
 	struct net_device *dev = priv;
-	int i;
 
 	if (tuple->TupleDataLen != 13)
 		return -EINVAL;
@@ -681,8 +683,7 @@ static int pcmcia_get_mac_ce(struct pcmcia_device *p_dev,
 		(tuple->TupleData[2] != 6))
 		return -EINVAL;
 	/* another try	(James Lehmer's CE2 version 4.1)*/
-	for (i = 2; i < 6; i++)
-		dev->dev_addr[i] = tuple->TupleData[i+2];
+	dev_addr_mod(dev, 2, &tuple->TupleData[2], 4);
 	return 0;
 };
 
@@ -691,7 +692,7 @@ static int
 xirc2ps_config(struct pcmcia_device * link)
 {
     struct net_device *dev = link->priv;
-    local_info_t *local = netdev_priv(dev);
+    struct local_info *local = netdev_priv(dev);
     unsigned int ioaddr;
     int err;
     u8 *buf;
@@ -744,11 +745,9 @@ xirc2ps_config(struct pcmcia_device * link)
 	    len = pcmcia_get_tuple(link, 0x89, &buf);
 	    /* data layout looks like tuple 0x22 */
 	    if (buf && len == 8) {
-		    if (*buf == CISTPL_FUNCE_LAN_NODE_ID) {
-			    int i;
-			    for (i = 2; i < 6; i++)
-				    dev->dev_addr[i] = buf[i+2];
-		    } else
+		    if (*buf == CISTPL_FUNCE_LAN_NODE_ID)
+			    dev_addr_mod(dev, 2, &buf[2], 4);
+		    else
 			    err = -1;
 	    }
 	    kfree(buf);
@@ -800,8 +799,6 @@ xirc2ps_config(struct pcmcia_device * link)
 	    goto config_error;
     }
   port_found:
-    if (err)
-	 goto config_error;
 
     /****************
      * Now allocate an interrupt line.	Note that this does not
@@ -932,7 +929,7 @@ xirc2ps_release(struct pcmcia_device *link)
 
 	if (link->resource[2]->end) {
 		struct net_device *dev = link->priv;
-		local_info_t *local = netdev_priv(dev);
+		struct local_info *local = netdev_priv(dev);
 		if (local->dingo)
 			iounmap(local->dingo_ccr - 0x0800);
 	}
@@ -976,7 +973,7 @@ static irqreturn_t
 xirc2ps_interrupt(int irq, void *dev_id)
 {
     struct net_device *dev = (struct net_device *)dev_id;
-    local_info_t *lp = netdev_priv(dev);
+    struct local_info *lp = netdev_priv(dev);
     unsigned int ioaddr;
     u_char saved_page;
     unsigned bytes_rcvd;
@@ -1145,8 +1142,8 @@ xirc2ps_interrupt(int irq, void *dev_id)
 	    dev->stats.tx_packets += lp->last_ptr_value - n;
 	netif_wake_queue(dev);
     }
-    if (tx_status & 0x0002) {	/* Execessive collissions */
-	pr_debug("tx restarted due to execssive collissions\n");
+    if (tx_status & 0x0002) {	/* Excessive collisions */
+	pr_debug("tx restarted due to excessive collisions\n");
 	PutByte(XIRCREG_CR, RestartTx);  /* restart transmitter process */
     }
     if (tx_status & 0x0040)
@@ -1195,19 +1192,19 @@ xirc2ps_interrupt(int irq, void *dev_id)
 static void
 xirc2ps_tx_timeout_task(struct work_struct *work)
 {
-	local_info_t *local =
-		container_of(work, local_info_t, tx_timeout_task);
+	struct local_info *local =
+		container_of(work, struct local_info, tx_timeout_task);
 	struct net_device *dev = local->dev;
     /* reset the card */
     do_reset(dev,1);
-    dev->trans_start = jiffies; /* prevent tx timeout */
+    netif_trans_update(dev); /* prevent tx timeout */
     netif_wake_queue(dev);
 }
 
 static void
-xirc_tx_timeout(struct net_device *dev)
+xirc_tx_timeout(struct net_device *dev, unsigned int txqueue)
 {
-    local_info_t *lp = netdev_priv(dev);
+    struct local_info *lp = netdev_priv(dev);
     dev->stats.tx_errors++;
     netdev_notice(dev, "transmit timed out\n");
     schedule_work(&lp->tx_timeout_task);
@@ -1216,7 +1213,7 @@ xirc_tx_timeout(struct net_device *dev)
 static netdev_tx_t
 do_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-    local_info_t *lp = netdev_priv(dev);
+    struct local_info *lp = netdev_priv(dev);
     unsigned int ioaddr = dev->base_addr;
     int okay;
     unsigned freespace;
@@ -1236,16 +1233,14 @@ do_start_xmit(struct sk_buff *skb, struct net_device *dev)
     if (pktlen < ETH_ZLEN)
     {
         if (skb_padto(skb, ETH_ZLEN))
-        	return NETDEV_TX_OK;
+		return NETDEV_TX_OK;
 	pktlen = ETH_ZLEN;
     }
 
     netif_stop_queue(dev);
     SelectPage(0);
     PutWord(XIRCREG0_TRS, (u_short)pktlen+2);
-    freespace = GetWord(XIRCREG0_TSO);
-    okay = freespace & 0x8000;
-    freespace &= 0x7fff;
+    freespace = GetWord(XIRCREG0_TSO) & 0x7fff;
     /* TRS doesn't work - (indeed it is eliminated with sil-rev 1) */
     okay = pktlen +2 < freespace;
     pr_debug("%s: avail. tx space=%u%s\n",
@@ -1275,7 +1270,7 @@ struct set_address_info {
 	unsigned int ioaddr;
 };
 
-static void set_address(struct set_address_info *sa_info, char *addr)
+static void set_address(struct set_address_info *sa_info, const char *addr)
 {
 	unsigned int ioaddr = sa_info->ioaddr;
 	int i;
@@ -1301,7 +1296,7 @@ static void set_address(struct set_address_info *sa_info, char *addr)
 static void set_addresses(struct net_device *dev)
 {
 	unsigned int ioaddr = dev->base_addr;
-	local_info_t *lp = netdev_priv(dev);
+	struct local_info *lp = netdev_priv(dev);
 	struct netdev_hw_addr *ha;
 	struct set_address_info sa_info;
 	int i;
@@ -1363,7 +1358,7 @@ set_multicast_list(struct net_device *dev)
 static int
 do_config(struct net_device *dev, struct ifmap *map)
 {
-    local_info_t *local = netdev_priv(dev);
+    struct local_info *local = netdev_priv(dev);
 
     pr_debug("do_config(%p)\n", dev);
     if (map->port != 255 && map->port != dev->if_port) {
@@ -1371,10 +1366,10 @@ do_config(struct net_device *dev, struct ifmap *map)
 	    return -EINVAL;
 	if (!map->port) {
 	    local->probe_port = 1;
-	    dev->if_port = 1;
+	    WRITE_ONCE(dev->if_port, 1);
 	} else {
 	    local->probe_port = 0;
-	    dev->if_port = map->port;
+	    WRITE_ONCE(dev->if_port, map->port);
 	}
 	netdev_info(dev, "switching to %s port\n", if_names[dev->if_port]);
 	do_reset(dev,1);  /* not the fine way :-) */
@@ -1388,7 +1383,7 @@ do_config(struct net_device *dev, struct ifmap *map)
 static int
 do_open(struct net_device *dev)
 {
-    local_info_t *lp = netdev_priv(dev);
+    struct local_info *lp = netdev_priv(dev);
     struct pcmcia_device *link = lp->p_dev;
 
     dev_dbg(&link->dev, "do_open(%p)\n", dev);
@@ -1410,7 +1405,7 @@ do_open(struct net_device *dev)
 static void netdev_get_drvinfo(struct net_device *dev,
 			       struct ethtool_drvinfo *info)
 {
-	strlcpy(info->driver, "xirc2ps_cs", sizeof(info->driver));
+	strscpy(info->driver, "xirc2ps_cs", sizeof(info->driver));
 	snprintf(info->bus_info, sizeof(info->bus_info), "PCMCIA 0x%lx",
 		 dev->base_addr);
 }
@@ -1422,7 +1417,7 @@ static const struct ethtool_ops netdev_ethtool_ops = {
 static int
 do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
-    local_info_t *local = netdev_priv(dev);
+    struct local_info *local = netdev_priv(dev);
     unsigned int ioaddr = dev->base_addr;
     struct mii_ioctl_data *data = if_mii(rq);
 
@@ -1436,7 +1431,7 @@ do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
     switch(cmd) {
       case SIOCGMIIPHY:		/* Get the address of the PHY in use. */
 	data->phy_id = 0;	/* we have only this address */
-	/* fall through */
+	fallthrough;
       case SIOCGMIIREG:		/* Read the specified MII register. */
 	data->val_out = mii_rd(ioaddr, data->phy_id & 0x1f,
 			       data->reg_num & 0x1f);
@@ -1454,7 +1449,7 @@ do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 static void
 hardreset(struct net_device *dev)
 {
-    local_info_t *local = netdev_priv(dev);
+    struct local_info *local = netdev_priv(dev);
     unsigned int ioaddr = dev->base_addr;
 
     SelectPage(4);
@@ -1471,11 +1466,11 @@ hardreset(struct net_device *dev)
 static void
 do_reset(struct net_device *dev, int full)
 {
-    local_info_t *local = netdev_priv(dev);
+    struct local_info *local = netdev_priv(dev);
     unsigned int ioaddr = dev->base_addr;
     unsigned value;
 
-    pr_debug("%s: do_reset(%p,%d)\n", dev? dev->name:"eth?", dev, full);
+    pr_debug("%s: do_reset(%p,%d)\n", dev->name, dev, full);
 
     hardreset(dev);
     PutByte(XIRCREG_CR, SoftReset); /* set */
@@ -1581,7 +1576,7 @@ do_reset(struct net_device *dev, int full)
 	    msleep(40);			/* wait 40 msec to let it complete */
 	}
 	if (full_duplex)
-	    PutByte(XIRCREG1_ECR, GetByte(XIRCREG1_ECR | FullDuplex));
+	    PutByte(XIRCREG1_ECR, GetByte(XIRCREG1_ECR) | FullDuplex);
     } else {  /* No MII */
 	SelectPage(0);
 	value = GetByte(XIRCREG_ESR);	 /* read the ESR */
@@ -1632,7 +1627,7 @@ do_reset(struct net_device *dev, int full)
 static int
 init_mii(struct net_device *dev)
 {
-    local_info_t *local = netdev_priv(dev);
+    struct local_info *local = netdev_priv(dev);
     unsigned int ioaddr = dev->base_addr;
     unsigned control, status, linkpartner;
     int i;
@@ -1716,7 +1711,7 @@ static int
 do_stop(struct net_device *dev)
 {
     unsigned int ioaddr = dev->base_addr;
-    local_info_t *lp = netdev_priv(dev);
+    struct local_info *lp = netdev_priv(dev);
     struct pcmcia_device *link = lp->p_dev;
 
     dev_dbg(&link->dev, "do_stop(%p)\n", dev);
@@ -1783,7 +1778,7 @@ static int __init setup_xirc2ps_cs(char *str)
 	 */
 	int ints[10] = { -1 };
 
-	str = get_options(str, 9, ints);
+	str = get_options(str, ARRAY_SIZE(ints), ints);
 
 #define MAYBE_SET(X,Y) if (ints[0] >= Y && ints[Y] != -1) { X = ints[Y]; }
 	MAYBE_SET(if_port, 3);

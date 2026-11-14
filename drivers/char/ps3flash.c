@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * PS3 FLASH ROM Storage Driver
  *
  * Copyright (C) 2007 Sony Computer Entertainment Inc.
  * Copyright 2007 Sony Corp.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published
- * by the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #include <linux/fs.h>
@@ -98,32 +86,8 @@ static int ps3flash_fetch(struct ps3_storage_device *dev, u64 start_sector)
 static loff_t ps3flash_llseek(struct file *file, loff_t offset, int origin)
 {
 	struct ps3_storage_device *dev = ps3flash_dev;
-	loff_t res;
-
-	mutex_lock(&file->f_mapping->host->i_mutex);
-	switch (origin) {
-	case 0:
-		break;
-	case 1:
-		offset += file->f_pos;
-		break;
-	case 2:
-		offset += dev->regions[dev->region_idx].size*dev->blk_size;
-		break;
-	default:
-		offset = -1;
-	}
-	if (offset < 0) {
-		res = -EINVAL;
-		goto out;
-	}
-
-	file->f_pos = offset;
-	res = file->f_pos;
-
-out:
-	mutex_unlock(&file->f_mapping->host->i_mutex);
-	return res;
+	return generic_file_llseek_size(file, offset, origin, MAX_LFS_FILESIZE,
+			dev->regions[dev->region_idx].size*dev->blk_size);
 }
 
 static ssize_t ps3flash_read(char __user *userbuf, void *kernelbuf,
@@ -314,9 +278,9 @@ static int ps3flash_fsync(struct file *file, loff_t start, loff_t end, int datas
 {
 	struct inode *inode = file_inode(file);
 	int err;
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 	err = ps3flash_writeback(ps3flash_dev);
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	return err;
 }
 
@@ -397,7 +361,7 @@ static int ps3flash_probe(struct ps3_system_bus_device *_dev)
 
 	ps3flash_dev = dev;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv) {
 		error = -ENOMEM;
 		goto fail;
@@ -439,7 +403,7 @@ fail:
 	return error;
 }
 
-static int ps3flash_remove(struct ps3_system_bus_device *_dev)
+static void ps3flash_remove(struct ps3_system_bus_device *_dev)
 {
 	struct ps3_storage_device *dev = to_ps3_storage_device(&_dev->core);
 
@@ -449,7 +413,6 @@ static int ps3flash_remove(struct ps3_system_bus_device *_dev)
 	kfree(ps3_system_bus_get_drvdata(&dev->sbd));
 	ps3_system_bus_set_drvdata(&dev->sbd, NULL);
 	ps3flash_dev = NULL;
-	return 0;
 }
 
 

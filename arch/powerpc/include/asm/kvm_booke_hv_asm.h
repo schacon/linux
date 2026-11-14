@@ -1,15 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright 2010-2011 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License, version 2, as
- * published by the Free Software Foundation.
  */
 
 #ifndef ASM_KVM_BOOKE_HV_ASM_H
 #define ASM_KVM_BOOKE_HV_ASM_H
 
-#ifdef __ASSEMBLY__
+#include <asm/feature-fixups.h>
+
+#ifdef __ASSEMBLER__
 
 /*
  * All exceptions from guest state must go through KVM
@@ -36,26 +35,21 @@
  *   *(r8 + GPR11) = saved r11
  *
  * 64-bit host
- * Expected inputs (GEN/GDBELL/DBG/MC exception types):
+ * Expected inputs (GEN/GDBELL/DBG/CRIT/MC exception types):
  *  r10 = saved CR
  *  r13 = PACA_POINTER
  *  *(r13 + PACA_EX##type + EX_R10) = saved r10
  *  *(r13 + PACA_EX##type + EX_R11) = saved r11
  *  SPRN_SPRG_##type##_SCRATCH = saved r13
  *
-  * Expected inputs (CRIT exception type):
- *  r10 = saved CR
- *  r13 = PACA_POINTER
- *  *(r13 + PACA_EX##type + EX_R10) = saved r10
- *  *(r13 + PACA_EX##type + EX_R11) = saved r11
- *  *(r13 + PACA_EX##type + EX_R13) = saved r13
- *
  * Expected inputs (TLB exception type):
  *  r10 = saved CR
+ *  r12 = extlb pointer
  *  r13 = PACA_POINTER
- *  *(r13 + PACA_EX##type + EX_TLB_R10) = saved r10
- *  *(r13 + PACA_EX##type + EX_TLB_R11) = saved r11
- *  SPRN_SPRG_GEN_SCRATCH = saved r13
+ *  *(r12 + EX_TLB_R10) = saved r10
+ *  *(r12 + EX_TLB_R11) = saved r11
+ *  *(r12 + EX_TLB_R13) = saved r13
+ *  SPRN_SPRG_GEN_SCRATCH = saved r12
  *
  * Only the bolted version of TLB miss exception handlers is supported now.
  */
@@ -70,5 +64,5 @@ END_FTR_SECTION_IFSET(CPU_FTR_EMB_HV)
 #endif
 .endm
 
-#endif /*__ASSEMBLY__ */
+#endif /*__ASSEMBLER__ */
 #endif /* ASM_KVM_BOOKE_HV_ASM_H */

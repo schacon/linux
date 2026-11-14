@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * asc7621.c - Part of lm_sensors, Linux kernel modules for hardware monitoring
  * Copyright (c) 2007, 2010 George Joseph  <george.joseph@fairview5.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/module.h>
@@ -90,7 +77,7 @@ struct asc7621_data {
 	struct i2c_client client;
 	struct device *class_dev;
 	struct mutex update_lock;
-	int valid;		/* !=0 if following fields are valid */
+	bool valid;		/* true if following fields are valid */
 	unsigned long last_high_reading;	/* In jiffies */
 	unsigned long last_low_reading;		/* In jiffies */
 	/*
@@ -138,7 +125,7 @@ static inline u8 read_byte(struct i2c_client *client, u8 reg)
 		dev_err(&client->dev,
 			"Unable to read from register 0x%02x.\n", reg);
 		return 0;
-	};
+	}
 	return res & 0xff;
 }
 
@@ -149,7 +136,7 @@ static inline int write_byte(struct i2c_client *client, u8 reg, u8 data)
 		dev_err(&client->dev,
 			"Unable to write value 0x%02x to register 0x%02x.\n",
 			data, reg);
-	};
+	}
 	return res;
 }
 
@@ -300,7 +287,7 @@ static ssize_t store_fan16(struct device *dev,
  * respectively. That doesn't mean that's what the motherboard provides. :)
  */
 
-static int asc7621_in_scaling[] = {
+static const int asc7621_in_scaling[] = {
 	2500, 2250, 3300, 5000, 12000
 };
 
@@ -451,7 +438,7 @@ static ssize_t store_temp62(struct device *dev,
  * hwmon specs, we synthesize the auto_point_2 from them.
  */
 
-static u32 asc7621_range_map[] = {
+static const u32 asc7621_range_map[] = {
 	2000, 2500, 3330, 4000, 5000, 6670, 8000, 10000,
 	13330, 16000, 20000, 26670, 32000, 40000, 53330, 80000,
 };
@@ -512,7 +499,7 @@ static ssize_t show_pwm_ac(struct device *dev,
 {
 	SETUP_SHOW_DATA_PARAM(dev, attr);
 	u8 config, altbit, regval;
-	u8 map[] = {
+	static const u8 map[] = {
 		0x01, 0x02, 0x04, 0x1f, 0x00, 0x06, 0x07, 0x10,
 		0x08, 0x0f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f
 	};
@@ -533,7 +520,7 @@ static ssize_t store_pwm_ac(struct device *dev,
 	SETUP_STORE_DATA_PARAM(dev, attr);
 	unsigned long reqval;
 	u8 currval, config, altbit, newval;
-	u16 map[] = {
+	static const u16 map[] = {
 		0x04, 0x00, 0x01, 0xff, 0x02, 0xff, 0x05, 0x06,
 		0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f,
 		0x07, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -579,7 +566,6 @@ static ssize_t show_pwm_enable(struct device *dev,
 	mutex_unlock(&data->update_lock);
 
 	val = config | (altbit << 3);
-	newval = 0;
 
 	if (val == 3 || val >= 10)
 		newval = 255;
@@ -651,7 +637,7 @@ static ssize_t store_pwm_enable(struct device *dev,
 	return count;
 }
 
-static u32 asc7621_pwm_freq_map[] = {
+static const u32 asc7621_pwm_freq_map[] = {
 	10, 15, 23, 30, 38, 47, 62, 94,
 	23000, 24000, 25000, 26000, 27000, 28000, 29000, 30000
 };
@@ -700,7 +686,7 @@ static ssize_t store_pwm_freq(struct device *dev,
 	return count;
 }
 
-static u32 asc7621_pwm_auto_spinup_map[] =  {
+static const u32 asc7621_pwm_auto_spinup_map[] =  {
 	0, 100, 250, 400, 700, 1000, 2000, 4000
 };
 
@@ -749,7 +735,7 @@ static ssize_t store_pwm_ast(struct device *dev,
 	return count;
 }
 
-static u32 asc7621_temp_smoothing_time_map[] = {
+static const u32 asc7621_temp_smoothing_time_map[] = {
 	35000, 17600, 11800, 7000, 4400, 3000, 1600, 800
 };
 
@@ -1030,7 +1016,7 @@ static struct asc7621_data *asc7621_update_device(struct device *dev)
 			}
 		}
 		data->last_high_reading = jiffies;
-	};			/* last_reading */
+	}			/* last_reading */
 
 	/* Read all the low priority registers. */
 
@@ -1044,9 +1030,9 @@ static struct asc7621_data *asc7621_update_device(struct device *dev)
 			}
 		}
 		data->last_low_reading = jiffies;
-	};			/* last_reading */
+	}			/* last_reading */
 
-	data->valid = 1;
+	data->valid = true;
 
 	mutex_unlock(&data->update_lock);
 
@@ -1084,11 +1070,11 @@ static void asc7621_init_client(struct i2c_client *client)
 		dev_err(&client->dev,
 			"Client (%d,0x%02x) config is locked.\n",
 			i2c_adapter_id(client->adapter), client->addr);
-	};
+	}
 	if (!(value & 0x04)) {
 		dev_err(&client->dev, "Client (%d,0x%02x) is not ready.\n",
 			i2c_adapter_id(client->adapter), client->addr);
-	};
+	}
 
 /*
  * Start monitoring
@@ -1101,7 +1087,7 @@ static void asc7621_init_client(struct i2c_client *client)
 }
 
 static int
-asc7621_probe(struct i2c_client *client, const struct i2c_device_id *id)
+asc7621_probe(struct i2c_client *client)
 {
 	struct asc7621_data *data;
 	int i, err;
@@ -1109,13 +1095,11 @@ asc7621_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -EIO;
 
-	data = devm_kzalloc(&client->dev, sizeof(struct asc7621_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&client->dev, struct asc7621_data);
 	if (data == NULL)
 		return -ENOMEM;
 
 	i2c_set_clientdata(client, data);
-	data->valid = 0;
 	mutex_init(&data->update_lock);
 
 	/* Initialize the asc7621 chip */
@@ -1168,7 +1152,7 @@ static int asc7621_detect(struct i2c_client *client,
 
 		if (company == asc7621_chips[chip_index].company_id &&
 		    verstep == asc7621_chips[chip_index].verstep_id) {
-			strlcpy(info->type, asc7621_chips[chip_index].name,
+			strscpy(info->type, asc7621_chips[chip_index].name,
 				I2C_NAME_SIZE);
 
 			dev_info(&adapter->dev, "Matched %s at 0x%02x\n",
@@ -1180,7 +1164,7 @@ static int asc7621_detect(struct i2c_client *client,
 	return -ENODEV;
 }
 
-static int asc7621_remove(struct i2c_client *client)
+static void asc7621_remove(struct i2c_client *client)
 {
 	struct asc7621_data *data = i2c_get_clientdata(client);
 	int i;
@@ -1191,14 +1175,12 @@ static int asc7621_remove(struct i2c_client *client)
 		device_remove_file(&client->dev,
 				   &(asc7621_params[i].sda.dev_attr));
 	}
-
-	return 0;
 }
 
 static const struct i2c_device_id asc7621_id[] = {
-	{"asc7621", asc7621},
-	{"asc7621a", asc7621a},
-	{},
+	{ .name = "asc7621", .driver_data = asc7621 },
+	{ .name = "asc7621a", .driver_data = asc7621a },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, asc7621_id);

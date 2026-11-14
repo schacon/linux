@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * NetLabel System
  *
@@ -5,26 +6,10 @@
  * protocols such as CIPSO and RIPSO.
  *
  * Author: Paul Moore <paul@paul-moore.com>
- *
  */
 
 /*
  * (c) Copyright Hewlett-Packard Development Company, L.P., 2006, 2008
- *
- * This program is free software;  you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY;  without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
- * the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program;  if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
  */
 
 #ifndef _NETLABEL_H
@@ -38,13 +23,14 @@
 #include <linux/in6.h>
 #include <net/netlink.h>
 #include <net/request_sock.h>
-#include <linux/atomic.h>
+#include <linux/refcount.h>
 
 struct cipso_v4_doi;
+struct calipso_doi;
 
 /*
  * NetLabel - A management interface for maintaining network packet label
- *            mapping tables for explicit packet labling protocols.
+ *            mapping tables for explicit packet labeling protocols.
  *
  * Network protocols such as CIPSO and RIPSO require a label translation layer
  * to convert the label on the packet into something meaningful on the host
@@ -95,6 +81,8 @@ struct cipso_v4_doi;
 #define NETLBL_NLTYPE_UNLABELED_NAME    "NLBL_UNLBL"
 #define NETLBL_NLTYPE_ADDRSELECT        6
 #define NETLBL_NLTYPE_ADDRSELECT_NAME   "NLBL_ADRSEL"
+#define NETLBL_NLTYPE_CALIPSO           7
+#define NETLBL_NLTYPE_CALIPSO_NAME      "NLBL_CALIPSO"
 
 /*
  * NetLabel - Kernel API for accessing the network packet label mappings.
@@ -109,9 +97,9 @@ struct cipso_v4_doi;
 
 /* NetLabel audit information */
 struct netlbl_audit {
-	u32 secid;
+	struct lsm_prop prop;
 	kuid_t loginuid;
-	u32 sessionid;
+	unsigned int sessionid;
 };
 
 /*
@@ -134,13 +122,13 @@ struct netlbl_audit {
  *
  */
 struct netlbl_lsm_cache {
-	atomic_t refcount;
+	refcount_t refcount;
 	void (*free) (const void *data);
 	void *data;
 };
 
 /**
- * struct netlbl_lsm_secattr_catmap - NetLabel LSM secattr category bitmap
+ * struct netlbl_lsm_catmap - NetLabel LSM secattr category bitmap
  * @startbit: the value of the lowest order bit in the bitmap
  * @bitmap: the category bitmap
  * @next: pointer to the next bitmap "node" or NULL
@@ -157,16 +145,15 @@ struct netlbl_lsm_cache {
  * processing.
  *
  */
-#define NETLBL_CATMAP_MAPTYPE           u64
 #define NETLBL_CATMAP_MAPCNT            4
-#define NETLBL_CATMAP_MAPSIZE           (sizeof(NETLBL_CATMAP_MAPTYPE) * 8)
+#define NETLBL_CATMAP_MAPSIZE           (sizeof(u64) * 8)
 #define NETLBL_CATMAP_SIZE              (NETLBL_CATMAP_MAPSIZE * \
 					 NETLBL_CATMAP_MAPCNT)
-#define NETLBL_CATMAP_BIT               (NETLBL_CATMAP_MAPTYPE)0x01
-struct netlbl_lsm_secattr_catmap {
+#define NETLBL_CATMAP_BIT               ((u64)0x01)
+struct netlbl_lsm_catmap {
 	u32 startbit;
-	NETLBL_CATMAP_MAPTYPE bitmap[NETLBL_CATMAP_MAPCNT];
-	struct netlbl_lsm_secattr_catmap *next;
+	u64 bitmap[NETLBL_CATMAP_MAPCNT];
+	struct netlbl_lsm_catmap *next;
 };
 
 /**
@@ -210,11 +197,69 @@ struct netlbl_lsm_secattr {
 	struct netlbl_lsm_cache *cache;
 	struct {
 		struct {
-			struct netlbl_lsm_secattr_catmap *cat;
+			struct netlbl_lsm_catmap *cat;
 			u32 lvl;
 		} mls;
 		u32 secid;
 	} attr;
+};
+
+/**
+ * struct netlbl_calipso_ops - NetLabel CALIPSO operations
+ * @doi_add: add a CALIPSO DOI
+ * @doi_free: free a CALIPSO DOI
+ * @doi_remove: remove a CALIPSO DOI
+ * @doi_getdef: returns a reference to a DOI
+ * @doi_putdef: releases a reference of a DOI
+ * @doi_walk: enumerate the DOI list
+ * @sock_getattr: retrieve the socket's attr
+ * @sock_setattr: set the socket's attr
+ * @sock_delattr: remove the socket's attr
+ * @req_setattr: set the req socket's attr
+ * @req_delattr: remove the req socket's attr
+ * @opt_getattr: retrieve attr from memory block
+ * @skbuff_optptr: find option in packet
+ * @skbuff_setattr: set the skbuff's attr
+ * @skbuff_delattr: remove the skbuff's attr
+ * @cache_invalidate: invalidate cache
+ * @cache_add: add cache entry
+ *
+ * Description:
+ * This structure is filled out by the CALIPSO engine and passed
+ * to the NetLabel core via a call to netlbl_calipso_ops_register().
+ * It enables the CALIPSO engine (and hence IPv6) to be compiled
+ * as a module.
+ */
+struct netlbl_calipso_ops {
+	int (*doi_add)(struct calipso_doi *doi_def,
+		       struct netlbl_audit *audit_info);
+	void (*doi_free)(struct calipso_doi *doi_def);
+	int (*doi_remove)(u32 doi, struct netlbl_audit *audit_info);
+	struct calipso_doi *(*doi_getdef)(u32 doi);
+	void (*doi_putdef)(struct calipso_doi *doi_def);
+	int (*doi_walk)(u32 *skip_cnt,
+			int (*callback)(struct calipso_doi *doi_def, void *arg),
+			void *cb_arg);
+	int (*sock_getattr)(struct sock *sk,
+			    struct netlbl_lsm_secattr *secattr);
+	int (*sock_setattr)(struct sock *sk,
+			    const struct calipso_doi *doi_def,
+			    const struct netlbl_lsm_secattr *secattr);
+	void (*sock_delattr)(struct sock *sk);
+	int (*req_setattr)(struct request_sock *req,
+			   const struct calipso_doi *doi_def,
+			   const struct netlbl_lsm_secattr *secattr);
+	void (*req_delattr)(struct request_sock *req);
+	int (*opt_getattr)(const unsigned char *calipso,
+			   struct netlbl_lsm_secattr *secattr);
+	unsigned char *(*skbuff_optptr)(const struct sk_buff *skb);
+	int (*skbuff_setattr)(struct sk_buff *skb,
+			      const struct calipso_doi *doi_def,
+			      const struct netlbl_lsm_secattr *secattr);
+	int (*skbuff_delattr)(struct sk_buff *skb);
+	void (*cache_invalidate)(void);
+	int (*cache_add)(const unsigned char *calipso_ptr,
+			 const struct netlbl_lsm_secattr *secattr);
 };
 
 /*
@@ -230,15 +275,17 @@ struct netlbl_lsm_secattr {
  * on success, NULL on failure.
  *
  */
-static inline struct netlbl_lsm_cache *netlbl_secattr_cache_alloc(gfp_t flags)
+static inline struct netlbl_lsm_cache *netlbl_secattr_cache_alloc_noprof(gfp_t flags)
 {
 	struct netlbl_lsm_cache *cache;
 
-	cache = kzalloc(sizeof(*cache), flags);
+	cache = kzalloc_noprof(sizeof(*cache), flags);
 	if (cache)
-		atomic_set(&cache->refcount, 1);
+		refcount_set(&cache->refcount, 1);
 	return cache;
 }
+#define netlbl_secattr_cache_alloc(...)	\
+		alloc_hooks(netlbl_secattr_cache_alloc_noprof(__VA_ARGS__))
 
 /**
  * netlbl_secattr_cache_free - Frees a netlbl_lsm_cache struct
@@ -250,7 +297,7 @@ static inline struct netlbl_lsm_cache *netlbl_secattr_cache_alloc(gfp_t flags)
  */
 static inline void netlbl_secattr_cache_free(struct netlbl_lsm_cache *cache)
 {
-	if (!atomic_dec_and_test(&cache->refcount))
+	if (!refcount_dec_and_test(&cache->refcount))
 		return;
 
 	if (cache->free)
@@ -259,7 +306,7 @@ static inline void netlbl_secattr_cache_free(struct netlbl_lsm_cache *cache)
 }
 
 /**
- * netlbl_secattr_catmap_alloc - Allocate a LSM secattr catmap
+ * netlbl_catmap_alloc - Allocate a LSM secattr catmap
  * @flags: memory allocation flags
  *
  * Description:
@@ -267,30 +314,29 @@ static inline void netlbl_secattr_cache_free(struct netlbl_lsm_cache *cache)
  * on failure.
  *
  */
-static inline struct netlbl_lsm_secattr_catmap *netlbl_secattr_catmap_alloc(
-	                                                           gfp_t flags)
+static inline struct netlbl_lsm_catmap *netlbl_catmap_alloc_noprof(gfp_t flags)
 {
-	return kzalloc(sizeof(struct netlbl_lsm_secattr_catmap), flags);
+	return kzalloc_noprof(sizeof(struct netlbl_lsm_catmap), flags);
 }
+#define netlbl_catmap_alloc(...)	alloc_hooks(netlbl_catmap_alloc_noprof(__VA_ARGS__))
 
 /**
- * netlbl_secattr_catmap_free - Free a LSM secattr catmap
+ * netlbl_catmap_free - Free a LSM secattr catmap
  * @catmap: the category bitmap
  *
  * Description:
  * Free a LSM secattr catmap.
  *
  */
-static inline void netlbl_secattr_catmap_free(
-	                              struct netlbl_lsm_secattr_catmap *catmap)
+static inline void netlbl_catmap_free(struct netlbl_lsm_catmap *catmap)
 {
-	struct netlbl_lsm_secattr_catmap *iter;
+	struct netlbl_lsm_catmap *iter;
 
-	do {
+	while (catmap) {
 		iter = catmap;
 		catmap = catmap->next;
 		kfree(iter);
-	} while (catmap);
+	}
 }
 
 /**
@@ -322,7 +368,7 @@ static inline void netlbl_secattr_destroy(struct netlbl_lsm_secattr *secattr)
 	if (secattr->flags & NETLBL_SECATTR_CACHE)
 		netlbl_secattr_cache_free(secattr->cache);
 	if (secattr->flags & NETLBL_SECATTR_MLS_CAT)
-		netlbl_secattr_catmap_free(secattr->attr.mls.cat);
+		netlbl_catmap_free(secattr->attr.mls.cat);
 }
 
 /**
@@ -334,10 +380,11 @@ static inline void netlbl_secattr_destroy(struct netlbl_lsm_secattr *secattr)
  * pointer on success, or NULL on failure.
  *
  */
-static inline struct netlbl_lsm_secattr *netlbl_secattr_alloc(gfp_t flags)
+static inline struct netlbl_lsm_secattr *netlbl_secattr_alloc_noprof(gfp_t flags)
 {
-	return kzalloc(sizeof(struct netlbl_lsm_secattr), flags);
+	return kzalloc_noprof(sizeof(struct netlbl_lsm_secattr), flags);
 }
+#define netlbl_secattr_alloc(...)	alloc_hooks(netlbl_secattr_alloc_noprof(__VA_ARGS__))
 
 /**
  * netlbl_secattr_free - Frees a netlbl_lsm_secattr struct
@@ -388,20 +435,39 @@ int netlbl_cfg_cipsov4_map_add(u32 doi,
 			       const struct in_addr *addr,
 			       const struct in_addr *mask,
 			       struct netlbl_audit *audit_info);
+int netlbl_cfg_calipso_add(struct calipso_doi *doi_def,
+			   struct netlbl_audit *audit_info);
+void netlbl_cfg_calipso_del(u32 doi, struct netlbl_audit *audit_info);
+int netlbl_cfg_calipso_map_add(u32 doi,
+			       const char *domain,
+			       const struct in6_addr *addr,
+			       const struct in6_addr *mask,
+			       struct netlbl_audit *audit_info);
 /*
  * LSM security attribute operations
  */
-int netlbl_secattr_catmap_walk(struct netlbl_lsm_secattr_catmap *catmap,
-			       u32 offset);
-int netlbl_secattr_catmap_walk_rng(struct netlbl_lsm_secattr_catmap *catmap,
-				   u32 offset);
-int netlbl_secattr_catmap_setbit(struct netlbl_lsm_secattr_catmap *catmap,
-				 u32 bit,
-				 gfp_t flags);
-int netlbl_secattr_catmap_setrng(struct netlbl_lsm_secattr_catmap *catmap,
-				 u32 start,
-				 u32 end,
-				 gfp_t flags);
+int netlbl_catmap_walk(struct netlbl_lsm_catmap *catmap, u32 offset);
+int netlbl_catmap_walkrng(struct netlbl_lsm_catmap *catmap, u32 offset);
+int netlbl_catmap_getlong(struct netlbl_lsm_catmap *catmap,
+			  u32 *offset,
+			  unsigned long *bitmap);
+int netlbl_catmap_setbit(struct netlbl_lsm_catmap **catmap,
+			 u32 bit,
+			 gfp_t flags);
+int netlbl_catmap_setrng(struct netlbl_lsm_catmap **catmap,
+			 u32 start,
+			 u32 end,
+			 gfp_t flags);
+int netlbl_catmap_setlong(struct netlbl_lsm_catmap **catmap,
+			  u32 offset,
+			  unsigned long bitmap,
+			  gfp_t flags);
+
+/* Bitmap functions
+ */
+int netlbl_bitmap_walk(const unsigned char *bitmap, u32 bitmap_len,
+		       u32 offset, u8 state);
+void netlbl_bitmap_setbit(unsigned char *bitmap, u32 bit, u8 state);
 
 /*
  * LSM protocol operations (NetLabel LSM/kernel API)
@@ -409,8 +475,9 @@ int netlbl_secattr_catmap_setrng(struct netlbl_lsm_secattr_catmap *catmap,
 int netlbl_enabled(void);
 int netlbl_sock_setattr(struct sock *sk,
 			u16 family,
-			const struct netlbl_lsm_secattr *secattr);
-void netlbl_sock_delattr(struct sock *sk);
+			const struct netlbl_lsm_secattr *secattr,
+			bool sk_locked);
+int netlbl_sock_delattr(struct sock *sk);
 int netlbl_sock_getattr(struct sock *sk,
 			struct netlbl_lsm_secattr *secattr);
 int netlbl_conn_setattr(struct sock *sk,
@@ -418,20 +485,21 @@ int netlbl_conn_setattr(struct sock *sk,
 			const struct netlbl_lsm_secattr *secattr);
 int netlbl_req_setattr(struct request_sock *req,
 		       const struct netlbl_lsm_secattr *secattr);
-void netlbl_req_delattr(struct request_sock *req);
+int netlbl_req_delattr(struct request_sock *req);
 int netlbl_skbuff_setattr(struct sk_buff *skb,
 			  u16 family,
 			  const struct netlbl_lsm_secattr *secattr);
 int netlbl_skbuff_getattr(const struct sk_buff *skb,
 			  u16 family,
 			  struct netlbl_lsm_secattr *secattr);
-void netlbl_skbuff_err(struct sk_buff *skb, int error, int gateway);
+void netlbl_skbuff_err(struct sk_buff *skb, u16 family, int error, int gateway);
+bool netlbl_sk_lock_check(struct sock *sk);
 
 /*
  * LSM label mapping cache operations
  */
 void netlbl_cache_invalidate(void);
-int netlbl_cache_add(const struct sk_buff *skb,
+int netlbl_cache_add(const struct sk_buff *skb, u16 family,
 		     const struct netlbl_lsm_secattr *secattr);
 
 /*
@@ -493,30 +561,57 @@ static inline int netlbl_cfg_cipsov4_map_add(u32 doi,
 {
 	return -ENOSYS;
 }
-static inline int netlbl_secattr_catmap_walk(
-	                              struct netlbl_lsm_secattr_catmap *catmap,
-				      u32 offset)
+static inline int netlbl_cfg_calipso_add(struct calipso_doi *doi_def,
+					 struct netlbl_audit *audit_info)
+{
+	return -ENOSYS;
+}
+static inline void netlbl_cfg_calipso_del(u32 doi,
+					  struct netlbl_audit *audit_info)
+{
+	return;
+}
+static inline int netlbl_cfg_calipso_map_add(u32 doi,
+					     const char *domain,
+					     const struct in6_addr *addr,
+					     const struct in6_addr *mask,
+					     struct netlbl_audit *audit_info)
+{
+	return -ENOSYS;
+}
+static inline int netlbl_catmap_walk(struct netlbl_lsm_catmap *catmap,
+				     u32 offset)
 {
 	return -ENOENT;
 }
-static inline int netlbl_secattr_catmap_walk_rng(
-				      struct netlbl_lsm_secattr_catmap *catmap,
-				      u32 offset)
+static inline int netlbl_catmap_walkrng(struct netlbl_lsm_catmap *catmap,
+					u32 offset)
 {
 	return -ENOENT;
 }
-static inline int netlbl_secattr_catmap_setbit(
-	                              struct netlbl_lsm_secattr_catmap *catmap,
-				      u32 bit,
-				      gfp_t flags)
+static inline int netlbl_catmap_getlong(struct netlbl_lsm_catmap *catmap,
+					u32 *offset,
+					unsigned long *bitmap)
 {
 	return 0;
 }
-static inline int netlbl_secattr_catmap_setrng(
-	                              struct netlbl_lsm_secattr_catmap *catmap,
-				      u32 start,
-				      u32 end,
-				      gfp_t flags)
+static inline int netlbl_catmap_setbit(struct netlbl_lsm_catmap **catmap,
+				       u32 bit,
+				       gfp_t flags)
+{
+	return 0;
+}
+static inline int netlbl_catmap_setrng(struct netlbl_lsm_catmap **catmap,
+				       u32 start,
+				       u32 end,
+				       gfp_t flags)
+{
+	return 0;
+}
+static inline int netlbl_catmap_setlong(struct netlbl_lsm_catmap **catmap,
+					u32 offset,
+					unsigned long bitmap,
+					gfp_t flags)
 {
 	return 0;
 }
@@ -526,12 +621,14 @@ static inline int netlbl_enabled(void)
 }
 static inline int netlbl_sock_setattr(struct sock *sk,
 				      u16 family,
-				      const struct netlbl_lsm_secattr *secattr)
+				      const struct netlbl_lsm_secattr *secattr,
+				      bool sk_locked)
 {
 	return -ENOSYS;
 }
-static inline void netlbl_sock_delattr(struct sock *sk)
+static inline int netlbl_sock_delattr(struct sock *sk)
 {
+	return 0;
 }
 static inline int netlbl_sock_getattr(struct sock *sk,
 				      struct netlbl_lsm_secattr *secattr)
@@ -549,9 +646,9 @@ static inline int netlbl_req_setattr(struct request_sock *req,
 {
 	return -ENOSYS;
 }
-static inline void netlbl_req_delattr(struct request_sock *req)
+static inline int netlbl_req_delattr(struct request_sock *req)
 {
-	return;
+	return 0;
 }
 static inline int netlbl_skbuff_setattr(struct sk_buff *skb,
 				      u16 family,
@@ -575,7 +672,7 @@ static inline void netlbl_cache_invalidate(void)
 {
 	return;
 }
-static inline int netlbl_cache_add(const struct sk_buff *skb,
+static inline int netlbl_cache_add(const struct sk_buff *skb, u16 family,
 				   const struct netlbl_lsm_secattr *secattr)
 {
 	return 0;
@@ -585,6 +682,14 @@ static inline struct audit_buffer *netlbl_audit_start(int type,
 {
 	return NULL;
 }
+
+static inline bool netlbl_sk_lock_check(struct sock *sk)
+{
+	return true;
+}
 #endif /* CONFIG_NETLABEL */
+
+const struct netlbl_calipso_ops *
+netlbl_calipso_ops_register(const struct netlbl_calipso_ops *ops);
 
 #endif /* _NETLABEL_H */

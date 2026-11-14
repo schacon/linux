@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * cardbus.c -- 16-bit PCMCIA core support
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * The initial developer of the original code is David A. Hinds
  * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
@@ -25,7 +22,9 @@
 #include <linux/pci.h>
 
 #include <pcmcia/ss.h>
+#include <pcmcia/cistpl.h>
 
+#include "cs_internal.h"
 
 static void cardbus_config_irq_and_cls(struct pci_bus *bus, int irq)
 {
@@ -70,15 +69,14 @@ int __ref cb_alloc(struct pcmcia_socket *s)
 	struct pci_dev *dev;
 	unsigned int max, pass;
 
+	pci_lock_rescan_remove();
+
 	s->functions = pci_scan_slot(bus, PCI_DEVFN(0, 0));
-	pci_fixup_cardbus(bus);
 
 	max = bus->busn_res.start;
 	for (pass = 0; pass < 2; pass++)
-		list_for_each_entry(dev, &bus->devices, bus_list)
-			if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE ||
-			    dev->hdr_type == PCI_HEADER_TYPE_CARDBUS)
-				max = pci_scan_bridge(bus, dev, max, pass);
+		for_each_pci_bridge(dev, bus)
+			max = pci_scan_bridge(bus, dev, max, pass);
 
 	/*
 	 * Size all resources below the CardBus controller.
@@ -91,9 +89,9 @@ int __ref cb_alloc(struct pcmcia_socket *s)
 	if (s->tune_bridge)
 		s->tune_bridge(s, bus);
 
-	pci_enable_bridges(bus);
 	pci_bus_add_devices(bus);
 
+	pci_unlock_rescan_remove();
 	return 0;
 }
 
@@ -116,6 +114,10 @@ void cb_free(struct pcmcia_socket *s)
 	if (!bus)
 		return;
 
+	pci_lock_rescan_remove();
+
 	list_for_each_entry_safe(dev, tmp, &bus->devices, bus_list)
 		pci_stop_and_remove_bus_device(dev);
+
+	pci_unlock_rescan_remove();
 }

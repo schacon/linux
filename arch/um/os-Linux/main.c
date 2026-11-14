@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
+ * Copyright (C) 2015 Thomas Meyer (thomas@m3y3r.de)
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL
  */
 
 #include <stdio.h>
@@ -10,19 +11,17 @@
 #include <signal.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/personality.h>
 #include <as-layout.h>
 #include <init.h>
 #include <kern_util.h>
 #include <os.h>
 #include <um_malloc.h>
+#include "internal.h"
 
-#define PGD_BOUND (4 * 1024 * 1024)
 #define STACKSIZE (8 * 1024 * 1024)
-#define THREAD_NAME_LEN (256)
 
-long elf_aux_hwcap;
-
-static void set_stklim(void)
+static void __init set_stklim(void)
 {
 	struct rlimit lim;
 
@@ -39,24 +38,13 @@ static void set_stklim(void)
 	}
 }
 
-static __init void do_uml_initcalls(void)
-{
-	initcall_t *call;
-
-	call = &__uml_initcall_start;
-	while (call < &__uml_initcall_end) {
-		(*call)();
-		call++;
-	}
-}
-
 static void last_ditch_exit(int sig)
 {
 	uml_cleanup();
 	exit(1);
 }
 
-static void install_fatal_handler(int sig)
+static void __init install_fatal_handler(int sig)
 {
 	struct sigaction action;
 
@@ -73,15 +61,15 @@ static void install_fatal_handler(int sig)
 	action.sa_restorer = NULL;
 	action.sa_handler = last_ditch_exit;
 	if (sigaction(sig, &action, NULL) < 0) {
-		printf("failed to install handler for signal %d - errno = %d\n",
-		       sig, errno);
+		os_warn("failed to install handler for signal %d "
+			"- errno = %d\n", sig, errno);
 		exit(1);
 	}
 }
 
 #define UML_LIB_PATH	":" OS_LIB_PATH "/uml"
 
-static void setup_env_path(void)
+static void __init setup_env_path(void)
 {
 	char *new_path = NULL;
 	char *old_path = NULL;
@@ -112,16 +100,32 @@ static void setup_env_path(void)
 	}
 }
 
-extern void scan_elf_aux( char **envp);
+static char **new_argv;
 
 int __init main(int argc, char **argv, char **envp)
 {
-	char **new_argv;
-	int ret, i, err;
+	int ret, i;
+
+	/* Disable randomization and re-exec if it was changed successfully */
+	ret = personality(PER_LINUX | ADDR_NO_RANDOMIZE);
+	if (ret >= 0 && (ret & (PER_LINUX | ADDR_NO_RANDOMIZE)) !=
+			 (PER_LINUX | ADDR_NO_RANDOMIZE)) {
+		char buf[4096] = {};
+		ssize_t ret;
+
+		ret = readlink("/proc/self/exe", buf, sizeof(buf));
+		if (ret < 0 || ret >= sizeof(buf)) {
+			perror("readlink failure");
+			exit(1);
+		}
+		execve(buf, argv, envp);
+	}
 
 	set_stklim();
 
 	setup_env_path();
+
+	setsid();
 
 	new_argv = malloc((argc + 1) * sizeof(char *));
 	if (new_argv == NULL) {
@@ -144,12 +148,15 @@ int __init main(int argc, char **argv, char **envp)
 	install_fatal_handler(SIGINT);
 	install_fatal_handler(SIGTERM);
 
-#ifdef CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA
 	scan_elf_aux(envp);
-#endif
 
-	do_uml_initcalls();
-	ret = linux_main(argc, argv);
+	change_sig(SIGPIPE, 0);
+	linux_main(argc, argv, envp);
+}
+
+void os_exit(bool reboot)
+{
+	int err;
 
 	/*
 	 * Disable SIGPROF - I have no idea why libc doesn't do this or turn
@@ -160,18 +167,18 @@ int __init main(int argc, char **argv, char **envp)
 
 	/*
 	 * This signal stuff used to be in the reboot case.  However,
-	 * sometimes a SIGVTALRM can come in when we're halting (reproducably
+	 * sometimes a timer signal can come in when we're halting (reproducably
 	 * when writing out gcov information, presumably because that takes
 	 * some time) and cause a segfault.
 	 */
 
-	/* stop timers and set SIGVTALRM to be ignored */
-	disable_timer();
+	/* stop timers and set timer signal to be ignored */
+	os_timer_disable(0);
 
 	/* disable SIGIO for the fds and set SIGIO to be ignored */
 	err = deactivate_all_fds();
 	if (err)
-		printf("deactivate_all_fds failed, errno = %d\n", -err);
+		os_warn("deactivate_all_fds failed, errno = %d\n", -err);
 
 	/*
 	 * Let any pending signals fire now.  This ensures
@@ -180,18 +187,22 @@ int __init main(int argc, char **argv, char **envp)
 	 */
 	unblock_signals();
 
+	os_info("\n");
 	/* Reboot */
-	if (ret) {
-		printf("\n");
+	if (reboot) {
 		execvp(new_argv[0], new_argv);
 		perror("Failed to exec kernel");
-		ret = 1;
 	}
-	printf("\n");
-	return uml_exitcode;
+	exit(uml_exitcode);
 }
 
 extern void *__real_malloc(int);
+extern void __real_free(void *);
+
+/* workaround for -Wmissing-prototypes warnings */
+void *__wrap_malloc(int size);
+void *__wrap_calloc(int n, int size);
+void __wrap_free(void *ptr);
 
 void *__wrap_malloc(int size)
 {
@@ -223,10 +234,6 @@ void *__wrap_calloc(int n, int size)
 	memset(ptr, 0, n * size);
 	return ptr;
 }
-
-extern void __real_free(void *);
-
-extern unsigned long high_physmem;
 
 void __wrap_free(void *ptr)
 {

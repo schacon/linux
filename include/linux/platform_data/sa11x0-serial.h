@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  Author: Nicolas Pitre
  *
@@ -9,7 +10,6 @@
 #define SA11X0_SERIAL_H
 
 struct uart_port;
-struct uart_info;
 
 /*
  * This is a temporary structure for registering these
@@ -26,8 +26,12 @@ struct sa1100_port_fns {
 void sa1100_register_uart_fns(struct sa1100_port_fns *fns);
 void sa1100_register_uart(int idx, int port);
 #else
-#define sa1100_register_uart_fns(fns) do { } while (0)
-#define sa1100_register_uart(idx,port) do { } while (0)
+static inline void sa1100_register_uart_fns(struct sa1100_port_fns *fns)
+{
+}
+static inline void sa1100_register_uart(int idx, int port)
+{
+}
 #endif
 
 #endif

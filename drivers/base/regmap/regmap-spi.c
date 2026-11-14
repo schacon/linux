@@ -1,18 +1,13 @@
-/*
- * Register map access API - SPI support
- *
- * Copyright 2011 Wolfson Microelectronics plc
- *
- * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
+// SPDX-License-Identifier: GPL-2.0
+//
+// Register map access API - SPI support
+//
+// Copyright 2011 Wolfson Microelectronics plc
+//
+// Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
 
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
-#include <linux/init.h>
 #include <linux/module.h>
 
 #include "internal.h"
@@ -73,7 +68,8 @@ static int regmap_spi_async_write(void *context,
 
 	spi_message_init(&async->m);
 	spi_message_add_tail(&async->t[0], &async->m);
-	spi_message_add_tail(&async->t[1], &async->m);
+	if (val)
+		spi_message_add_tail(&async->t[1], &async->m);
 
 	async->m.complete = regmap_spi_complete;
 	async->m.context = async;
@@ -85,7 +81,7 @@ static struct regmap_async *regmap_spi_async_alloc(void)
 {
 	struct regmap_async_spi *async_spi;
 
-	async_spi = kzalloc(sizeof(*async_spi), GFP_KERNEL);
+	async_spi = kzalloc_obj(*async_spi);
 	if (!async_spi)
 		return NULL;
 
@@ -102,46 +98,71 @@ static int regmap_spi_read(void *context,
 	return spi_write_then_read(spi, reg, reg_size, val, val_size);
 }
 
-static struct regmap_bus regmap_spi = {
+static const struct regmap_bus regmap_spi = {
 	.write = regmap_spi_write,
 	.gather_write = regmap_spi_gather_write,
 	.async_write = regmap_spi_async_write,
 	.async_alloc = regmap_spi_async_alloc,
 	.read = regmap_spi_read,
 	.read_flag_mask = 0x80,
+	.reg_format_endian_default = REGMAP_ENDIAN_BIG,
+	.val_format_endian_default = REGMAP_ENDIAN_BIG,
 };
 
-/**
- * regmap_init_spi(): Initialise register map
- *
- * @spi: Device that will be interacted with
- * @config: Configuration for register map
- *
- * The return value will be an ERR_PTR() on error or a valid pointer to
- * a struct regmap.
- */
-struct regmap *regmap_init_spi(struct spi_device *spi,
-			       const struct regmap_config *config)
+static const struct regmap_bus *regmap_get_spi_bus(struct spi_device *spi,
+						   const struct regmap_config *config)
 {
-	return regmap_init(&spi->dev, &regmap_spi, &spi->dev, config);
-}
-EXPORT_SYMBOL_GPL(regmap_init_spi);
+	size_t max_size = spi_max_transfer_size(spi);
+	size_t max_msg_size, reg_reserve_size;
+	struct regmap_bus *bus;
 
-/**
- * devm_regmap_init_spi(): Initialise register map
- *
- * @spi: Device that will be interacted with
- * @config: Configuration for register map
- *
- * The return value will be an ERR_PTR() on error or a valid pointer
- * to a struct regmap.  The map will be automatically freed by the
- * device management code.
- */
-struct regmap *devm_regmap_init_spi(struct spi_device *spi,
-				    const struct regmap_config *config)
+	if (max_size != SIZE_MAX) {
+		bus = kmemdup(&regmap_spi, sizeof(*bus), GFP_KERNEL);
+		if (!bus)
+			return ERR_PTR(-ENOMEM);
+
+		max_msg_size = spi_max_message_size(spi);
+		reg_reserve_size = (config->reg_bits + config->pad_bits) / BITS_PER_BYTE;
+		if (max_size + reg_reserve_size > max_msg_size)
+			max_size -= reg_reserve_size;
+
+		bus->free_on_exit = true;
+		bus->max_raw_read = max_size;
+		bus->max_raw_write = max_size;
+
+		return bus;
+	}
+
+	return &regmap_spi;
+}
+
+struct regmap *__regmap_init_spi(struct spi_device *spi,
+				 const struct regmap_config *config,
+				 struct lock_class_key *lock_key,
+				 const char *lock_name)
 {
-	return devm_regmap_init(&spi->dev, &regmap_spi, &spi->dev, config);
-}
-EXPORT_SYMBOL_GPL(devm_regmap_init_spi);
+	const struct regmap_bus *bus = regmap_get_spi_bus(spi, config);
 
+	if (IS_ERR(bus))
+		return ERR_CAST(bus);
+
+	return __regmap_init(&spi->dev, bus, &spi->dev, config, lock_key, lock_name);
+}
+EXPORT_SYMBOL_GPL(__regmap_init_spi);
+
+struct regmap *__devm_regmap_init_spi(struct spi_device *spi,
+				      const struct regmap_config *config,
+				      struct lock_class_key *lock_key,
+				      const char *lock_name)
+{
+	const struct regmap_bus *bus = regmap_get_spi_bus(spi, config);
+
+	if (IS_ERR(bus))
+		return ERR_CAST(bus);
+
+	return __devm_regmap_init(&spi->dev, bus, &spi->dev, config, lock_key, lock_name);
+}
+EXPORT_SYMBOL_GPL(__devm_regmap_init_spi);
+
+MODULE_DESCRIPTION("regmap SPI Module");
 MODULE_LICENSE("GPL");

@@ -1,22 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /******************************************************************************
  *  xusbatm.c -	dumb usbatm-based driver for modems initialized in userspace
  *
  *  Copyright (C) 2005 Duncan Sands, Roman Kagan (rkagan % mail ! ru)
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of the GNU General Public License as published by the Free
- *  Software Foundation; either version 2 of the License, or (at your option)
- *  any later version.
- *
- *  This program is distributed in the hope that it will be useful, but WITHOUT
- *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- *  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- *  more details.
- *
- *  You should have received a copy of the GNU General Public License along with
- *  this program; if not, write to the Free Software Foundation, Inc., 59
- *  Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- *
  ******************************************************************************/
 
 #include <linux/module.h>
@@ -73,7 +59,8 @@ static int xusbatm_capture_intf(struct usbatm_data *usbatm, struct usb_device *u
 		usb_err(usbatm, "%s: failed to claim interface %2d (%d)!\n", __func__, ifnum, ret);
 		return ret;
 	}
-	if ((ret = usb_set_interface(usb_dev, ifnum, altsetting))) {
+	ret = usb_set_interface(usb_dev, ifnum, altsetting);
+	if (ret) {
 		usb_err(usbatm, "%s: altsetting %2d for interface %2d failed (%d)!\n", __func__, altsetting, ifnum, ret);
 		return ret;
 	}
@@ -92,7 +79,7 @@ static int xusbatm_bind(struct usbatm_data *usbatm,
 			struct usb_interface *intf, const struct usb_device_id *id)
 {
 	struct usb_device *usb_dev = interface_to_usbdev(intf);
-	int drv_ix = id - xusbatm_usb_ids;
+	int drv_ix = id->driver_info;
 	int rx_alt = rx_altsetting[drv_ix];
 	int tx_alt = tx_altsetting[drv_ix];
 	struct usb_interface *rx_intf = xusbatm_find_intf(usb_dev, rx_alt, rx_endpoint[drv_ix]);
@@ -128,7 +115,8 @@ static int xusbatm_bind(struct usbatm_data *usbatm,
 			rx_intf->altsetting->desc.bInterfaceNumber,
 			tx_intf->altsetting->desc.bInterfaceNumber);
 
-	if ((ret = xusbatm_capture_intf(usbatm, usb_dev, rx_intf, rx_alt, rx_intf != intf)))
+	ret = xusbatm_capture_intf(usbatm, usb_dev, rx_intf, rx_alt, rx_intf != intf);
+	if (ret)
 		return ret;
 
 	if ((tx_intf != rx_intf) && (ret = xusbatm_capture_intf(usbatm, usb_dev, tx_intf, tx_alt, tx_intf != intf))) {
@@ -180,7 +168,8 @@ static struct usb_driver xusbatm_usb_driver = {
 	.name		= xusbatm_driver_name,
 	.probe		= xusbatm_usb_probe,
 	.disconnect	= usbatm_usb_disconnect,
-	.id_table	= xusbatm_usb_ids
+	.id_table	= xusbatm_usb_ids,
+	.no_dynamic_id	= 1,
 };
 
 static int __init xusbatm_init(void)
@@ -191,7 +180,7 @@ static int __init xusbatm_init(void)
 	    num_vendor != num_product ||
 	    num_vendor != num_rx_endpoint ||
 	    num_vendor != num_tx_endpoint) {
-		printk(KERN_WARNING "xusbatm: malformed module parameters\n");
+		pr_warn("xusbatm: malformed module parameters\n");
 		return -EINVAL;
 	}
 
@@ -202,6 +191,7 @@ static int __init xusbatm_init(void)
 		xusbatm_usb_ids[i].match_flags	= USB_DEVICE_ID_MATCH_DEVICE;
 		xusbatm_usb_ids[i].idVendor	= vendor[i];
 		xusbatm_usb_ids[i].idProduct	= product[i];
+		xusbatm_usb_ids[i].driver_info	= i;
 
 		xusbatm_drivers[i].driver_name	= xusbatm_driver_name;
 		xusbatm_drivers[i].bind		= xusbatm_bind;
@@ -226,4 +216,3 @@ module_exit(xusbatm_exit);
 MODULE_AUTHOR("Roman Kagan, Duncan Sands");
 MODULE_DESCRIPTION("Driver for USB ADSL modems initialized in userspace");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.1");

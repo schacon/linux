@@ -256,7 +256,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_cp874(void)
@@ -272,5 +271,6 @@ static void __exit exit_nls_cp874(void)
 module_init(init_nls_cp874)
 module_exit(exit_nls_cp874)
 
+MODULE_DESCRIPTION("NLS Thai charset (CP874, TIS-620)");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_ALIAS_NLS(tis-620);

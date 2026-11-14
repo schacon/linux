@@ -1,18 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SuperH KEYSC Keypad Driver
  *
  * Copyright (C) 2008 Magnus Damm
  *
  * Based on gpio_keys.c, Copyright 2005 Phil Blundell
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/delay.h>
@@ -171,7 +167,7 @@ static int sh_keysc_probe(struct platform_device *pdev)
 	int i;
 	int irq, error;
 
-	if (!pdev->dev.platform_data) {
+	if (!dev_get_platdata(&pdev->dev)) {
 		dev_err(&pdev->dev, "no platform data defined\n");
 		error = -EINVAL;
 		goto err0;
@@ -185,12 +181,10 @@ static int sh_keysc_probe(struct platform_device *pdev)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "failed to get irq\n");
+	if (irq < 0)
 		goto err0;
-	}
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (priv == NULL) {
 		dev_err(&pdev->dev, "failed to allocate driver data\n");
 		error = -ENOMEM;
@@ -198,10 +192,10 @@ static int sh_keysc_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, priv);
-	memcpy(&priv->pdata, pdev->dev.platform_data, sizeof(priv->pdata));
+	memcpy(&priv->pdata, dev_get_platdata(&pdev->dev), sizeof(priv->pdata));
 	pdata = &priv->pdata;
 
-	priv->iomem_base = ioremap_nocache(res->start, resource_size(res));
+	priv->iomem_base = ioremap(res->start, resource_size(res));
 	if (priv->iomem_base == NULL) {
 		dev_err(&pdev->dev, "failed to remap I/O memory\n");
 		error = -ENXIO;
@@ -266,13 +260,12 @@ static int sh_keysc_probe(struct platform_device *pdev)
  err2:
 	iounmap(priv->iomem_base);
  err1:
-	platform_set_drvdata(pdev, NULL);
 	kfree(priv);
  err0:
 	return error;
 }
 
-static int sh_keysc_remove(struct platform_device *pdev)
+static void sh_keysc_remove(struct platform_device *pdev)
 {
 	struct sh_keysc_priv *priv = platform_get_drvdata(pdev);
 
@@ -285,13 +278,9 @@ static int sh_keysc_remove(struct platform_device *pdev)
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 
-	platform_set_drvdata(pdev, NULL);
 	kfree(priv);
-
-	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int sh_keysc_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
@@ -324,17 +313,16 @@ static int sh_keysc_resume(struct device *dev)
 
 	return 0;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(sh_keysc_dev_pm_ops,
-			 sh_keysc_suspend, sh_keysc_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(sh_keysc_dev_pm_ops,
+				sh_keysc_suspend, sh_keysc_resume);
 
 static struct platform_driver sh_keysc_device_driver = {
 	.probe		= sh_keysc_probe,
 	.remove		= sh_keysc_remove,
 	.driver		= {
 		.name	= "sh_keysc",
-		.pm	= &sh_keysc_dev_pm_ops,
+		.pm	= pm_sleep_ptr(&sh_keysc_dev_pm_ops),
 	}
 };
 module_platform_driver(sh_keysc_device_driver);

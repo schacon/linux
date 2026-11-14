@@ -1,249 +1,324 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Synopsys DesignWare I2C adapter driver (master only).
+ * Synopsys DesignWare I2C adapter driver.
  *
  * Based on the TI DAVINCI I2C adapter driver.
  *
  * Copyright (C) 2006 Texas Instruments.
  * Copyright (C) 2007 MontaVista Software Inc.
  * Copyright (C) 2009 Provigent Ltd.
- *
- * ----------------------------------------------------------------------------
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- * ----------------------------------------------------------------------------
- *
  */
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/delay.h>
-#include <linux/i2c.h>
+#include <linux/clk-provider.h>
 #include <linux/clk.h>
-#include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/delay.h>
+#include <linux/dmi.h>
 #include <linux/err.h>
+#include <linux/errno.h>
+#include <linux/i2c.h>
 #include <linux/interrupt.h>
-#include <linux/of_i2c.h>
+#include <linux/io.h>
+#include <linux/kernel.h>
+#include <linux/mfd/syscon.h>
+#include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
-#include <linux/io.h>
+#include <linux/property.h>
+#include <linux/regmap.h>
+#include <linux/reset.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/acpi.h>
+#include <linux/units.h>
+
 #include "i2c-designware-core.h"
 
-static struct i2c_algorithm i2c_dw_algo = {
-	.master_xfer	= i2c_dw_xfer,
-	.functionality	= i2c_dw_func,
-};
 static u32 i2c_dw_get_clk_rate_khz(struct dw_i2c_dev *dev)
 {
-	return clk_get_rate(dev->clk)/1000;
+	return clk_get_rate(dev->clk) / HZ_PER_KHZ;
 }
 
-#ifdef CONFIG_ACPI
-static int dw_i2c_acpi_configure(struct platform_device *pdev)
+static int dw_i2c_get_parent_regmap(struct dw_i2c_dev *dev)
 {
-	struct dw_i2c_dev *dev = platform_get_drvdata(pdev);
-
-	if (!ACPI_HANDLE(&pdev->dev))
+	dev->map = dev_get_regmap(dev->dev->parent, NULL);
+	if (!dev->map)
 		return -ENODEV;
 
-	dev->adapter.nr = -1;
-	dev->tx_fifo_depth = 32;
-	dev->rx_fifo_depth = 32;
 	return 0;
 }
 
-static const struct acpi_device_id dw_i2c_acpi_match[] = {
-	{ "INT33C2", 0 },
-	{ "INT33C3", 0 },
-	{ "80860F41", 0 },
-	{ }
-};
-MODULE_DEVICE_TABLE(acpi, dw_i2c_acpi_match);
-#else
-static inline int dw_i2c_acpi_configure(struct platform_device *pdev)
+static void dw_i2c_plat_pm_cleanup(struct dw_i2c_dev *dev)
 {
-	return -ENODEV;
+	pm_runtime_disable(dev->dev);
+
+	if (dev->shared_with_punit)
+		pm_runtime_put_noidle(dev->dev);
 }
-#endif
 
-static int dw_i2c_probe(struct platform_device *pdev)
+static int dw_i2c_plat_request_regs(struct dw_i2c_dev *dev)
 {
-	struct dw_i2c_dev *dev;
+	struct platform_device *pdev = to_platform_device(dev->dev);
+	int ret;
+
+	if (device_is_compatible(dev->dev, "intel,xe-i2c"))
+		return dw_i2c_get_parent_regmap(dev);
+
+	switch (dev->flags & MODEL_MASK) {
+	case MODEL_WANGXUN_SP:
+		ret = dw_i2c_get_parent_regmap(dev);
+		break;
+	default:
+		dev->base = devm_platform_ioremap_resource(pdev, 0);
+		ret = PTR_ERR_OR_ZERO(dev->base);
+		break;
+	}
+
+	return ret;
+}
+
+static const struct dmi_system_id dw_i2c_hwmon_class_dmi[] = {
+	{
+		.ident = "Qtechnology QT5222",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Qtechnology"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "QT5222"),
+		},
+	},
+	{ } /* terminate list */
+};
+
+static const struct i2c_dw_semaphore_callbacks i2c_dw_semaphore_cb_table[] = {
+#ifdef CONFIG_I2C_DESIGNWARE_BAYTRAIL
+	{
+		.probe = i2c_dw_baytrail_probe_lock_support,
+	},
+#endif
+#ifdef CONFIG_I2C_DESIGNWARE_AMDPSP
+	{
+		.probe = i2c_dw_amdpsp_probe_lock_support,
+	},
+#endif
+	{}
+};
+
+static int i2c_dw_probe_lock_support(struct dw_i2c_dev *dev)
+{
+	const struct i2c_dw_semaphore_callbacks *ptr;
+	int i = 0;
+	int ret;
+
+	dev->semaphore_idx = -1;
+
+	for (ptr = i2c_dw_semaphore_cb_table; ptr->probe; ptr++) {
+		ret = ptr->probe(dev);
+		if (ret) {
+			/*
+			 * If there is no semaphore device attached to this
+			 * controller, we shouldn't abort general i2c_controller
+			 * probe.
+			 */
+			if (ret != -ENODEV)
+				return ret;
+
+			i++;
+			continue;
+		}
+
+		dev->semaphore_idx = i;
+		break;
+	}
+
+	return 0;
+}
+
+static int dw_i2c_plat_probe(struct platform_device *pdev)
+{
+	u32 flags = (uintptr_t)device_get_match_data(&pdev->dev);
+	struct device *device = &pdev->dev;
 	struct i2c_adapter *adap;
-	struct resource *mem;
-	int irq, r;
+	struct dw_i2c_dev *dev;
+	int irq, ret;
 
-	/* NOTE: driver uses the static register mapping */
-	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!mem) {
-		dev_err(&pdev->dev, "no mem resource?\n");
-		return -EINVAL;
-	}
+	irq = platform_get_irq_optional(pdev, 0);
+	if (irq == -ENXIO)
+		flags |= ACCESS_POLLING;
+	else if (irq < 0)
+		return irq;
 
-	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "no irq resource?\n");
-		return irq; /* -ENXIO */
-	}
-
-	dev = devm_kzalloc(&pdev->dev, sizeof(struct dw_i2c_dev), GFP_KERNEL);
+	dev = devm_kzalloc_obj(device, *dev);
 	if (!dev)
 		return -ENOMEM;
 
-	dev->base = devm_ioremap_resource(&pdev->dev, mem);
-	if (IS_ERR(dev->base))
-		return PTR_ERR(dev->base);
+	if (device_property_present(device, "wx,i2c-snps-model"))
+		flags = MODEL_WANGXUN_SP | ACCESS_POLLING;
 
-	init_completion(&dev->cmd_complete);
-	mutex_init(&dev->lock);
-	dev->dev = &pdev->dev;
+	dev->dev = device;
 	dev->irq = irq;
+	dev->flags = flags;
 	platform_set_drvdata(pdev, dev);
 
-	dev->clk = devm_clk_get(&pdev->dev, NULL);
-	dev->get_clk_rate_khz = i2c_dw_get_clk_rate_khz;
+	ret = dw_i2c_plat_request_regs(dev);
+	if (ret)
+		return ret;
 
+	dev->rst = devm_reset_control_get_optional_exclusive_deasserted(device, NULL);
+	if (IS_ERR(dev->rst))
+		return dev_err_probe(device, PTR_ERR(dev->rst), "failed to acquire reset\n");
+
+	ret = i2c_dw_fw_parse_and_configure(dev);
+	if (ret)
+		return ret;
+
+	ret = i2c_dw_probe_lock_support(dev);
+	if (ret)
+		return dev_err_probe(device, ret, "failed to probe lock support\n");
+
+	i2c_dw_configure(dev);
+
+	/* Optional interface clock */
+	dev->pclk = devm_clk_get_optional(device, "pclk");
+	if (IS_ERR(dev->pclk))
+		return dev_err_probe(device, PTR_ERR(dev->pclk), "failed to acquire pclk\n");
+
+	dev->clk = devm_clk_get_optional(device, NULL);
 	if (IS_ERR(dev->clk))
-		return PTR_ERR(dev->clk);
-	clk_prepare_enable(dev->clk);
+		return dev_err_probe(device, PTR_ERR(dev->clk), "failed to acquire clock\n");
 
-	dev->functionality =
-		I2C_FUNC_I2C |
-		I2C_FUNC_10BIT_ADDR |
-		I2C_FUNC_SMBUS_BYTE |
-		I2C_FUNC_SMBUS_BYTE_DATA |
-		I2C_FUNC_SMBUS_WORD_DATA |
-		I2C_FUNC_SMBUS_I2C_BLOCK;
-	dev->master_cfg =  DW_IC_CON_MASTER | DW_IC_CON_SLAVE_DISABLE |
-		DW_IC_CON_RESTART_EN | DW_IC_CON_SPEED_FAST;
+	ret = i2c_dw_prepare_clk(dev, true);
+	if (ret)
+		return ret;
 
-	/* Try first if we can configure the device from ACPI */
-	r = dw_i2c_acpi_configure(pdev);
-	if (r) {
-		u32 param1 = i2c_dw_read_comp_param(dev);
+	if (dev->clk) {
+		struct i2c_timings *t = &dev->timings;
+		u64 clk_khz;
 
-		dev->tx_fifo_depth = ((param1 >> 16) & 0xff) + 1;
-		dev->rx_fifo_depth = ((param1 >> 8)  & 0xff) + 1;
-		dev->adapter.nr = pdev->id;
-	}
-	r = i2c_dw_init(dev);
-	if (r)
-		return r;
+		dev->get_clk_rate_khz = i2c_dw_get_clk_rate_khz;
+		clk_khz = dev->get_clk_rate_khz(dev);
 
-	i2c_dw_disable_int(dev);
-	r = devm_request_irq(&pdev->dev, dev->irq, i2c_dw_isr, IRQF_SHARED,
-			pdev->name, dev);
-	if (r) {
-		dev_err(&pdev->dev, "failure requesting irq %i\n", dev->irq);
-		return r;
+		if (!dev->sda_hold_time && t->sda_hold_ns)
+			dev->sda_hold_time =
+				DIV_S64_ROUND_CLOSEST(clk_khz * t->sda_hold_ns, MICRO);
 	}
 
 	adap = &dev->adapter;
-	i2c_set_adapdata(adap, dev);
 	adap->owner = THIS_MODULE;
-	adap->class = I2C_CLASS_HWMON;
-	strlcpy(adap->name, "Synopsys DesignWare I2C adapter",
-			sizeof(adap->name));
-	adap->algo = &i2c_dw_algo;
-	adap->dev.parent = &pdev->dev;
-	adap->dev.of_node = pdev->dev.of_node;
+	adap->class = dmi_check_system(dw_i2c_hwmon_class_dmi) ?
+				       I2C_CLASS_HWMON : I2C_CLASS_DEPRECATED;
+	adap->nr = -1;
 
-	r = i2c_add_numbered_adapter(adap);
-	if (r) {
-		dev_err(&pdev->dev, "failure adding adapter\n");
-		return r;
+	if (dev->flags & ACCESS_NO_IRQ_SUSPEND)
+		dev_pm_set_driver_flags(device, DPM_FLAG_SMART_PREPARE);
+	else
+		dev_pm_set_driver_flags(device, DPM_FLAG_SMART_PREPARE | DPM_FLAG_SMART_SUSPEND);
+
+	device_enable_async_suspend(device);
+
+	/* The code below assumes runtime PM to be disabled. */
+	WARN_ON(pm_runtime_enabled(device));
+
+	pm_runtime_set_autosuspend_delay(device, 1000);
+	pm_runtime_use_autosuspend(device);
+	pm_runtime_set_active(device);
+
+	if (dev->shared_with_punit)
+		pm_runtime_get_noresume(device);
+
+	pm_runtime_enable(device);
+
+	ret = i2c_dw_probe(dev);
+	if (ret) {
+		dw_i2c_plat_pm_cleanup(dev);
+		i2c_dw_prepare_clk(dev, false);
 	}
-	of_i2c_register_devices(adap);
-	acpi_i2c_register_devices(adap);
 
-	pm_runtime_set_autosuspend_delay(&pdev->dev, 1000);
-	pm_runtime_use_autosuspend(&pdev->dev);
-	pm_runtime_set_active(&pdev->dev);
-	pm_runtime_enable(&pdev->dev);
-
-	return 0;
+	return ret;
 }
 
-static int dw_i2c_remove(struct platform_device *pdev)
+static void dw_i2c_plat_remove(struct platform_device *pdev)
 {
 	struct dw_i2c_dev *dev = platform_get_drvdata(pdev);
+	struct device *device = &pdev->dev;
 
-	pm_runtime_get_sync(&pdev->dev);
+	pm_runtime_get_sync(device);
 
 	i2c_del_adapter(&dev->adapter);
 
 	i2c_dw_disable(dev);
 
-	pm_runtime_put(&pdev->dev);
-	pm_runtime_disable(&pdev->dev);
+	pm_runtime_dont_use_autosuspend(device);
+	pm_runtime_put_noidle(device);
+	dw_i2c_plat_pm_cleanup(dev);
 
-	return 0;
+	i2c_dw_prepare_clk(dev, false);
 }
 
-#ifdef CONFIG_OF
 static const struct of_device_id dw_i2c_of_match[] = {
-	{ .compatible = "snps,designware-i2c", },
-	{},
+	{ .compatible = "mobileye,eyeq6lplus-i2c" },
+	{ .compatible = "mscc,ocelot-i2c" },
+	{ .compatible = "snps,designware-i2c" },
+	{}
 };
 MODULE_DEVICE_TABLE(of, dw_i2c_of_match);
-#endif
 
-#ifdef CONFIG_PM
-static int dw_i2c_suspend(struct device *dev)
+static const struct acpi_device_id dw_i2c_acpi_match[] = {
+	{ .id = "80860F41", .driver_data = ACCESS_NO_IRQ_SUSPEND },
+	{ .id = "808622C1", .driver_data = ACCESS_NO_IRQ_SUSPEND },
+	{ .id = "AMD0010", .driver_data = ACCESS_INTR_MASK },
+	{ .id = "AMDI0010", .driver_data = ACCESS_INTR_MASK },
+	{ .id = "AMDI0019", .driver_data = ACCESS_INTR_MASK | ARBITRATION_SEMAPHORE },
+	{ .id = "AMDI0510" },
+	{ .id = "APMC0D0F" },
+	{ .id = "FUJI200B" },
+	{ .id = "GOOG5000" },
+	{ .id = "HISI02A1" },
+	{ .id = "HISI02A2" },
+	{ .id = "HISI02A3" },
+	{ .id = "HJMC3001", .driver_data = ACCESS_INTR_MASK },
+	{ .id = "HYGO0010", .driver_data = ACCESS_INTR_MASK },
+	{ .id = "INT33C2" },
+	{ .id = "INT33C3" },
+	{ .id = "INT3432" },
+	{ .id = "INT3433" },
+	{ .id = "INTC10EF" },
+	{ .id = "LECA0003" },
+	{ }
+};
+MODULE_DEVICE_TABLE(acpi, dw_i2c_acpi_match);
+
+static const struct platform_device_id dw_i2c_platform_ids[] = {
+	{ "i2c_designware" },
+	{}
+};
+MODULE_DEVICE_TABLE(platform, dw_i2c_platform_ids);
+
+static void dw_i2c_plat_shutdown(struct platform_device *pdev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct dw_i2c_dev *i_dev = platform_get_drvdata(pdev);
+	struct dw_i2c_dev *i_dev;
 
-	clk_disable_unprepare(i_dev->clk);
+	i_dev = platform_get_drvdata(pdev);
+	if (!i_dev)
+		return;
 
-	return 0;
+	pm_runtime_disable(&pdev->dev);
+	if (!pm_runtime_status_suspended(&pdev->dev))
+		i2c_dw_shutdown(i_dev);
 }
-
-static int dw_i2c_resume(struct device *dev)
-{
-	struct platform_device *pdev = to_platform_device(dev);
-	struct dw_i2c_dev *i_dev = platform_get_drvdata(pdev);
-
-	clk_prepare_enable(i_dev->clk);
-	i2c_dw_init(i_dev);
-
-	return 0;
-}
-#endif
-
-static SIMPLE_DEV_PM_OPS(dw_i2c_dev_pm_ops, dw_i2c_suspend, dw_i2c_resume);
-
-/* work with hotplug and coldplug */
-MODULE_ALIAS("platform:i2c_designware");
 
 static struct platform_driver dw_i2c_driver = {
-	.remove		= dw_i2c_remove,
+	.probe = dw_i2c_plat_probe,
+	.remove = dw_i2c_plat_remove,
+	.shutdown = dw_i2c_plat_shutdown,
 	.driver		= {
 		.name	= "i2c_designware",
-		.owner	= THIS_MODULE,
-		.of_match_table = of_match_ptr(dw_i2c_of_match),
-		.acpi_match_table = ACPI_PTR(dw_i2c_acpi_match),
-		.pm	= &dw_i2c_dev_pm_ops,
+		.of_match_table = dw_i2c_of_match,
+		.acpi_match_table = dw_i2c_acpi_match,
+		.pm	= pm_ptr(&i2c_dw_dev_pm_ops),
 	},
+	.id_table = dw_i2c_platform_ids,
 };
 
 static int __init dw_i2c_init_driver(void)
 {
-	return platform_driver_probe(&dw_i2c_driver, dw_i2c_probe);
+	return platform_driver_register(&dw_i2c_driver);
 }
 subsys_initcall(dw_i2c_init_driver);
 
@@ -256,3 +331,5 @@ module_exit(dw_i2c_exit_driver);
 MODULE_AUTHOR("Baruch Siach <baruch@tkos.co.il>");
 MODULE_DESCRIPTION("Synopsys DesignWare I2C bus adapter");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("I2C_DW");
+MODULE_IMPORT_NS("I2C_DW_COMMON");

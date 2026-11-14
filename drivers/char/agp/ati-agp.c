@@ -10,9 +10,10 @@
 #include <linux/slab.h>
 #include <linux/agp_backend.h>
 #include <asm/agp.h>
+#include <asm/set_memory.h>
 #include "agp.h"
 
-#define ATI_GART_MMBASE_ADDR	0x14
+#define ATI_GART_MMBASE_BAR	1
 #define ATI_RS100_APSIZE	0xac
 #define ATI_RS100_IG_AGPMODE	0xb0
 #define ATI_RS300_APSIZE	0xf8
@@ -54,7 +55,7 @@ static struct _ati_generic_private {
 
 static int ati_create_page_map(struct ati_page_map *page_map)
 {
-	int i, err = 0;
+	int i, err;
 
 	page_map->real = (unsigned long *) __get_free_page(GFP_KERNEL);
 	if (page_map->real == NULL)
@@ -62,6 +63,10 @@ static int ati_create_page_map(struct ati_page_map *page_map)
 
 	set_memory_uc((unsigned long)page_map->real, 1);
 	err = map_page_into_agp(virt_to_page(page_map->real));
+	if (err) {
+		free_page((unsigned long)page_map->real);
+		return err;
+	}
 	page_map->remapped = page_map->real;
 
 	for (i = 0; i < PAGE_SIZE / sizeof(unsigned long); i++) {
@@ -107,12 +112,12 @@ static int ati_create_gatt_pages(int nr_tables)
 	int retval = 0;
 	int i;
 
-	tables = kzalloc((nr_tables + 1) * sizeof(struct ati_page_map *),GFP_KERNEL);
+	tables = kzalloc_objs(struct ati_page_map *, nr_tables + 1);
 	if (tables == NULL)
 		return -ENOMEM;
 
 	for (i = 0; i < nr_tables; i++) {
-		entry = kzalloc(sizeof(struct ati_page_map), GFP_KERNEL);
+		entry = kzalloc_obj(struct ati_page_map);
 		tables[i] = entry;
 		if (entry == NULL) {
 			retval = -ENOMEM;
@@ -196,12 +201,12 @@ static void ati_cleanup(void)
 
 static int ati_configure(void)
 {
+	phys_addr_t reg;
 	u32 temp;
 
 	/* Get the memory mapped registers */
-	pci_read_config_dword(agp_bridge->dev, ATI_GART_MMBASE_ADDR, &temp);
-	temp = (temp & 0xfffff000);
-	ati_generic_private.registers = (volatile u8 __iomem *) ioremap(temp, 4096);
+	reg = pci_resource_start(agp_bridge->dev, ATI_GART_MMBASE_BAR);
+	ati_generic_private.registers = (volatile u8 __iomem *) ioremap(reg, 4096);
 
 	if (!ati_generic_private.registers)
 		return -ENOMEM;
@@ -211,18 +216,18 @@ static int ati_configure(void)
 	else
 		pci_write_config_dword(agp_bridge->dev, ATI_RS300_IG_AGPMODE, 0x20000);
 
-	/* address to map too */
+	/* address to map to */
 	/*
-	pci_read_config_dword(agp_bridge.dev, AGP_APBASE, &temp);
-	agp_bridge.gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	agp_bridge.gart_bus_addr = pci_bus_address(agp_bridge.dev,
+						   AGP_APERTURE_BAR);
 	printk(KERN_INFO PFX "IGP320 gart_bus_addr: %x\n", agp_bridge.gart_bus_addr);
 	*/
 	writel(0x60000, ati_generic_private.registers+ATI_GART_FEATURE_ID);
 	readl(ati_generic_private.registers+ATI_GART_FEATURE_ID);	/* PCI Posting.*/
 
 	/* SIGNALED_SYSTEM_ERROR @ NB_STATUS */
-	pci_read_config_dword(agp_bridge->dev, 4, &temp);
-	pci_write_config_dword(agp_bridge->dev, 4, temp | (1<<14));
+	pci_read_config_dword(agp_bridge->dev, PCI_COMMAND, &temp);
+	pci_write_config_dword(agp_bridge->dev, PCI_COMMAND, temp | (1<<14));
 
 	/* Write out the address of the gatt table */
 	writel(agp_bridge->gatt_bus_addr, ati_generic_private.registers+ATI_GART_BASE);
@@ -232,23 +237,10 @@ static int ati_configure(void)
 }
 
 
-#ifdef CONFIG_PM
-static int agp_ati_suspend(struct pci_dev *dev, pm_message_t state)
+static int agp_ati_resume(struct device *dev)
 {
-	pci_save_state(dev);
-	pci_set_power_state(dev, 3);
-
-	return 0;
-}
-
-static int agp_ati_resume(struct pci_dev *dev)
-{
-	pci_set_power_state(dev, 0);
-	pci_restore_state(dev);
-
 	return ati_configure();
 }
-#endif
 
 /*
  *Since we don't need contiguous memory we just try
@@ -301,7 +293,7 @@ static int ati_insert_memory(struct agp_memory * mem,
 	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
 		addr = (j * PAGE_SIZE) + agp_bridge->gart_bus_addr;
 		cur_gatt = GET_GATT(addr);
-		writel(agp_bridge->driver->mask_memory(agp_bridge,	
+		writel(agp_bridge->driver->mask_memory(agp_bridge,
 						       page_to_phys(mem->pages[i]),
 						       mem->type),
 		       cur_gatt+GET_GATT_OFF(addr));
@@ -385,8 +377,7 @@ static int ati_create_gatt_table(struct agp_bridge_data *bridge)
 	 * This is a bus address even on the alpha, b/c its
 	 * used to program the agp master not the cpu
 	 */
-	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
-	addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	addr = pci_bus_address(agp_bridge->dev, AGP_APERTURE_BAR);
 	agp_bridge->gart_bus_addr = addr;
 
 	/* Calculate the agp offset */
@@ -540,7 +531,7 @@ static void agp_ati_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-static struct pci_device_id agp_ati_pci_table[] = {
+static const struct pci_device_id agp_ati_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,
@@ -554,15 +545,14 @@ static struct pci_device_id agp_ati_pci_table[] = {
 
 MODULE_DEVICE_TABLE(pci, agp_ati_pci_table);
 
+static DEFINE_SIMPLE_DEV_PM_OPS(agp_ati_pm_ops, NULL, agp_ati_resume);
+
 static struct pci_driver agp_ati_pci_driver = {
 	.name		= "agpgart-ati",
 	.id_table	= agp_ati_pci_table,
 	.probe		= agp_ati_probe,
 	.remove		= agp_ati_remove,
-#ifdef CONFIG_PM
-	.suspend	= agp_ati_suspend,
-	.resume		= agp_ati_resume,
-#endif
+	.driver.pm	= &agp_ati_pm_ops,
 };
 
 static int __init agp_ati_init(void)
@@ -580,6 +570,7 @@ static void __exit agp_ati_cleanup(void)
 module_init(agp_ati_init);
 module_exit(agp_ati_cleanup);
 
-MODULE_AUTHOR("Dave Jones <davej@redhat.com>");
+MODULE_AUTHOR("Dave Jones");
+MODULE_DESCRIPTION("ATi AGPGART routines");
 MODULE_LICENSE("GPL and additional rights");
 

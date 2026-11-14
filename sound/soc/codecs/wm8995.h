@@ -1,13 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * wm8995.h  --  WM8995 ALSA SoC Audio driver
  *
  * Copyright 2010 Wolfson Microelectronics plc
  *
  * Author: Dimitris Papastamos <dp@opensource.wolfsonmicro.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef _WM8995_H
@@ -4237,11 +4234,8 @@
 #define WM8995_SPK2_MUTE_SEQ1_WIDTH                  8	/* SPK2_MUTE_SEQ1 - [7:0] */
 
 #define WM8995_CLASS_W_SWITCH(xname, reg, shift, max, invert) \
-{	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, .name = xname, \
-	.info = snd_soc_info_volsw, \
-	.get = snd_soc_dapm_get_volsw, .put = wm8995_put_class_w, \
-	.private_value =  SOC_SINGLE_VALUE(reg, shift, max, invert) \
-}
+	SOC_SINGLE_EXT(xname, reg, shift, max, invert, \
+		snd_soc_dapm_get_volsw, wm8995_put_class_w)
 
 struct wm8995_reg_access {
 	u16 read;

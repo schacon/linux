@@ -1,16 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * kirkwood.h
  *
  * (c) 2010 Arnaud Patard <apatard@mandriva.com>
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
  */
 
 #ifndef _KIRKWOOD_AUDIO_H
 #define _KIRKWOOD_AUDIO_H
+
+#define DRV_NAME	"mvebu-audio"
 
 #define KIRKWOOD_RECORD_WIN			0
 #define KIRKWOOD_PLAYBACK_WIN			1
@@ -38,6 +36,9 @@
 #define KIRKWOOD_RECCTL_SIZE_24		(1<<0)
 #define KIRKWOOD_RECCTL_SIZE_32		(0<<0)
 
+#define KIRKWOOD_RECCTL_ENABLE_MASK		(KIRKWOOD_RECCTL_SPDIF_EN | \
+						 KIRKWOOD_RECCTL_I2S_EN)
+
 #define KIRKWOOD_REC_BUF_ADDR			0x1004
 #define KIRKWOOD_REC_BUF_SIZE			0x1008
 #define KIRKWOOD_REC_BYTE_COUNT			0x100C
@@ -54,13 +55,16 @@
 #define KIRKWOOD_PLAYCTL_MONO_OFF		(0<<5)
 #define KIRKWOOD_PLAYCTL_I2S_MUTE		(1<<7)
 #define KIRKWOOD_PLAYCTL_SPDIF_EN		(1<<4)
-#define KIRKWOOD_PLAYCTL_I2S_EN		(1<<3)
+#define KIRKWOOD_PLAYCTL_I2S_EN			(1<<3)
 #define KIRKWOOD_PLAYCTL_SIZE_MASK		(7<<0)
 #define KIRKWOOD_PLAYCTL_SIZE_16		(7<<0)
 #define KIRKWOOD_PLAYCTL_SIZE_16_C		(3<<0)
 #define KIRKWOOD_PLAYCTL_SIZE_20		(2<<0)
 #define KIRKWOOD_PLAYCTL_SIZE_24		(1<<0)
 #define KIRKWOOD_PLAYCTL_SIZE_32		(0<<0)
+
+#define KIRKWOOD_PLAYCTL_ENABLE_MASK		(KIRKWOOD_PLAYCTL_SPDIF_EN | \
+						 KIRKWOOD_PLAYCTL_I2S_EN)
 
 #define KIRKWOOD_PLAY_BUF_ADDR			0x1104
 #define KIRKWOOD_PLAY_BUF_SIZE			0x1108
@@ -118,19 +122,27 @@
 
 /* Theses values come from the marvell alsa driver */
 /* need to find where they come from               */
-#define KIRKWOOD_SND_MIN_PERIODS		8
+#define KIRKWOOD_SND_MIN_PERIODS		2
 #define KIRKWOOD_SND_MAX_PERIODS		16
-#define KIRKWOOD_SND_MIN_PERIOD_BYTES		0x4000
-#define KIRKWOOD_SND_MAX_PERIOD_BYTES		0x4000
+#define KIRKWOOD_SND_MIN_PERIOD_BYTES		256
+#define KIRKWOOD_SND_MAX_PERIOD_BYTES		0x8000
+#define KIRKWOOD_SND_MAX_BUFFER_BYTES		(KIRKWOOD_SND_MAX_PERIOD_BYTES \
+						 * KIRKWOOD_SND_MAX_PERIODS)
 
 struct kirkwood_dma_data {
 	void __iomem *io;
+	void __iomem *pll_config;
+	void __iomem *soc_control;
 	struct clk *clk;
 	struct clk *extclk;
 	uint32_t ctl_play;
 	uint32_t ctl_rec;
+	struct snd_pcm_substream *substream_play;
+	struct snd_pcm_substream *substream_rec;
 	int irq;
 	int burst;
 };
+
+extern const struct snd_soc_component_driver kirkwood_soc_component;
 
 #endif

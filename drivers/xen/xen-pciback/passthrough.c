@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * PCI Backend - Provides restricted access to the real PCI bus topology
  *               to the frontend
@@ -50,7 +51,7 @@ static int __xen_pcibk_add_pci_dev(struct xen_pcibk_device *pdev,
 	unsigned int domain, bus, devfn;
 	int err;
 
-	dev_entry = kmalloc(sizeof(*dev_entry), GFP_KERNEL);
+	dev_entry = kmalloc_obj(*dev_entry);
 	if (!dev_entry)
 		return -ENOMEM;
 	dev_entry->dev = dev;
@@ -69,7 +70,7 @@ static int __xen_pcibk_add_pci_dev(struct xen_pcibk_device *pdev,
 }
 
 static void __xen_pcibk_release_pci_dev(struct xen_pcibk_device *pdev,
-					struct pci_dev *dev)
+					struct pci_dev *dev, bool lock)
 {
 	struct passthrough_dev_data *dev_data = pdev->pci_dev_data;
 	struct pci_dev_entry *dev_entry, *t;
@@ -87,15 +88,20 @@ static void __xen_pcibk_release_pci_dev(struct xen_pcibk_device *pdev,
 
 	mutex_unlock(&dev_data->lock);
 
-	if (found_dev)
+	if (found_dev) {
+		if (lock)
+			device_lock(&found_dev->dev);
 		pcistub_put_pci_dev(found_dev);
+		if (lock)
+			device_unlock(&found_dev->dev);
+	}
 }
 
 static int __xen_pcibk_init_devices(struct xen_pcibk_device *pdev)
 {
 	struct passthrough_dev_data *dev_data;
 
-	dev_data = kmalloc(sizeof(*dev_data), GFP_KERNEL);
+	dev_data = kmalloc_obj(*dev_data);
 	if (!dev_data)
 		return -ENOMEM;
 
@@ -156,8 +162,11 @@ static void __xen_pcibk_release_devices(struct xen_pcibk_device *pdev)
 	struct pci_dev_entry *dev_entry, *t;
 
 	list_for_each_entry_safe(dev_entry, t, &dev_data->dev_list, list) {
+		struct pci_dev *dev = dev_entry->dev;
 		list_del(&dev_entry->list);
-		pcistub_put_pci_dev(dev_entry->dev);
+		device_lock(&dev->dev);
+		pcistub_put_pci_dev(dev);
+		device_unlock(&dev->dev);
 		kfree(dev_entry);
 	}
 

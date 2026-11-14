@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *	Swansea University Computer Society	NET3
  *	
@@ -5,8 +6,8 @@
  *	KISS TNC driver.
  */
  
-#ifndef __LINUX_SLIP_H
-#define __LINUX_SLIP_H
+#ifndef _UAPI__LINUX_SLIP_H
+#define _UAPI__LINUX_SLIP_H
 
 #define		SL_MODE_SLIP		0
 #define		SL_MODE_CSLIP		1

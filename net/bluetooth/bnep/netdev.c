@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
    BNEP implementation for Linux Bluetooth stack (BlueZ).
    Copyright (C) 2001-2002 Inventel Systemes
@@ -6,10 +7,6 @@
 	David Libault  <david.libault@inventel.fr>
 
    Copyright (C) 2002 Maxim Krasnyansky <maxk@qualcomm.com>
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License version 2 as
-   published by the Free Software Foundation;
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -75,16 +72,16 @@ static void bnep_net_set_mc_list(struct net_device *dev)
 		u8 start[ETH_ALEN] = { 0x01 };
 
 		/* Request all addresses */
-		memcpy(__skb_put(skb, ETH_ALEN), start, ETH_ALEN);
-		memcpy(__skb_put(skb, ETH_ALEN), dev->broadcast, ETH_ALEN);
+		__skb_put_data(skb, start, ETH_ALEN);
+		__skb_put_data(skb, dev->broadcast, ETH_ALEN);
 		r->len = htons(ETH_ALEN * 2);
 	} else {
 		struct netdev_hw_addr *ha;
 		int i, len = skb->len;
 
 		if (dev->flags & IFF_BROADCAST) {
-			memcpy(__skb_put(skb, ETH_ALEN), dev->broadcast, ETH_ALEN);
-			memcpy(__skb_put(skb, ETH_ALEN), dev->broadcast, ETH_ALEN);
+			__skb_put_data(skb, dev->broadcast, ETH_ALEN);
+			__skb_put_data(skb, dev->broadcast, ETH_ALEN);
 		}
 
 		/* FIXME: We should group addresses here. */
@@ -93,8 +90,8 @@ static void bnep_net_set_mc_list(struct net_device *dev)
 		netdev_for_each_mc_addr(ha, dev) {
 			if (i == BNEP_MAX_MULTICAST_FILTERS)
 				break;
-			memcpy(__skb_put(skb, ETH_ALEN), ha->addr, ETH_ALEN);
-			memcpy(__skb_put(skb, ETH_ALEN), ha->addr, ETH_ALEN);
+			__skb_put_data(skb, ha->addr, ETH_ALEN);
+			__skb_put_data(skb, ha->addr, ETH_ALEN);
 
 			i++;
 		}
@@ -112,7 +109,7 @@ static int bnep_net_set_mac_addr(struct net_device *dev, void *arg)
 	return 0;
 }
 
-static void bnep_net_timeout(struct net_device *dev)
+static void bnep_net_timeout(struct net_device *dev, unsigned int txqueue)
 {
 	BT_DBG("net_timeout");
 	netif_wake_queue(dev);
@@ -169,6 +166,12 @@ static netdev_tx_t bnep_net_xmit(struct sk_buff *skb,
 
 	BT_DBG("skb %p, dev %p", skb, dev);
 
+	if (!pskb_may_pull(skb, ETH_HLEN)) {
+		dev->stats.tx_dropped++;
+		kfree_skb(skb);
+		return NETDEV_TX_OK;
+	}
+
 #ifdef CONFIG_BT_BNEP_MC_FILTER
 	if (bnep_net_mc_filter(skb, s)) {
 		kfree_skb(skb);
@@ -188,7 +191,7 @@ static netdev_tx_t bnep_net_xmit(struct sk_buff *skb,
 	 * So we have to queue them and wake up session thread which is sleeping
 	 * on the sk_sleep(sk).
 	 */
-	dev->trans_start = jiffies;
+	netif_trans_update(dev);
 	skb_queue_tail(&sk->sk_write_queue, skb);
 	wake_up_interruptible(sk_sleep(sk));
 
@@ -211,17 +214,18 @@ static const struct net_device_ops bnep_netdev_ops = {
 	.ndo_set_rx_mode     = bnep_net_set_mc_list,
 	.ndo_set_mac_address = bnep_net_set_mac_addr,
 	.ndo_tx_timeout      = bnep_net_timeout,
-	.ndo_change_mtu	     = eth_change_mtu,
 
 };
 
 void bnep_net_setup(struct net_device *dev)
 {
 
-	memset(dev->broadcast, 0xff, ETH_ALEN);
+	eth_broadcast_addr(dev->broadcast);
 	dev->addr_len = ETH_ALEN;
 
 	ether_setup(dev);
+	dev->min_mtu = ETH_MIN_MTU;
+	dev->max_mtu = ETH_MAX_MTU;
 	dev->priv_flags &= ~IFF_TX_SKB_SHARING;
 	dev->netdev_ops = &bnep_netdev_ops;
 

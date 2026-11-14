@@ -1,14 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * AD7904/AD7914/AD7923/AD7924 SPI ADC driver
+ * AD7904/AD7914/AD7923/AD7924/AD7908/AD7918/AD7928 SPI ADC driver
  *
  * Copyright 2011 Analog Devices Inc (from AD7923 Driver)
  * Copyright 2012 CS Systemes d'Information
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/device.h>
 #include <linux/kernel.h>
+#include <linux/property.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/spi/spi.h>
@@ -24,36 +24,31 @@
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 
-#define AD7923_WRITE_CR		(1 << 11)	/* write control register */
-#define AD7923_RANGE		(1 << 1)	/* range to REFin */
-#define AD7923_CODING		(1 << 0)	/* coding is straight binary */
+#define AD7923_WRITE_CR		BIT(11)		/* write control register */
+#define AD7923_RANGE		BIT(1)		/* range to REFin */
+#define AD7923_CODING		BIT(0)		/* coding is straight binary */
 #define AD7923_PM_MODE_AS	(1)		/* auto shutdown */
 #define AD7923_PM_MODE_FS	(2)		/* full shutdown */
 #define AD7923_PM_MODE_OPS	(3)		/* normal operation */
-#define AD7923_CHANNEL_0	(0)		/* analog input 0 */
-#define AD7923_CHANNEL_1	(1)		/* analog input 1 */
-#define AD7923_CHANNEL_2	(2)		/* analog input 2 */
-#define AD7923_CHANNEL_3	(3)		/* analog input 3 */
-#define AD7923_SEQUENCE_OFF	(0)		/* no sequence fonction */
+#define AD7923_SEQUENCE_OFF	(0)		/* no sequence function */
 #define AD7923_SEQUENCE_PROTECT	(2)		/* no interrupt write cycle */
 #define AD7923_SEQUENCE_ON	(3)		/* continuous sequence */
 
-#define AD7923_MAX_CHAN		4
 
-#define AD7923_PM_MODE_WRITE(mode)	(mode << 4)	/* write mode */
-#define AD7923_CHANNEL_WRITE(channel)	(channel << 6)	/* write channel */
-#define AD7923_SEQUENCE_WRITE(sequence)	(((sequence & 1) << 3) \
-					+ ((sequence & 2) << 9))
-						/* write sequence fonction */
+#define AD7923_PM_MODE_WRITE(mode)	((mode) << 4)	 /* write mode */
+#define AD7923_CHANNEL_WRITE(channel)	((channel) << 6) /* write channel */
+#define AD7923_SEQUENCE_WRITE(sequence)	((((sequence) & 1) << 3) \
+					+ (((sequence) & 2) << 9))
+						/* write sequence function */
 /* left shift for CR : bit 11 transmit in first */
 #define AD7923_SHIFT_REGISTER	4
 
 /* val = value, dec = left shift, bits = number of bits of the mask */
-#define EXTRACT(val, dec, bits)		((val >> dec) & ((1 << bits) - 1))
+#define EXTRACT(val, dec, bits)		(((val) >> (dec)) & ((1 << (bits)) - 1))
 
 struct ad7923_state {
 	struct spi_device		*spi;
-	struct spi_transfer		ring_xfer[5];
+	struct spi_transfer		ring_xfer[9];
 	struct spi_transfer		scan_single_xfer[2];
 	struct spi_message		ring_msg;
 	struct spi_message		scan_single_msg;
@@ -63,11 +58,13 @@ struct ad7923_state {
 	unsigned int			settings;
 
 	/*
-	 * DMA (thus cache coherency maintenance) requires the
+	 * DMA (thus cache coherency maintenance) may require the
 	 * transfer buffers to live in their own cache lines.
+	 * Ensure rx_buf can be directly used in iio_push_to_buffers_with_timetamp
+	 * Length = 8 channels + 4 extra for 8 byte timestamp
 	 */
-	__be16				rx_buf[4] ____cacheline_aligned;
-	__be16				tx_buf[4];
+	__be16				rx_buf[12] __aligned(IIO_DMA_MINALIGN);
+	__be16				tx_buf[8];
 };
 
 struct ad7923_chip_info {
@@ -79,6 +76,9 @@ enum ad7923_id {
 	AD7904,
 	AD7914,
 	AD7924,
+	AD7908,
+	AD7918,
+	AD7928
 };
 
 #define AD7923_V_CHAN(index, bits)					\
@@ -94,6 +94,7 @@ enum ad7923_id {
 			.sign = 'u',					\
 			.realbits = (bits),				\
 			.storagebits = 16,				\
+			.shift = 12 - (bits),				\
 			.endianness = IIO_BE,				\
 		},							\
 	}
@@ -107,9 +108,25 @@ const struct iio_chan_spec name ## _channels[] = { \
 	IIO_CHAN_SOFT_TIMESTAMP(4), \
 }
 
+#define DECLARE_AD7908_CHANNELS(name, bits) \
+const struct iio_chan_spec name ## _channels[] = { \
+	AD7923_V_CHAN(0, bits), \
+	AD7923_V_CHAN(1, bits), \
+	AD7923_V_CHAN(2, bits), \
+	AD7923_V_CHAN(3, bits), \
+	AD7923_V_CHAN(4, bits), \
+	AD7923_V_CHAN(5, bits), \
+	AD7923_V_CHAN(6, bits), \
+	AD7923_V_CHAN(7, bits), \
+	IIO_CHAN_SOFT_TIMESTAMP(8), \
+}
+
 static DECLARE_AD7923_CHANNELS(ad7904, 8);
 static DECLARE_AD7923_CHANNELS(ad7914, 10);
 static DECLARE_AD7923_CHANNELS(ad7924, 12);
+static DECLARE_AD7908_CHANNELS(ad7908, 8);
+static DECLARE_AD7908_CHANNELS(ad7918, 10);
+static DECLARE_AD7908_CHANNELS(ad7928, 12);
 
 static const struct ad7923_chip_info ad7923_chip_info[] = {
 	[AD7904] = {
@@ -124,19 +141,35 @@ static const struct ad7923_chip_info ad7923_chip_info[] = {
 		.channels = ad7924_channels,
 		.num_channels = ARRAY_SIZE(ad7924_channels),
 	},
+	[AD7908] = {
+		.channels = ad7908_channels,
+		.num_channels = ARRAY_SIZE(ad7908_channels),
+	},
+	[AD7918] = {
+		.channels = ad7918_channels,
+		.num_channels = ARRAY_SIZE(ad7918_channels),
+	},
+	[AD7928] = {
+		.channels = ad7928_channels,
+		.num_channels = ARRAY_SIZE(ad7928_channels),
+	},
 };
 
-/**
+/*
  * ad7923_update_scan_mode() setup the spi transfer buffer for the new scan mask
- **/
+ */
 static int ad7923_update_scan_mode(struct iio_dev *indio_dev,
-	const unsigned long *active_scan_mask)
+				   const unsigned long *active_scan_mask)
 {
 	struct ad7923_state *st = iio_priv(indio_dev);
 	int i, cmd, len;
 
 	len = 0;
-	for_each_set_bit(i, active_scan_mask, AD7923_MAX_CHAN) {
+	/*
+	 * For this driver the last channel is always the software timestamp so
+	 * skip that one.
+	 */
+	for_each_set_bit(i, active_scan_mask, indio_dev->num_channels - 1) {
 		cmd = AD7923_WRITE_CR | AD7923_CHANNEL_WRITE(i) |
 			AD7923_SEQUENCE_WRITE(AD7923_SEQUENCE_OFF) |
 			st->settings;
@@ -163,31 +196,19 @@ static int ad7923_update_scan_mode(struct iio_dev *indio_dev,
 	return 0;
 }
 
-/**
- * ad7923_trigger_handler() bh of trigger launched polling to ring buffer
- *
- * Currently there is no option in this driver to disable the saving of
- * timestamps within the ring.
- **/
 static irqreturn_t ad7923_trigger_handler(int irq, void *p)
 {
 	struct iio_poll_func *pf = p;
 	struct iio_dev *indio_dev = pf->indio_dev;
 	struct ad7923_state *st = iio_priv(indio_dev);
-	s64 time_ns = 0;
 	int b_sent;
 
 	b_sent = spi_sync(st->spi, &st->ring_msg);
 	if (b_sent)
 		goto done;
 
-	if (indio_dev->scan_timestamp) {
-		time_ns = iio_get_time_ns();
-		memcpy((u8 *)st->rx_buf + indio_dev->scan_bytes - sizeof(s64),
-			&time_ns, sizeof(time_ns));
-	}
-
-	iio_push_to_buffers(indio_dev, (u8 *)st->rx_buf);
+	iio_push_to_buffers_with_ts(indio_dev, st->rx_buf, sizeof(st->rx_buf),
+				    iio_get_time_ns(indio_dev));
 
 done:
 	iio_trigger_notify_done(indio_dev->trig);
@@ -195,7 +216,7 @@ done:
 	return IRQ_HANDLED;
 }
 
-static int ad7923_scan_direct(struct ad7923_state *st, unsigned ch)
+static int ad7923_scan_direct(struct ad7923_state *st, unsigned int ch)
 {
 	int ret, cmd;
 
@@ -239,18 +260,17 @@ static int ad7923_read_raw(struct iio_dev *indio_dev,
 
 	switch (m) {
 	case IIO_CHAN_INFO_RAW:
-		mutex_lock(&indio_dev->mlock);
-		if (iio_buffer_enabled(indio_dev))
-			ret = -EBUSY;
-		else
-			ret = ad7923_scan_direct(st, chan->address);
-		mutex_unlock(&indio_dev->mlock);
+		if (!iio_device_claim_direct(indio_dev))
+			return -EBUSY;
+		ret = ad7923_scan_direct(st, chan->address);
+		iio_device_release_direct(indio_dev);
 
 		if (ret < 0)
 			return ret;
 
 		if (chan->address == EXTRACT(ret, 12, 4))
-			*val = EXTRACT(ret, 0, 12);
+			*val = EXTRACT(ret, chan->scan_type.shift,
+				       chan->scan_type.realbits);
 		else
 			return -EIO;
 
@@ -269,31 +289,39 @@ static int ad7923_read_raw(struct iio_dev *indio_dev,
 static const struct iio_info ad7923_info = {
 	.read_raw = &ad7923_read_raw,
 	.update_scan_mode = ad7923_update_scan_mode,
-	.driver_module = THIS_MODULE,
 };
+
+static void ad7923_regulator_disable(void *data)
+{
+	struct ad7923_state *st = data;
+
+	regulator_disable(st->reg);
+}
 
 static int ad7923_probe(struct spi_device *spi)
 {
+	u32 ad7923_range = AD7923_RANGE;
 	struct ad7923_state *st;
-	struct iio_dev *indio_dev = iio_device_alloc(sizeof(*st));
+	struct iio_dev *indio_dev;
 	const struct ad7923_chip_info *info;
 	int ret;
 
-	if (indio_dev == NULL)
+	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	if (!indio_dev)
 		return -ENOMEM;
 
 	st = iio_priv(indio_dev);
 
-	spi_set_drvdata(spi, indio_dev);
+	if (device_property_read_bool(&spi->dev, "adi,range-double"))
+		ad7923_range = 0;
 
 	st->spi = spi;
-	st->settings = AD7923_CODING | AD7923_RANGE |
+	st->settings = AD7923_CODING | ad7923_range |
 			AD7923_PM_MODE_WRITE(AD7923_PM_MODE_OPS);
 
 	info = &ad7923_chip_info[spi_get_device_id(spi)->driver_data];
 
 	indio_dev->name = spi_get_device_id(spi)->name;
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = info->channels;
 	indio_dev->num_channels = info->num_channels;
@@ -311,73 +339,61 @@ static int ad7923_probe(struct spi_device *spi)
 	spi_message_add_tail(&st->scan_single_xfer[0], &st->scan_single_msg);
 	spi_message_add_tail(&st->scan_single_xfer[1], &st->scan_single_msg);
 
-	st->reg = regulator_get(&spi->dev, "refin");
-	if (IS_ERR(st->reg)) {
-		ret = PTR_ERR(st->reg);
-		goto error_free;
-	}
+	st->reg = devm_regulator_get(&spi->dev, "refin");
+	if (IS_ERR(st->reg))
+		return PTR_ERR(st->reg);
+
 	ret = regulator_enable(st->reg);
 	if (ret)
-		goto error_put_reg;
+		return ret;
 
-	ret = iio_triggered_buffer_setup(indio_dev, NULL,
-			&ad7923_trigger_handler, NULL);
+	ret = devm_add_action_or_reset(&spi->dev, ad7923_regulator_disable, st);
 	if (ret)
-		goto error_disable_reg;
+		return ret;
 
-	ret = iio_device_register(indio_dev);
+	ret = devm_iio_triggered_buffer_setup(&spi->dev, indio_dev, NULL,
+					      &ad7923_trigger_handler, NULL);
 	if (ret)
-		goto error_cleanup_ring;
+		return ret;
 
-	return 0;
-
-error_cleanup_ring:
-	iio_triggered_buffer_cleanup(indio_dev);
-error_disable_reg:
-	regulator_disable(st->reg);
-error_put_reg:
-	regulator_put(st->reg);
-error_free:
-	iio_device_free(indio_dev);
-
-	return ret;
-}
-
-static int ad7923_remove(struct spi_device *spi)
-{
-	struct iio_dev *indio_dev = spi_get_drvdata(spi);
-	struct ad7923_state *st = iio_priv(indio_dev);
-
-	iio_device_unregister(indio_dev);
-	iio_triggered_buffer_cleanup(indio_dev);
-	regulator_disable(st->reg);
-	regulator_put(st->reg);
-	iio_device_free(indio_dev);
-
-	return 0;
+	return devm_iio_device_register(&spi->dev, indio_dev);
 }
 
 static const struct spi_device_id ad7923_id[] = {
-	{"ad7904", AD7904},
-	{"ad7914", AD7914},
-	{"ad7923", AD7924},
-	{"ad7924", AD7924},
-	{}
+	{ .name = "ad7904", .driver_data = AD7904 },
+	{ .name = "ad7914", .driver_data = AD7914 },
+	{ .name = "ad7923", .driver_data = AD7924 },
+	{ .name = "ad7924", .driver_data = AD7924 },
+	{ .name = "ad7908", .driver_data = AD7908 },
+	{ .name = "ad7918", .driver_data = AD7918 },
+	{ .name = "ad7928", .driver_data = AD7928 },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad7923_id);
+
+static const struct of_device_id ad7923_of_match[] = {
+	{ .compatible = "adi,ad7904", },
+	{ .compatible = "adi,ad7914", },
+	{ .compatible = "adi,ad7923", },
+	{ .compatible = "adi,ad7924", },
+	{ .compatible = "adi,ad7908", },
+	{ .compatible = "adi,ad7918", },
+	{ .compatible = "adi,ad7928", },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, ad7923_of_match);
 
 static struct spi_driver ad7923_driver = {
 	.driver = {
 		.name	= "ad7923",
-		.owner	= THIS_MODULE,
+		.of_match_table = ad7923_of_match,
 	},
 	.probe		= ad7923_probe,
-	.remove		= ad7923_remove,
 	.id_table	= ad7923_id,
 };
 module_spi_driver(ad7923_driver);
 
-MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>");
+MODULE_AUTHOR("Michael Hennerich <michael.hennerich@analog.com>");
 MODULE_AUTHOR("Patrick Vasseur <patrick.vasseur@c-s.fr>");
-MODULE_DESCRIPTION("Analog Devices AD7904/AD7914/AD7923/AD7924 ADC");
+MODULE_DESCRIPTION("Analog Devices AD7923 and similar ADC");
 MODULE_LICENSE("GPL v2");

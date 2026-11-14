@@ -1,19 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (c) 2012 Linaro Limited.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
 #ifndef VIRT_H
@@ -29,6 +16,7 @@
 #define BOOT_CPU_MODE_MISMATCH	PSR_N_BIT
 
 #ifndef __ASSEMBLY__
+#include <asm/cacheflush.h>
 
 #ifdef CONFIG_ARM_VIRT_EXT
 /*
@@ -41,10 +29,19 @@
  */
 extern int __boot_cpu_mode;
 
-void __hyp_set_vectors(unsigned long phys_vector_base);
-unsigned long __hyp_get_vectors(void);
+static inline void sync_boot_mode(void)
+{
+	/*
+	 * As secondaries write to __boot_cpu_mode with caches disabled, we
+	 * must flush the corresponding cache entries to ensure the visibility
+	 * of their writes.
+	 */
+	sync_cache_r(&__boot_cpu_mode);
+}
+
 #else
 #define __boot_cpu_mode	(SVC_MODE)
+#define sync_boot_mode()
 #endif
 
 #ifndef ZIMAGE
@@ -62,8 +59,23 @@ static inline bool is_hyp_mode_mismatched(void)
 {
 	return !!(__boot_cpu_mode & BOOT_CPU_MODE_MISMATCH);
 }
+
+static inline bool is_kernel_in_hyp_mode(void)
+{
+	return false;
+}
+
 #endif
 
+#else
+
+/* Only assembly code should need those */
+
+#define HVC_SET_VECTORS 0
+#define HVC_SOFT_RESTART 1
+
 #endif /* __ASSEMBLY__ */
+
+#define HVC_STUB_ERR	0xbadca11
 
 #endif /* ! VIRT_H */

@@ -14,7 +14,7 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 
 #include <bcm63xx_regs.h>
 #include <bcm63xx_io.h>
@@ -263,12 +263,12 @@ static int bcm63xx_pcmcia_get_status(struct pcmcia_socket *sock,
 /*
  * socket polling timer callback
  */
-static void bcm63xx_pcmcia_poll(unsigned long data)
+static void bcm63xx_pcmcia_poll(struct timer_list *t)
 {
 	struct bcm63xx_pcmcia_socket *skt;
 	unsigned int stat, events;
 
-	skt = (struct bcm63xx_pcmcia_socket *)data;
+	skt = timer_container_of(skt, t, timer);
 
 	spin_lock_bh(&skt->lock);
 
@@ -327,12 +327,13 @@ static int bcm63xx_drv_pcmcia_probe(struct platform_device *pdev)
 {
 	struct bcm63xx_pcmcia_socket *skt;
 	struct pcmcia_socket *sock;
-	struct resource *res, *irq_res;
+	struct resource *res;
 	unsigned int regmem_size = 0, iomem_size = 0;
 	u32 val;
 	int ret;
+	int irq;
 
-	skt = kzalloc(sizeof(*skt), GFP_KERNEL);
+	skt = kzalloc_obj(*skt);
 	if (!skt)
 		return -ENOMEM;
 	spin_lock_init(&skt->lock);
@@ -342,9 +343,9 @@ static int bcm63xx_drv_pcmcia_probe(struct platform_device *pdev)
 	/* make sure we have all resources we need */
 	skt->common_res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	skt->attr_res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
-	irq_res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	irq = platform_get_irq(pdev, 0);
 	skt->pd = pdev->dev.platform_data;
-	if (!skt->common_res || !skt->attr_res || !irq_res || !skt->pd) {
+	if (!skt->common_res || !skt->attr_res || (irq < 0) || !skt->pd) {
 		ret = -EINVAL;
 		goto err;
 	}
@@ -380,7 +381,7 @@ static int bcm63xx_drv_pcmcia_probe(struct platform_device *pdev)
 	sock->dev.parent = &pdev->dev;
 	sock->features = SS_CAP_STATIC_MAP | SS_CAP_PCCARD;
 	sock->io_offset = (unsigned long)skt->io_base;
-	sock->pci_irq = irq_res->start;
+	sock->pci_irq = irq;
 
 #ifdef CONFIG_CARDBUS
 	sock->cb_dev = bcm63xx_cb_dev;
@@ -392,7 +393,7 @@ static int bcm63xx_drv_pcmcia_probe(struct platform_device *pdev)
 	sock->map_size = resource_size(skt->common_res);
 
 	/* initialize polling timer */
-	setup_timer(&skt->timer, bcm63xx_pcmcia_poll, (unsigned long)skt);
+	timer_setup(&skt->timer, bcm63xx_pcmcia_poll, 0);
 
 	/* initialize  pcmcia  control register,  drive  VS[12] to  0,
 	 * leave CB IDSEL to the old  value since it is set by the PCI
@@ -436,27 +437,25 @@ err:
 	return ret;
 }
 
-static int bcm63xx_drv_pcmcia_remove(struct platform_device *pdev)
+static void bcm63xx_drv_pcmcia_remove(struct platform_device *pdev)
 {
 	struct bcm63xx_pcmcia_socket *skt;
 	struct resource *res;
 
 	skt = platform_get_drvdata(pdev);
-	del_timer_sync(&skt->timer);
+	timer_shutdown_sync(&skt->timer);
 	iounmap(skt->base);
 	iounmap(skt->io_base);
 	res = skt->reg_res;
 	release_mem_region(res->start, resource_size(res));
 	kfree(skt);
-	return 0;
 }
 
 struct platform_driver bcm63xx_pcmcia_driver = {
 	.probe	= bcm63xx_drv_pcmcia_probe,
-	.remove	= bcm63xx_drv_pcmcia_remove,
+	.remove = bcm63xx_drv_pcmcia_remove,
 	.driver	= {
 		.name	= "bcm63xx_pcmcia",
-		.owner  = THIS_MODULE,
 	},
 };
 
@@ -475,7 +474,7 @@ static void bcm63xx_cb_exit(struct pci_dev *dev)
 	bcm63xx_cb_dev = NULL;
 }
 
-static DEFINE_PCI_DEVICE_TABLE(bcm63xx_cb_table) = {
+static const struct pci_device_id bcm63xx_cb_table[] = {
 	{
 		.vendor		= PCI_VENDOR_ID_BROADCOM,
 		.device		= BCM6348_CPU_ID,

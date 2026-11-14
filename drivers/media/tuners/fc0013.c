@@ -1,24 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Fitipower FC0013 tuner driver
  *
  * Copyright (C) 2012 Hans-Frieder Vogt <hfvogt@gmx.net>
  * partially based on driver code from Fitipower
  * Copyright (C) 2010 Fitipower Integrated Technology Inc
- *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; either version 2 of the License, or
- *    (at your option) any later version.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
- *
- *    You should have received a copy of the GNU General Public License
- *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 #include "fc0013.h"
@@ -52,11 +38,10 @@ static int fc0013_readreg(struct fc0013_priv *priv, u8 reg, u8 *val)
 	return 0;
 }
 
-static int fc0013_release(struct dvb_frontend *fe)
+static void fc0013_release(struct dvb_frontend *fe)
 {
 	kfree(fe->tuner_priv);
 	fe->tuner_priv = NULL;
-	return 0;
 }
 
 static int fc0013_init(struct dvb_frontend *fe)
@@ -127,70 +112,6 @@ static int fc0013_sleep(struct dvb_frontend *fe)
 	return 0;
 }
 
-int fc0013_rc_cal_add(struct dvb_frontend *fe, int rc_val)
-{
-	struct fc0013_priv *priv = fe->tuner_priv;
-	int ret;
-	u8 rc_cal;
-	int val;
-
-	if (fe->ops.i2c_gate_ctrl)
-		fe->ops.i2c_gate_ctrl(fe, 1); /* open I2C-gate */
-
-	/* push rc_cal value, get rc_cal value */
-	ret = fc0013_writereg(priv, 0x10, 0x00);
-	if (ret)
-		goto error_out;
-
-	/* get rc_cal value */
-	ret = fc0013_readreg(priv, 0x10, &rc_cal);
-	if (ret)
-		goto error_out;
-
-	rc_cal &= 0x0f;
-
-	val = (int)rc_cal + rc_val;
-
-	/* forcing rc_cal */
-	ret = fc0013_writereg(priv, 0x0d, 0x11);
-	if (ret)
-		goto error_out;
-
-	/* modify rc_cal value */
-	if (val > 15)
-		ret = fc0013_writereg(priv, 0x10, 0x0f);
-	else if (val < 0)
-		ret = fc0013_writereg(priv, 0x10, 0x00);
-	else
-		ret = fc0013_writereg(priv, 0x10, (u8)val);
-
-error_out:
-	if (fe->ops.i2c_gate_ctrl)
-		fe->ops.i2c_gate_ctrl(fe, 0); /* close I2C-gate */
-
-	return ret;
-}
-EXPORT_SYMBOL(fc0013_rc_cal_add);
-
-int fc0013_rc_cal_reset(struct dvb_frontend *fe)
-{
-	struct fc0013_priv *priv = fe->tuner_priv;
-	int ret;
-
-	if (fe->ops.i2c_gate_ctrl)
-		fe->ops.i2c_gate_ctrl(fe, 1); /* open I2C-gate */
-
-	ret = fc0013_writereg(priv, 0x0d, 0x01);
-	if (!ret)
-		ret = fc0013_writereg(priv, 0x10, 0x00);
-
-	if (fe->ops.i2c_gate_ctrl)
-		fe->ops.i2c_gate_ctrl(fe, 0); /* close I2C-gate */
-
-	return ret;
-}
-EXPORT_SYMBOL(fc0013_rc_cal_reset);
-
 static int fc0013_set_vhf_track(struct fc0013_priv *priv, u32 freq)
 {
 	int ret;
@@ -217,8 +138,6 @@ static int fc0013_set_vhf_track(struct fc0013_priv *priv, u32 freq)
 	} else {			/* UHF and GPS */
 		ret = fc0013_writereg(priv, 0x1d, tmp | 0x1c);
 	}
-	if (ret)
-		goto error_out;
 error_out:
 	return ret;
 }
@@ -233,7 +152,7 @@ static int fc0013_set_params(struct dvb_frontend *fe)
 	unsigned char reg[7], am, pm, multi, tmp;
 	unsigned long f_vco;
 	unsigned short xtal_freq_khz_2, xin, xdiv;
-	int vco_select = false;
+	bool vco_select = false;
 
 	if (fe->callback) {
 		ret = fe->callback(priv->i2c, DVB_FRONTEND_COMPONENT_TUNER,
@@ -518,7 +437,7 @@ static int fc0013_get_rf_strength(struct dvb_frontend *fe, u16 *strength)
 	int ret;
 	unsigned char tmp;
 	int int_temp, lna_gain, int_lna, tot_agc_gain, power;
-	const int fc0013_lna_gain_table[] = {
+	static const int fc0013_lna_gain_table[] = {
 		/* low gain */
 		-63, -58, -99, -73,
 		-63, -65, -54, -60,
@@ -581,11 +500,10 @@ exit:
 
 static const struct dvb_tuner_ops fc0013_tuner_ops = {
 	.info = {
-		.name		= "Fitipower FC0013",
+		.name		  = "Fitipower FC0013",
 
-		.frequency_min	= 37000000,	/* estimate */
-		.frequency_max	= 1680000000,	/* CHECK */
-		.frequency_step	= 0,
+		.frequency_min_hz =   37 * MHz,	/* estimate */
+		.frequency_max_hz = 1680 * MHz,	/* CHECK */
 	},
 
 	.release	= fc0013_release,
@@ -608,7 +526,7 @@ struct dvb_frontend *fc0013_attach(struct dvb_frontend *fe,
 {
 	struct fc0013_priv *priv = NULL;
 
-	priv = kzalloc(sizeof(struct fc0013_priv), GFP_KERNEL);
+	priv = kzalloc_obj(struct fc0013_priv);
 	if (priv == NULL)
 		return NULL;
 
@@ -626,7 +544,7 @@ struct dvb_frontend *fc0013_attach(struct dvb_frontend *fe,
 
 	return fe;
 }
-EXPORT_SYMBOL(fc0013_attach);
+EXPORT_SYMBOL_GPL(fc0013_attach);
 
 MODULE_DESCRIPTION("Fitipower FC0013 silicon tuner driver");
 MODULE_AUTHOR("Hans-Frieder Vogt <hfvogt@gmx.net>");

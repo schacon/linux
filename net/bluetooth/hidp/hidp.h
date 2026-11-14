@@ -1,10 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
    HIDP implementation for Linux Bluetooth stack (BlueZ).
    Copyright (C) 2003-2004 Marcel Holtmann <marcel@holtmann.org>
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License version 2 as
-   published by the Free Software Foundation;
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -24,6 +21,7 @@
 #define __HIDP_H
 
 #include <linux/types.h>
+#include <linux/hid.h>
 #include <linux/kref.h>
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/l2cap.h>
@@ -121,13 +119,14 @@ struct hidp_connlist_req {
 	struct hidp_conninfo __user *ci;
 };
 
-int hidp_connection_add(struct hidp_connadd_req *req, struct socket *ctrl_sock, struct socket *intr_sock);
+int hidp_connection_add(const struct hidp_connadd_req *req, struct socket *ctrl_sock, struct socket *intr_sock);
 int hidp_connection_del(struct hidp_conndel_req *req);
 int hidp_get_connlist(struct hidp_connlist_req *req);
 int hidp_get_conninfo(struct hidp_conninfo *ci);
 
 enum hidp_session_state {
 	HIDP_SESSION_IDLING,
+	HIDP_SESSION_PREPARING,
 	HIDP_SESSION_RUNNING,
 };
 
@@ -156,6 +155,7 @@ struct hidp_session {
 	unsigned long idle_to;
 
 	/* device management */
+	struct work_struct dev_init;
 	struct input_dev *input;
 	struct hid_device *hid;
 	struct timer_list timer;
@@ -177,10 +177,13 @@ struct hidp_session {
 
 	/* Used in hidp_output_raw_report() */
 	int output_report_success; /* boolean */
+
+	/* temporary input buffer */
+	u8 input_buf[HID_MAX_BUFFER_SIZE];
 };
 
 /* HIDP init defines */
-extern int __init hidp_init_sockets(void);
-extern void __exit hidp_cleanup_sockets(void);
+int __init hidp_init_sockets(void);
+void __exit hidp_cleanup_sockets(void);
 
 #endif /* __HIDP_H */

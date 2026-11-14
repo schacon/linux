@@ -1,277 +1,294 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 Texas Instruments
  * Author: Rob Clark <robdclark@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <linux/kfifo.h>
+#include <linux/delay.h>
+#include <linux/dma-mapping.h>
+#include <linux/of_graph.h>
+#include <linux/pm_runtime.h>
+
+#include <drm/drm_atomic.h>
+#include <drm/drm_atomic_helper.h>
+#include <drm/drm_crtc.h>
+#include <drm/drm_fb_dma_helper.h>
+#include <drm/drm_fourcc.h>
+#include <drm/drm_framebuffer.h>
+#include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_managed.h>
+#include <drm/drm_modeset_helper_vtables.h>
+#include <drm/drm_print.h>
+#include <drm/drm_vblank.h>
 
 #include "tilcdc_drv.h"
 #include "tilcdc_regs.h"
 
+#define TILCDC_VBLANK_SAFETY_THRESHOLD_US	1000
+#define TILCDC_PALETTE_SIZE			32
+#define TILCDC_PALETTE_FIRST_ENTRY		0x4000
+
 struct tilcdc_crtc {
 	struct drm_crtc base;
 
-	const struct tilcdc_panel_info *info;
-	uint32_t dirty;
-	dma_addr_t start, end;
+	struct tilcdc_plane *primary;
 	struct drm_pending_vblank_event *event;
-	int dpms;
+	struct mutex enable_lock;
+	bool enabled;
+	bool shutdown;
 	wait_queue_head_t frame_done_wq;
 	bool frame_done;
+	spinlock_t irq_lock;
 
-	/* fb currently set to scanout 0/1: */
-	struct drm_framebuffer *scanout[2];
+	unsigned int lcd_fck_rate;
 
-	/* for deferred fb unref's: */
-	DECLARE_KFIFO_PTR(unref_fifo, struct drm_framebuffer *);
-	struct work_struct work;
+	ktime_t last_vblank;
+	unsigned int hvtotal_us;
+
+	struct drm_framebuffer *next_fb;
+
+	int sync_lost_count;
+	bool frame_intact;
+	struct work_struct recover_work;
+
+	dma_addr_t palette_dma_handle;
+	u16 *palette_base;
+	struct completion palette_loaded;
 };
 #define to_tilcdc_crtc(x) container_of(x, struct tilcdc_crtc, base)
 
-static void unref_worker(struct work_struct *work)
+static void set_scanout(struct drm_crtc *crtc, struct drm_framebuffer *fb)
 {
-	struct tilcdc_crtc *tilcdc_crtc = container_of(work, struct tilcdc_crtc, work);
-	struct drm_device *dev = tilcdc_crtc->base.dev;
-	struct drm_framebuffer *fb;
-
-	mutex_lock(&dev->mode_config.mutex);
-	while (kfifo_get(&tilcdc_crtc->unref_fifo, &fb))
-		drm_framebuffer_unreference(fb);
-	mutex_unlock(&dev->mode_config.mutex);
-}
-
-static void set_scanout(struct drm_crtc *crtc, int n)
-{
-	static const uint32_t base_reg[] = {
-			LCDC_DMA_FB_BASE_ADDR_0_REG, LCDC_DMA_FB_BASE_ADDR_1_REG,
-	};
-	static const uint32_t ceil_reg[] = {
-			LCDC_DMA_FB_CEILING_ADDR_0_REG, LCDC_DMA_FB_CEILING_ADDR_1_REG,
-	};
-	static const uint32_t stat[] = {
-			LCDC_END_OF_FRAME0, LCDC_END_OF_FRAME1,
-	};
-	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
 	struct drm_device *dev = crtc->dev;
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
+	struct drm_gem_dma_object *gem;
+	dma_addr_t start, end;
+	u64 dma_base_and_ceiling;
 
-	pm_runtime_get_sync(dev->dev);
-	tilcdc_write(dev, base_reg[n], tilcdc_crtc->start);
-	tilcdc_write(dev, ceil_reg[n], tilcdc_crtc->end);
-	if (tilcdc_crtc->scanout[n]) {
-		if (kfifo_put(&tilcdc_crtc->unref_fifo,
-				(const struct drm_framebuffer **)&tilcdc_crtc->scanout[n])) {
-			struct tilcdc_drm_private *priv = dev->dev_private;
-			queue_work(priv->wq, &tilcdc_crtc->work);
-		} else {
-			dev_err(dev->dev, "unref fifo full!\n");
-			drm_framebuffer_unreference(tilcdc_crtc->scanout[n]);
-		}
-	}
-	tilcdc_crtc->scanout[n] = crtc->fb;
-	drm_framebuffer_reference(tilcdc_crtc->scanout[n]);
-	tilcdc_crtc->dirty &= ~stat[n];
-	pm_runtime_put_sync(dev->dev);
+	gem = drm_fb_dma_get_gem_obj(fb, 0);
+
+	start = gem->dma_addr + fb->offsets[0] +
+		crtc->y * fb->pitches[0] +
+		crtc->x * fb->format->cpp[0];
+
+	end = start + (crtc->mode.vdisplay * fb->pitches[0]);
+
+	/* Write LCDC_DMA_FB_BASE_ADDR_0_REG and LCDC_DMA_FB_CEILING_ADDR_0_REG
+	 * with a single insruction, if available. This should make it more
+	 * unlikely that LCDC would fetch the DMA addresses in the middle of
+	 * an update.
+	 */
+	if (priv->rev == 1)
+		end -= 1;
+
+	dma_base_and_ceiling = (u64)end << 32 | start;
+	tilcdc_write64(dev, LCDC_DMA_FB_BASE_ADDR_0_REG, dma_base_and_ceiling);
 }
 
-static void update_scanout(struct drm_crtc *crtc)
+/*
+ * The driver currently only supports only true color formats. For
+ * true color the palette block is bypassed, but a 32 byte palette
+ * should still be loaded. The first 16-bit entry must be 0x4000 while
+ * all other entries must be zeroed.
+ */
+static void tilcdc_crtc_load_palette(struct drm_crtc *crtc)
 {
 	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
 	struct drm_device *dev = crtc->dev;
-	struct drm_framebuffer *fb = crtc->fb;
-	struct drm_gem_cma_object *gem;
-	unsigned int depth, bpp;
-
-	drm_fb_get_bpp_depth(fb->pixel_format, &depth, &bpp);
-	gem = drm_fb_cma_get_gem_obj(fb, 0);
-
-	tilcdc_crtc->start = gem->paddr + fb->offsets[0] +
-			(crtc->y * fb->pitches[0]) + (crtc->x * bpp/8);
-
-	tilcdc_crtc->end = tilcdc_crtc->start +
-			(crtc->mode.vdisplay * fb->pitches[0]);
-
-	if (tilcdc_crtc->dpms == DRM_MODE_DPMS_ON) {
-		/* already enabled, so just mark the frames that need
-		 * updating and they will be updated on vblank:
-		 */
-		tilcdc_crtc->dirty |= LCDC_END_OF_FRAME0 | LCDC_END_OF_FRAME1;
-		drm_vblank_get(dev, 0);
-	} else {
-		/* not enabled yet, so update registers immediately: */
-		set_scanout(crtc, 0);
-		set_scanout(crtc, 1);
-	}
-}
-
-static void start(struct drm_crtc *crtc)
-{
-	struct drm_device *dev = crtc->dev;
-	struct tilcdc_drm_private *priv = dev->dev_private;
-
-	if (priv->rev == 2) {
-		tilcdc_set(dev, LCDC_CLK_RESET_REG, LCDC_CLK_MAIN_RESET);
-		msleep(1);
-		tilcdc_clear(dev, LCDC_CLK_RESET_REG, LCDC_CLK_MAIN_RESET);
-		msleep(1);
-	}
-
-	tilcdc_set(dev, LCDC_DMA_CTRL_REG, LCDC_DUAL_FRAME_BUFFER_ENABLE);
-	tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_PALETTE_LOAD_MODE(DATA_ONLY));
-	tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
-}
-
-static void stop(struct drm_crtc *crtc)
-{
-	struct drm_device *dev = crtc->dev;
-
-	tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
-}
-
-static void tilcdc_crtc_destroy(struct drm_crtc *crtc)
-{
-	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
-
-	WARN_ON(tilcdc_crtc->dpms == DRM_MODE_DPMS_ON);
-
-	drm_crtc_cleanup(crtc);
-	WARN_ON(!kfifo_is_empty(&tilcdc_crtc->unref_fifo));
-	kfifo_free(&tilcdc_crtc->unref_fifo);
-	kfree(tilcdc_crtc);
-}
-
-static int tilcdc_crtc_page_flip(struct drm_crtc *crtc,
-		struct drm_framebuffer *fb,
-		struct drm_pending_vblank_event *event)
-{
-	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
-	struct drm_device *dev = crtc->dev;
-
-	if (tilcdc_crtc->event) {
-		dev_err(dev->dev, "already pending page flip!\n");
-		return -EBUSY;
-	}
-
-	crtc->fb = fb;
-	tilcdc_crtc->event = event;
-	update_scanout(crtc);
-
-	return 0;
-}
-
-static void tilcdc_crtc_dpms(struct drm_crtc *crtc, int mode)
-{
-	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
-	struct drm_device *dev = crtc->dev;
-	struct tilcdc_drm_private *priv = dev->dev_private;
-
-	/* we really only care about on or off: */
-	if (mode != DRM_MODE_DPMS_ON)
-		mode = DRM_MODE_DPMS_OFF;
-
-	if (tilcdc_crtc->dpms == mode)
-		return;
-
-	tilcdc_crtc->dpms = mode;
-
-	pm_runtime_get_sync(dev->dev);
-
-	if (mode == DRM_MODE_DPMS_ON) {
-		pm_runtime_forbid(dev->dev);
-		start(crtc);
-	} else {
-		tilcdc_crtc->frame_done = false;
-		stop(crtc);
-
-		/* if necessary wait for framedone irq which will still come
-		 * before putting things to sleep..
-		 */
-		if (priv->rev == 2) {
-			int ret = wait_event_timeout(
-					tilcdc_crtc->frame_done_wq,
-					tilcdc_crtc->frame_done,
-					msecs_to_jiffies(50));
-			if (ret == 0)
-				dev_err(dev->dev, "timeout waiting for framedone\n");
-		}
-		pm_runtime_allow(dev->dev);
-	}
-
-	pm_runtime_put_sync(dev->dev);
-}
-
-static bool tilcdc_crtc_mode_fixup(struct drm_crtc *crtc,
-		const struct drm_display_mode *mode,
-		struct drm_display_mode *adjusted_mode)
-{
-	return true;
-}
-
-static void tilcdc_crtc_prepare(struct drm_crtc *crtc)
-{
-	tilcdc_crtc_dpms(crtc, DRM_MODE_DPMS_OFF);
-}
-
-static void tilcdc_crtc_commit(struct drm_crtc *crtc)
-{
-	tilcdc_crtc_dpms(crtc, DRM_MODE_DPMS_ON);
-}
-
-static int tilcdc_crtc_mode_set(struct drm_crtc *crtc,
-		struct drm_display_mode *mode,
-		struct drm_display_mode *adjusted_mode,
-		int x, int y,
-		struct drm_framebuffer *old_fb)
-{
-	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
-	struct drm_device *dev = crtc->dev;
-	struct tilcdc_drm_private *priv = dev->dev_private;
-	const struct tilcdc_panel_info *info = tilcdc_crtc->info;
-	uint32_t reg, hbp, hfp, hsw, vbp, vfp, vsw;
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
 	int ret;
 
-	ret = tilcdc_crtc_mode_valid(crtc, mode);
-	if (WARN_ON(ret))
-		return ret;
+	reinit_completion(&tilcdc_crtc->palette_loaded);
 
-	if (WARN_ON(!info))
-		return -EINVAL;
+	/* Tell the LCDC where the palette is located. */
+	tilcdc_write(dev, LCDC_DMA_FB_BASE_ADDR_0_REG,
+		     tilcdc_crtc->palette_dma_handle);
+	tilcdc_write(dev, LCDC_DMA_FB_CEILING_ADDR_0_REG,
+		     (u32) tilcdc_crtc->palette_dma_handle +
+		     TILCDC_PALETTE_SIZE - 1);
 
-	pm_runtime_get_sync(dev->dev);
+	/* Set dma load mode for palette loading only. */
+	tilcdc_write_mask(dev, LCDC_RASTER_CTRL_REG,
+			  LCDC_PALETTE_LOAD_MODE(PALETTE_ONLY),
+			  LCDC_PALETTE_LOAD_MODE_MASK);
+
+	/* Enable DMA Palette Loaded Interrupt */
+	if (priv->rev == 1)
+		tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_V1_PL_INT_ENA);
+	else
+		tilcdc_write(dev, LCDC_INT_ENABLE_SET_REG, LCDC_V2_PL_INT_ENA);
+
+	/* Enable LCDC DMA and wait for palette to be loaded. */
+	tilcdc_clear_irqstatus(dev, 0xffffffff);
+	tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+
+	ret = wait_for_completion_timeout(&tilcdc_crtc->palette_loaded,
+					  msecs_to_jiffies(50));
+	if (ret == 0)
+		drm_err(dev, "%s: Palette loading timeout", __func__);
+
+	/* Disable LCDC DMA and DMA Palette Loaded Interrupt. */
+	tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+	if (priv->rev == 1)
+		tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_V1_PL_INT_ENA);
+	else
+		tilcdc_write(dev, LCDC_INT_ENABLE_CLR_REG, LCDC_V2_PL_INT_ENA);
+}
+
+static void tilcdc_crtc_enable_irqs(struct drm_device *dev)
+{
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
+
+	tilcdc_clear_irqstatus(dev, 0xffffffff);
+
+	if (priv->rev == 1) {
+		tilcdc_set(dev, LCDC_RASTER_CTRL_REG,
+			LCDC_V1_SYNC_LOST_INT_ENA | LCDC_V1_FRAME_DONE_INT_ENA |
+			LCDC_V1_UNDERFLOW_INT_ENA);
+	} else {
+		tilcdc_write(dev, LCDC_INT_ENABLE_SET_REG,
+			LCDC_V2_UNDERFLOW_INT_ENA |
+			LCDC_FRAME_DONE | LCDC_SYNC_LOST);
+	}
+}
+
+static void tilcdc_crtc_disable_irqs(struct drm_device *dev)
+{
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
+
+	/* disable irqs that we might have enabled: */
+	if (priv->rev == 1) {
+		tilcdc_clear(dev, LCDC_RASTER_CTRL_REG,
+			LCDC_V1_SYNC_LOST_INT_ENA | LCDC_V1_FRAME_DONE_INT_ENA |
+			LCDC_V1_UNDERFLOW_INT_ENA | LCDC_V1_PL_INT_ENA);
+		tilcdc_clear(dev, LCDC_DMA_CTRL_REG,
+			LCDC_V1_END_OF_FRAME_INT_ENA);
+	} else {
+		tilcdc_write(dev, LCDC_INT_ENABLE_CLR_REG,
+			LCDC_V2_UNDERFLOW_INT_ENA | LCDC_V2_PL_INT_ENA |
+			LCDC_V2_END_OF_FRAME0_INT_ENA |
+			LCDC_FRAME_DONE | LCDC_SYNC_LOST);
+	}
+}
+
+static void reset(struct drm_crtc *crtc)
+{
+	struct drm_device *dev = crtc->dev;
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
+
+	if (priv->rev != 2)
+		return;
+
+	tilcdc_set(dev, LCDC_CLK_RESET_REG, LCDC_CLK_MAIN_RESET);
+	usleep_range(250, 1000);
+	tilcdc_clear(dev, LCDC_CLK_RESET_REG, LCDC_CLK_MAIN_RESET);
+}
+
+/*
+ * Calculate the percentage difference between the requested pixel clock rate
+ * and the effective rate resulting from calculating the clock divider value.
+ */
+static unsigned int tilcdc_pclk_diff(unsigned long rate,
+				     unsigned long real_rate)
+{
+	int r = rate / 100, rr = real_rate / 100;
+
+	return (unsigned int)(abs(((rr - r) * 100) / r));
+}
+
+static void tilcdc_crtc_set_clk(struct drm_crtc *crtc)
+{
+	struct drm_device *dev = crtc->dev;
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
+	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
+	unsigned long clk_rate, real_pclk_rate, pclk_rate;
+	unsigned int clkdiv;
+	int ret;
+
+	clkdiv = 2; /* first try using a standard divider of 2 */
+
+	/* mode.clock is in KHz, set_rate wants parameter in Hz */
+	pclk_rate = crtc->mode.clock * 1000;
+
+	ret = clk_set_rate(priv->clk, pclk_rate * clkdiv);
+	clk_rate = clk_get_rate(priv->clk);
+	real_pclk_rate = clk_rate / clkdiv;
+	if (ret < 0 || tilcdc_pclk_diff(pclk_rate, real_pclk_rate) > 5) {
+		/*
+		 * If we fail to set the clock rate (some architectures don't
+		 * use the common clock framework yet and may not implement
+		 * all the clk API calls for every clock), try the next best
+		 * thing: adjusting the clock divider, unless clk_get_rate()
+		 * failed as well.
+		 */
+		if (!clk_rate) {
+			/* Nothing more we can do. Just bail out. */
+			drm_err(dev,
+				"failed to set the pixel clock - unable to read current lcdc clock rate\n");
+			return;
+		}
+
+		clkdiv = DIV_ROUND_CLOSEST(clk_rate, pclk_rate);
+
+		/*
+		 * Emit a warning if the real clock rate resulting from the
+		 * calculated divider differs much from the requested rate.
+		 *
+		 * 5% is an arbitrary value - LCDs are usually quite tolerant
+		 * about pixel clock rates.
+		 */
+		real_pclk_rate = clk_rate / clkdiv;
+
+		if (tilcdc_pclk_diff(pclk_rate, real_pclk_rate) > 5) {
+			drm_warn(dev,
+				 "effective pixel clock rate (%luHz) differs from the requested rate (%luHz)\n",
+				 real_pclk_rate, pclk_rate);
+		}
+	}
+
+	tilcdc_crtc->lcd_fck_rate = clk_rate;
+
+	DBG("lcd_clk=%u, mode clock=%d, div=%u",
+	    tilcdc_crtc->lcd_fck_rate, crtc->mode.clock, clkdiv);
+
+	/* Configure the LCD clock divisor. */
+	tilcdc_write(dev, LCDC_CTRL_REG, LCDC_CLK_DIVISOR(clkdiv) |
+		     LCDC_RASTER_MODE);
+
+	if (priv->rev == 2)
+		tilcdc_set(dev, LCDC_CLK_ENABLE_REG,
+				LCDC_V2_DMA_CLK_EN | LCDC_V2_LIDD_CLK_EN |
+				LCDC_V2_CORE_CLK_EN);
+}
+
+static uint tilcdc_mode_hvtotal(const struct drm_display_mode *mode)
+{
+	return (uint) div_u64(1000llu * mode->htotal * mode->vtotal,
+			      mode->clock);
+}
+
+static void tilcdc_crtc_set_mode(struct drm_crtc *crtc)
+{
+	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
+	struct drm_device *dev = crtc->dev;
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
+	uint32_t reg, hbp, hfp, hsw, vbp, vfp, vsw;
+	struct drm_display_mode *mode = &crtc->state->adjusted_mode;
+	struct drm_framebuffer *fb = crtc->primary->state->fb;
+
+	if (WARN_ON(!fb))
+		return;
 
 	/* Configure the Burst Size and fifo threshold of DMA: */
 	reg = tilcdc_read(dev, LCDC_DMA_CTRL_REG) & ~0x00000770;
-	switch (info->dma_burst_sz) {
-	case 1:
-		reg |= LCDC_DMA_BURST_SIZE(LCDC_DMA_BURST_1);
-		break;
-	case 2:
-		reg |= LCDC_DMA_BURST_SIZE(LCDC_DMA_BURST_2);
-		break;
-	case 4:
-		reg |= LCDC_DMA_BURST_SIZE(LCDC_DMA_BURST_4);
-		break;
-	case 8:
-		reg |= LCDC_DMA_BURST_SIZE(LCDC_DMA_BURST_8);
-		break;
-	case 16:
-		reg |= LCDC_DMA_BURST_SIZE(LCDC_DMA_BURST_16);
-		break;
-	default:
-		return -EINVAL;
+	/* Use 16 bit DMA burst size by default */
+	reg |= LCDC_DMA_BURST_SIZE(LCDC_DMA_BURST_16);
+
+	if (priv->fifo_th) {
+		int fifo_th_val = ilog2(priv->fifo_th) - 3;
+
+		reg |= (fifo_th_val << 8);
 	}
-	reg |= (info->fifo_th << 8);
 	tilcdc_write(dev, LCDC_DMA_CTRL_REG, reg);
 
 	/* Configure timings: */
@@ -283,23 +300,30 @@ static int tilcdc_crtc_mode_set(struct drm_crtc *crtc,
 	vsw = mode->vsync_end - mode->vsync_start;
 
 	DBG("%dx%d, hbp=%u, hfp=%u, hsw=%u, vbp=%u, vfp=%u, vsw=%u",
-			mode->hdisplay, mode->vdisplay, hbp, hfp, hsw, vbp, vfp, vsw);
+	    mode->hdisplay, mode->vdisplay, hbp, hfp, hsw, vbp, vfp, vsw);
 
-	/* Configure the AC Bias Period and Number of Transitions per Interrupt: */
+	/* Set AC Bias Period and Number of Transitions per Interrupt: */
 	reg = tilcdc_read(dev, LCDC_RASTER_TIMING_2_REG) & ~0x000fff00;
-	reg |= LCDC_AC_BIAS_FREQUENCY(info->ac_bias) |
-		LCDC_AC_BIAS_TRANSITIONS_PER_INT(info->ac_bias_intrpt);
+	/* Use 255 AC Bias Pin Frequency by default */
+	reg |= LCDC_AC_BIAS_FREQUENCY(255);
+
+	/*
+	 * subtract one from hfp, hbp, hsw because the hardware uses
+	 * a value of 0 as 1
+	 */
 	if (priv->rev == 2) {
-		reg |= (hfp & 0x300) >> 8;
-		reg |= (hbp & 0x300) >> 4;
-		reg |= (hsw & 0x3c0) << 21;
+		/* clear bits we're going to set */
+		reg &= ~0x78000033;
+		reg |= ((hfp-1) & 0x300) >> 8;
+		reg |= ((hbp-1) & 0x300) >> 4;
+		reg |= ((hsw-1) & 0x3c0) << 21;
 	}
 	tilcdc_write(dev, LCDC_RASTER_TIMING_2_REG, reg);
 
 	reg = (((mode->hdisplay >> 4) - 1) << 4) |
-		((hbp & 0xff) << 24) |
-		((hfp & 0xff) << 16) |
-		((hsw & 0x3f) << 10);
+		(((hbp-1) & 0xff) << 24) |
+		(((hfp-1) & 0xff) << 16) |
+		(((hsw-1) & 0x3f) << 10);
 	if (priv->rev == 2)
 		reg |= (((mode->hdisplay >> 4) - 1) & 0x40) >> 3;
 	tilcdc_write(dev, LCDC_RASTER_TIMING_0_REG, reg);
@@ -307,48 +331,59 @@ static int tilcdc_crtc_mode_set(struct drm_crtc *crtc,
 	reg = ((mode->vdisplay - 1) & 0x3ff) |
 		((vbp & 0xff) << 24) |
 		((vfp & 0xff) << 16) |
-		((vsw & 0x3f) << 10);
+		(((vsw-1) & 0x3f) << 10);
 	tilcdc_write(dev, LCDC_RASTER_TIMING_1_REG, reg);
+
+	/*
+	 * be sure to set Bit 10 for the V2 LCDC controller,
+	 * otherwise limited to 1024 pixels width, stopping
+	 * 1920x1080 being supported.
+	 */
+	if (priv->rev == 2) {
+		if ((mode->vdisplay - 1) & 0x400) {
+			tilcdc_set(dev, LCDC_RASTER_TIMING_2_REG,
+				LCDC_LPP_B10);
+		} else {
+			tilcdc_clear(dev, LCDC_RASTER_TIMING_2_REG,
+				LCDC_LPP_B10);
+		}
+	}
 
 	/* Configure display type: */
 	reg = tilcdc_read(dev, LCDC_RASTER_CTRL_REG) &
 		~(LCDC_TFT_MODE | LCDC_MONO_8BIT_MODE | LCDC_MONOCHROME_MODE |
-			LCDC_V2_TFT_24BPP_MODE | LCDC_V2_TFT_24BPP_UNPACK | 0x000ff000);
+		  LCDC_V2_TFT_24BPP_MODE | LCDC_V2_TFT_24BPP_UNPACK |
+		  0x000ff000 /* Palette Loading Delay bits */);
 	reg |= LCDC_TFT_MODE; /* no monochrome/passive support */
-	if (info->tft_alt_mode)
-		reg |= LCDC_TFT_ALT_ENABLE;
 	if (priv->rev == 2) {
-		unsigned int depth, bpp;
-
-		drm_fb_get_bpp_depth(crtc->fb->pixel_format, &depth, &bpp);
-		switch (bpp) {
-		case 16:
+		switch (fb->format->format) {
+		case DRM_FORMAT_BGR565:
+		case DRM_FORMAT_RGB565:
 			break;
-		case 32:
+		case DRM_FORMAT_XBGR8888:
+		case DRM_FORMAT_XRGB8888:
 			reg |= LCDC_V2_TFT_24BPP_UNPACK;
-			/* fallthrough */
-		case 24:
+			fallthrough;
+		case DRM_FORMAT_BGR888:
+		case DRM_FORMAT_RGB888:
 			reg |= LCDC_V2_TFT_24BPP_MODE;
 			break;
 		default:
-			dev_err(dev->dev, "invalid pixel format\n");
-			return -EINVAL;
+			drm_err(dev, "invalid pixel format\n");
+			return;
 		}
 	}
-	reg |= info->fdd < 12;
+	/* Use 128 FIFO DMA Request Delay by default */
+	reg |= 128 << 12;
 	tilcdc_write(dev, LCDC_RASTER_CTRL_REG, reg);
 
-	if (info->invert_pxl_clk)
+	if (mode->flags == DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE)
 		tilcdc_set(dev, LCDC_RASTER_TIMING_2_REG, LCDC_INVERT_PIXEL_CLOCK);
 	else
 		tilcdc_clear(dev, LCDC_RASTER_TIMING_2_REG, LCDC_INVERT_PIXEL_CLOCK);
 
-	if (info->sync_ctrl)
-		tilcdc_set(dev, LCDC_RASTER_TIMING_2_REG, LCDC_SYNC_CTRL);
-	else
-		tilcdc_clear(dev, LCDC_RASTER_TIMING_2_REG, LCDC_SYNC_CTRL);
-
-	if (info->sync_edge)
+	tilcdc_set(dev, LCDC_RASTER_TIMING_2_REG, LCDC_SYNC_CTRL);
+	if (mode->flags == DRM_BUS_FLAG_SYNC_DRIVE_NEGEDGE)
 		tilcdc_set(dev, LCDC_RASTER_TIMING_2_REG, LCDC_SYNC_EDGE);
 	else
 		tilcdc_clear(dev, LCDC_RASTER_TIMING_2_REG, LCDC_SYNC_EDGE);
@@ -363,67 +398,342 @@ static int tilcdc_crtc_mode_set(struct drm_crtc *crtc,
 	else
 		tilcdc_clear(dev, LCDC_RASTER_TIMING_2_REG, LCDC_INVERT_VSYNC);
 
-	if (info->raster_order)
-		tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ORDER);
-	else
-		tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ORDER);
+	tilcdc_crtc_set_clk(crtc);
 
+	tilcdc_crtc_load_palette(crtc);
 
-	update_scanout(crtc);
-	tilcdc_crtc_update_clk(crtc);
+	set_scanout(crtc, fb);
+
+	drm_mode_copy(&crtc->hwmode, &crtc->state->adjusted_mode);
+
+	tilcdc_crtc->hvtotal_us =
+		tilcdc_mode_hvtotal(&crtc->hwmode);
+}
+
+static void tilcdc_crtc_enable(struct drm_crtc *crtc)
+{
+	struct drm_device *dev = crtc->dev;
+	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
+	unsigned long flags;
+
+	mutex_lock(&tilcdc_crtc->enable_lock);
+	if (tilcdc_crtc->enabled || tilcdc_crtc->shutdown) {
+		mutex_unlock(&tilcdc_crtc->enable_lock);
+		return;
+	}
+
+	pm_runtime_get_sync(dev->dev);
+
+	reset(crtc);
+
+	tilcdc_crtc_set_mode(crtc);
+
+	tilcdc_crtc_enable_irqs(dev);
+
+	tilcdc_clear(dev, LCDC_DMA_CTRL_REG, LCDC_DUAL_FRAME_BUFFER_ENABLE);
+	tilcdc_write_mask(dev, LCDC_RASTER_CTRL_REG,
+			  LCDC_PALETTE_LOAD_MODE(DATA_ONLY),
+			  LCDC_PALETTE_LOAD_MODE_MASK);
+
+	/* There is no real chance for a race here as the time stamp
+	 * is taken before the raster DMA is started. The spin-lock is
+	 * taken to have a memory barrier after taking the time-stamp
+	 * and to avoid a context switch between taking the stamp and
+	 * enabling the raster.
+	 */
+	spin_lock_irqsave(&tilcdc_crtc->irq_lock, flags);
+	tilcdc_crtc->last_vblank = ktime_get();
+	tilcdc_set(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+	spin_unlock_irqrestore(&tilcdc_crtc->irq_lock, flags);
+
+	drm_crtc_vblank_on(crtc);
+
+	tilcdc_crtc->enabled = true;
+	mutex_unlock(&tilcdc_crtc->enable_lock);
+}
+
+static void tilcdc_crtc_atomic_enable(struct drm_crtc *crtc,
+				      struct drm_atomic_commit *state)
+{
+	tilcdc_crtc_enable(crtc);
+}
+
+static void tilcdc_crtc_off(struct drm_crtc *crtc, bool shutdown)
+{
+	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
+	struct drm_device *dev = crtc->dev;
+	int ret;
+
+	mutex_lock(&tilcdc_crtc->enable_lock);
+	if (shutdown)
+		tilcdc_crtc->shutdown = true;
+	if (!tilcdc_crtc->enabled) {
+		mutex_unlock(&tilcdc_crtc->enable_lock);
+		return;
+	}
+	tilcdc_crtc->frame_done = false;
+	tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+
+	/*
+	 * Wait for framedone irq which will still come before putting
+	 * things to sleep..
+	 */
+	ret = wait_event_timeout(tilcdc_crtc->frame_done_wq,
+				 tilcdc_crtc->frame_done,
+				 msecs_to_jiffies(500));
+	if (ret == 0)
+		drm_err(dev, "%s: timeout waiting for framedone\n",
+			__func__);
+
+	drm_crtc_vblank_off(crtc);
+
+	spin_lock_irq(&crtc->dev->event_lock);
+
+	if (crtc->state->event) {
+		drm_crtc_send_vblank_event(crtc, crtc->state->event);
+		crtc->state->event = NULL;
+	}
+
+	spin_unlock_irq(&crtc->dev->event_lock);
+
+	tilcdc_crtc_disable_irqs(dev);
 
 	pm_runtime_put_sync(dev->dev);
 
+	tilcdc_crtc->enabled = false;
+	mutex_unlock(&tilcdc_crtc->enable_lock);
+}
+
+static void tilcdc_crtc_disable(struct drm_crtc *crtc)
+{
+	tilcdc_crtc_off(crtc, false);
+}
+
+static void tilcdc_crtc_atomic_disable(struct drm_crtc *crtc,
+				       struct drm_atomic_commit *state)
+{
+	tilcdc_crtc_disable(crtc);
+}
+
+static void tilcdc_crtc_atomic_flush(struct drm_crtc *crtc,
+				     struct drm_atomic_commit *state)
+{
+	if (!crtc->state->event)
+		return;
+
+	spin_lock_irq(&crtc->dev->event_lock);
+	drm_crtc_send_vblank_event(crtc, crtc->state->event);
+	crtc->state->event = NULL;
+	spin_unlock_irq(&crtc->dev->event_lock);
+}
+
+void tilcdc_crtc_shutdown(struct drm_crtc *crtc)
+{
+	tilcdc_crtc_off(crtc, true);
+}
+
+static bool tilcdc_crtc_is_on(struct drm_crtc *crtc)
+{
+	return crtc->state && crtc->state->enable && crtc->state->active;
+}
+
+static void tilcdc_crtc_recover_work(struct work_struct *work)
+{
+	struct tilcdc_crtc *tilcdc_crtc =
+		container_of(work, struct tilcdc_crtc, recover_work);
+	struct drm_crtc *crtc = &tilcdc_crtc->base;
+
+	drm_info(crtc->dev, "%s: Reset CRTC", __func__);
+
+	drm_modeset_lock(&crtc->mutex, NULL);
+
+	if (!tilcdc_crtc_is_on(crtc))
+		goto out;
+
+	tilcdc_crtc_disable(crtc);
+	tilcdc_crtc_enable(crtc);
+out:
+	drm_modeset_unlock(&crtc->mutex);
+}
+
+static void tilcdc_crtc_destroy(struct drm_device *dev, void *data)
+{
+	struct tilcdc_drm_private *priv = (struct tilcdc_drm_private *)data;
+
+	tilcdc_crtc_shutdown(priv->crtc);
+
+	flush_workqueue(priv->wq);
+
+	of_node_put(priv->crtc->port);
+}
+
+int tilcdc_crtc_update_fb(struct drm_crtc *crtc,
+		struct drm_framebuffer *fb,
+		struct drm_pending_vblank_event *event)
+{
+	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
+	struct drm_device *dev = crtc->dev;
+
+	if (tilcdc_crtc->event) {
+		drm_err(dev, "already pending page flip!\n");
+		return -EBUSY;
+	}
+
+	tilcdc_crtc->event = event;
+
+	mutex_lock(&tilcdc_crtc->enable_lock);
+
+	if (tilcdc_crtc->enabled) {
+		unsigned long flags;
+		ktime_t next_vblank;
+		s64 tdiff;
+
+		spin_lock_irqsave(&tilcdc_crtc->irq_lock, flags);
+
+		next_vblank = ktime_add_us(tilcdc_crtc->last_vblank,
+					   tilcdc_crtc->hvtotal_us);
+		tdiff = ktime_to_us(ktime_sub(next_vblank, ktime_get()));
+
+		if (tdiff < TILCDC_VBLANK_SAFETY_THRESHOLD_US)
+			tilcdc_crtc->next_fb = fb;
+		else
+			set_scanout(crtc, fb);
+
+		spin_unlock_irqrestore(&tilcdc_crtc->irq_lock, flags);
+	}
+
+	mutex_unlock(&tilcdc_crtc->enable_lock);
+
 	return 0;
 }
 
-static int tilcdc_crtc_mode_set_base(struct drm_crtc *crtc, int x, int y,
-		struct drm_framebuffer *old_fb)
+static bool tilcdc_crtc_mode_fixup(struct drm_crtc *crtc,
+		const struct drm_display_mode *mode,
+		struct drm_display_mode *adjusted_mode)
 {
-	update_scanout(crtc);
+	/*
+	 * tilcdc does not generate VESA-compliant sync but aligns
+	 * VS on the second edge of HS instead of first edge.
+	 * We use adjusted_mode, to fixup sync by aligning both rising
+	 * edges and add HSKEW offset to fix the sync.
+	 */
+	adjusted_mode->hskew = mode->hsync_end - mode->hsync_start;
+	adjusted_mode->flags |= DRM_MODE_FLAG_HSKEW;
+
+	if (mode->flags & DRM_MODE_FLAG_NHSYNC) {
+		adjusted_mode->flags |= DRM_MODE_FLAG_PHSYNC;
+		adjusted_mode->flags &= ~DRM_MODE_FLAG_NHSYNC;
+	} else {
+		adjusted_mode->flags |= DRM_MODE_FLAG_NHSYNC;
+		adjusted_mode->flags &= ~DRM_MODE_FLAG_PHSYNC;
+	}
+
+	return true;
+}
+
+static int tilcdc_crtc_atomic_check(struct drm_crtc *crtc,
+				    struct drm_atomic_commit *state)
+{
+	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
+									  crtc);
+	/* If we are not active we don't care */
+	if (!crtc_state->active)
+		return 0;
+
+	return drm_atomic_helper_check_crtc_primary_plane(crtc_state);
+}
+
+static int tilcdc_crtc_enable_vblank(struct drm_crtc *crtc)
+{
+	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
+	struct drm_device *dev = crtc->dev;
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
+	unsigned long flags;
+
+	spin_lock_irqsave(&tilcdc_crtc->irq_lock, flags);
+
+	tilcdc_clear_irqstatus(dev, LCDC_END_OF_FRAME0);
+
+	if (priv->rev == 1)
+		tilcdc_set(dev, LCDC_DMA_CTRL_REG,
+			   LCDC_V1_END_OF_FRAME_INT_ENA);
+	else
+		tilcdc_set(dev, LCDC_INT_ENABLE_SET_REG,
+			   LCDC_V2_END_OF_FRAME0_INT_ENA);
+
+	spin_unlock_irqrestore(&tilcdc_crtc->irq_lock, flags);
+
 	return 0;
 }
 
-static void tilcdc_crtc_load_lut(struct drm_crtc *crtc)
+static void tilcdc_crtc_disable_vblank(struct drm_crtc *crtc)
 {
+	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
+	struct drm_device *dev = crtc->dev;
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
+	unsigned long flags;
+
+	spin_lock_irqsave(&tilcdc_crtc->irq_lock, flags);
+
+	if (priv->rev == 1)
+		tilcdc_clear(dev, LCDC_DMA_CTRL_REG,
+			     LCDC_V1_END_OF_FRAME_INT_ENA);
+	else
+		tilcdc_clear(dev, LCDC_INT_ENABLE_SET_REG,
+			     LCDC_V2_END_OF_FRAME0_INT_ENA);
+
+	spin_unlock_irqrestore(&tilcdc_crtc->irq_lock, flags);
+}
+
+static void tilcdc_crtc_hw_reset(struct drm_crtc *crtc)
+{
+	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
+	struct drm_device *dev = crtc->dev;
+	int ret;
+
+	/* Turn the raster off if it for some reason is on. */
+	pm_runtime_get_sync(dev->dev);
+	if (tilcdc_read(dev, LCDC_RASTER_CTRL_REG) & LCDC_RASTER_ENABLE) {
+		/* Enable DMA Frame Done Interrupt */
+		tilcdc_write(dev, LCDC_INT_ENABLE_SET_REG, LCDC_FRAME_DONE);
+		tilcdc_clear_irqstatus(dev, 0xffffffff);
+
+		tilcdc_crtc->frame_done = false;
+		tilcdc_clear(dev, LCDC_RASTER_CTRL_REG, LCDC_RASTER_ENABLE);
+
+		ret = wait_event_timeout(tilcdc_crtc->frame_done_wq,
+					 tilcdc_crtc->frame_done,
+					 msecs_to_jiffies(500));
+		if (ret == 0)
+			drm_err(dev, "%s: timeout waiting for framedone\n",
+				__func__);
+	}
+	pm_runtime_put_sync(dev->dev);
 }
 
 static const struct drm_crtc_funcs tilcdc_crtc_funcs = {
-		.destroy        = tilcdc_crtc_destroy,
-		.set_config     = drm_crtc_helper_set_config,
-		.page_flip      = tilcdc_crtc_page_flip,
+	.set_config     = drm_atomic_helper_set_config,
+	.page_flip      = drm_atomic_helper_page_flip,
+	.atomic_create_state = drm_atomic_helper_crtc_create_state,
+	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
+	.enable_vblank	= tilcdc_crtc_enable_vblank,
+	.disable_vblank	= tilcdc_crtc_disable_vblank,
 };
 
-static const struct drm_crtc_helper_funcs tilcdc_crtc_helper_funcs = {
-		.dpms           = tilcdc_crtc_dpms,
-		.mode_fixup     = tilcdc_crtc_mode_fixup,
-		.prepare        = tilcdc_crtc_prepare,
-		.commit         = tilcdc_crtc_commit,
-		.mode_set       = tilcdc_crtc_mode_set,
-		.mode_set_base  = tilcdc_crtc_mode_set_base,
-		.load_lut       = tilcdc_crtc_load_lut,
-};
-
-int tilcdc_crtc_max_width(struct drm_crtc *crtc)
+static enum drm_mode_status
+tilcdc_crtc_mode_valid(struct drm_crtc *crtc,
+		       const struct drm_display_mode *mode)
 {
-	struct drm_device *dev = crtc->dev;
-	struct tilcdc_drm_private *priv = dev->dev_private;
-	int max_width = 0;
-
-	if (priv->rev == 1)
-		max_width = 1024;
-	else if (priv->rev == 2)
-		max_width = 2048;
-
-	return max_width;
-}
-
-int tilcdc_crtc_mode_valid(struct drm_crtc *crtc, struct drm_display_mode *mode)
-{
-	struct tilcdc_drm_private *priv = crtc->dev->dev_private;
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(crtc->dev);
 	unsigned int bandwidth;
+	uint32_t hbp, hfp, hsw, vbp, vfp, vsw;
 
-	if (mode->hdisplay > tilcdc_crtc_max_width(crtc))
+	/*
+	 * check to see if the width is within the range that
+	 * the LCD Controller physically supports
+	 */
+	if (mode->hdisplay > priv->max_width)
 		return MODE_VIRTUAL_X;
 
 	/* width must be multiple of 16 */
@@ -433,170 +743,266 @@ int tilcdc_crtc_mode_valid(struct drm_crtc *crtc, struct drm_display_mode *mode)
 	if (mode->vdisplay > 2048)
 		return MODE_VIRTUAL_Y;
 
+	DBG("Processing mode %dx%d@%d with pixel clock %d",
+		mode->hdisplay, mode->vdisplay,
+		drm_mode_vrefresh(mode), mode->clock);
+
+	hbp = mode->htotal - mode->hsync_end;
+	hfp = mode->hsync_start - mode->hdisplay;
+	hsw = mode->hsync_end - mode->hsync_start;
+	vbp = mode->vtotal - mode->vsync_end;
+	vfp = mode->vsync_start - mode->vdisplay;
+	vsw = mode->vsync_end - mode->vsync_start;
+
+	if ((hbp-1) & ~0x3ff) {
+		DBG("Pruning mode: Horizontal Back Porch out of range");
+		return MODE_HBLANK_WIDE;
+	}
+
+	if ((hfp-1) & ~0x3ff) {
+		DBG("Pruning mode: Horizontal Front Porch out of range");
+		return MODE_HBLANK_WIDE;
+	}
+
+	if ((hsw-1) & ~0x3ff) {
+		DBG("Pruning mode: Horizontal Sync Width out of range");
+		return MODE_HSYNC_WIDE;
+	}
+
+	if (vbp & ~0xff) {
+		DBG("Pruning mode: Vertical Back Porch out of range");
+		return MODE_VBLANK_WIDE;
+	}
+
+	if (vfp & ~0xff) {
+		DBG("Pruning mode: Vertical Front Porch out of range");
+		return MODE_VBLANK_WIDE;
+	}
+
+	if ((vsw-1) & ~0x3f) {
+		DBG("Pruning mode: Vertical Sync Width out of range");
+		return MODE_VSYNC_WIDE;
+	}
+
+	/*
+	 * some devices have a maximum allowed pixel clock
+	 * configured from the DT
+	 */
+	if (mode->clock > priv->max_pixelclock) {
+		DBG("Pruning mode: pixel clock too high");
+		return MODE_CLOCK_HIGH;
+	}
+
+	/*
+	 * some devices further limit the max horizontal resolution
+	 * configured from the DT
+	 */
+	if (mode->hdisplay > priv->max_width)
+		return MODE_BAD_WIDTH;
+
 	/* filter out modes that would require too much memory bandwidth: */
-	bandwidth = mode->hdisplay * mode->vdisplay * drm_mode_vrefresh(mode);
-	if (bandwidth > priv->max_bandwidth)
+	bandwidth = mode->hdisplay * mode->vdisplay *
+		drm_mode_vrefresh(mode);
+	if (bandwidth > priv->max_bandwidth) {
+		DBG("Pruning mode: exceeds defined bandwidth limit");
 		return MODE_BAD;
+	}
 
 	return MODE_OK;
 }
 
-void tilcdc_crtc_set_panel_info(struct drm_crtc *crtc,
-		const struct tilcdc_panel_info *info)
-{
-	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
-	tilcdc_crtc->info = info;
-}
+static const struct drm_crtc_helper_funcs tilcdc_crtc_helper_funcs = {
+	.mode_valid	= tilcdc_crtc_mode_valid,
+	.mode_fixup	= tilcdc_crtc_mode_fixup,
+	.atomic_check	= tilcdc_crtc_atomic_check,
+	.atomic_enable	= tilcdc_crtc_atomic_enable,
+	.atomic_disable	= tilcdc_crtc_atomic_disable,
+	.atomic_flush	= tilcdc_crtc_atomic_flush,
+	.hw_reset	= tilcdc_crtc_hw_reset,
+};
 
 void tilcdc_crtc_update_clk(struct drm_crtc *crtc)
 {
-	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
 	struct drm_device *dev = crtc->dev;
-	struct tilcdc_drm_private *priv = dev->dev_private;
-	int dpms = tilcdc_crtc->dpms;
-	unsigned int lcd_clk, div;
-	int ret;
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
+	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
 
-	pm_runtime_get_sync(dev->dev);
+	drm_modeset_lock(&crtc->mutex, NULL);
+	if (tilcdc_crtc->lcd_fck_rate != clk_get_rate(priv->clk)) {
+		if (tilcdc_crtc_is_on(crtc)) {
+			pm_runtime_get_sync(dev->dev);
+			tilcdc_crtc_disable(crtc);
 
-	if (dpms == DRM_MODE_DPMS_ON)
-		tilcdc_crtc_dpms(crtc, DRM_MODE_DPMS_OFF);
+			tilcdc_crtc_set_clk(crtc);
 
-	/* in raster mode, minimum divisor is 2: */
-	ret = clk_set_rate(priv->disp_clk, crtc->mode.clock * 1000 * 2);
-	if (ret) {
-		dev_err(dev->dev, "failed to set display clock rate to: %d\n",
-				crtc->mode.clock);
-		goto out;
+			tilcdc_crtc_enable(crtc);
+			pm_runtime_put_sync(dev->dev);
+		}
 	}
-
-	lcd_clk = clk_get_rate(priv->clk);
-	div = lcd_clk / (crtc->mode.clock * 1000);
-
-	DBG("lcd_clk=%u, mode clock=%d, div=%u", lcd_clk, crtc->mode.clock, div);
-	DBG("fck=%lu, dpll_disp_ck=%lu", clk_get_rate(priv->clk), clk_get_rate(priv->disp_clk));
-
-	/* Configure the LCD clock divisor. */
-	tilcdc_write(dev, LCDC_CTRL_REG, LCDC_CLK_DIVISOR(div) |
-			LCDC_RASTER_MODE);
-
-	if (priv->rev == 2)
-		tilcdc_set(dev, LCDC_CLK_ENABLE_REG,
-				LCDC_V2_DMA_CLK_EN | LCDC_V2_LIDD_CLK_EN |
-				LCDC_V2_CORE_CLK_EN);
-
-	if (dpms == DRM_MODE_DPMS_ON)
-		tilcdc_crtc_dpms(crtc, DRM_MODE_DPMS_ON);
-
-out:
-	pm_runtime_put_sync(dev->dev);
+	drm_modeset_unlock(&crtc->mutex);
 }
+
+#define SYNC_LOST_COUNT_LIMIT 50
 
 irqreturn_t tilcdc_crtc_irq(struct drm_crtc *crtc)
 {
 	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
 	struct drm_device *dev = crtc->dev;
-	struct tilcdc_drm_private *priv = dev->dev_private;
-	uint32_t stat = tilcdc_read_irqstatus(dev);
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
+	uint32_t stat, reg;
 
-	if ((stat & LCDC_SYNC_LOST) && (stat & LCDC_FIFO_UNDERFLOW)) {
-		stop(crtc);
-		dev_err(dev->dev, "error: %08x\n", stat);
-		tilcdc_clear_irqstatus(dev, stat);
-		start(crtc);
-	} else if (stat & LCDC_PL_LOAD_DONE) {
-		tilcdc_clear_irqstatus(dev, stat);
-	} else {
-		struct drm_pending_vblank_event *event;
-		unsigned long flags;
-		uint32_t dirty = tilcdc_crtc->dirty & stat;
+	stat = tilcdc_read_irqstatus(dev);
+	tilcdc_clear_irqstatus(dev, stat);
 
-		tilcdc_clear_irqstatus(dev, stat);
+	if (stat & LCDC_END_OF_FRAME0) {
+		bool skip_event = false;
+		ktime_t now;
 
-		if (dirty & LCDC_END_OF_FRAME0)
-			set_scanout(crtc, 0);
+		now = ktime_get();
 
-		if (dirty & LCDC_END_OF_FRAME1)
-			set_scanout(crtc, 1);
+		spin_lock(&tilcdc_crtc->irq_lock);
 
-		drm_handle_vblank(dev, 0);
+		tilcdc_crtc->last_vblank = now;
 
-		spin_lock_irqsave(&dev->event_lock, flags);
-		event = tilcdc_crtc->event;
-		tilcdc_crtc->event = NULL;
-		if (event)
-			drm_send_vblank_event(dev, 0, event);
-		spin_unlock_irqrestore(&dev->event_lock, flags);
+		if (tilcdc_crtc->next_fb) {
+			set_scanout(crtc, tilcdc_crtc->next_fb);
+			tilcdc_crtc->next_fb = NULL;
+			skip_event = true;
+		}
 
-		if (dirty && !tilcdc_crtc->dirty)
-			drm_vblank_put(dev, 0);
+		spin_unlock(&tilcdc_crtc->irq_lock);
+
+		drm_crtc_handle_vblank(crtc);
+
+		if (!skip_event) {
+			struct drm_pending_vblank_event *event;
+
+			spin_lock(&dev->event_lock);
+
+			event = tilcdc_crtc->event;
+			tilcdc_crtc->event = NULL;
+			if (event)
+				drm_crtc_send_vblank_event(crtc, event);
+
+			spin_unlock(&dev->event_lock);
+		}
+
+		if (tilcdc_crtc->frame_intact)
+			tilcdc_crtc->sync_lost_count = 0;
+		else
+			tilcdc_crtc->frame_intact = true;
 	}
 
-	if (priv->rev == 2) {
-		if (stat & LCDC_FRAME_DONE) {
-			tilcdc_crtc->frame_done = true;
-			wake_up(&tilcdc_crtc->frame_done_wq);
+	if (stat & LCDC_FIFO_UNDERFLOW)
+		drm_err_ratelimited(dev, "%s(0x%08x): FIFO underflow",
+				    __func__, stat);
+
+	if (stat & LCDC_PL_LOAD_DONE) {
+		complete(&tilcdc_crtc->palette_loaded);
+		if (priv->rev == 1)
+			tilcdc_clear(dev, LCDC_RASTER_CTRL_REG,
+				     LCDC_V1_PL_INT_ENA);
+		else
+			tilcdc_write(dev, LCDC_INT_ENABLE_CLR_REG,
+				     LCDC_V2_PL_INT_ENA);
+	}
+
+	if (stat & LCDC_SYNC_LOST) {
+		drm_err_ratelimited(dev, "%s(0x%08x): Sync lost",
+				    __func__, stat);
+		tilcdc_crtc->frame_intact = false;
+		if (priv->rev == 1) {
+			reg = tilcdc_read(dev, LCDC_RASTER_CTRL_REG);
+			if (reg & LCDC_RASTER_ENABLE) {
+				tilcdc_clear(dev, LCDC_RASTER_CTRL_REG,
+					     LCDC_RASTER_ENABLE);
+				tilcdc_set(dev, LCDC_RASTER_CTRL_REG,
+					   LCDC_RASTER_ENABLE);
+			}
+		} else {
+			if (tilcdc_crtc->sync_lost_count++ >
+			    SYNC_LOST_COUNT_LIMIT) {
+				drm_err(dev,
+					"%s(0x%08x): Sync lost flood detected, recovering",
+					__func__, stat);
+				queue_work(system_percpu_wq,
+					   &tilcdc_crtc->recover_work);
+				tilcdc_write(dev, LCDC_INT_ENABLE_CLR_REG,
+					     LCDC_SYNC_LOST);
+				tilcdc_crtc->sync_lost_count = 0;
+			}
 		}
+	}
+
+	if (stat & LCDC_FRAME_DONE) {
+		tilcdc_crtc->frame_done = true;
+		wake_up(&tilcdc_crtc->frame_done_wq);
+		/* rev 1 lcdc appears to hang if irq is not disabled here */
+		if (priv->rev == 1)
+			tilcdc_clear(dev, LCDC_RASTER_CTRL_REG,
+				     LCDC_V1_FRAME_DONE_INT_ENA);
+	}
+
+	/* For revision 2 only */
+	if (priv->rev == 2) {
+		/* Indicate to LCDC that the interrupt service routine has
+		 * completed, see 13.3.6.1.6 in AM335x TRM.
+		 */
 		tilcdc_write(dev, LCDC_END_OF_INT_IND_REG, 0);
 	}
 
 	return IRQ_HANDLED;
 }
 
-void tilcdc_crtc_cancel_page_flip(struct drm_crtc *crtc, struct drm_file *file)
+int tilcdc_crtc_create(struct drm_device *dev)
 {
-	struct tilcdc_crtc *tilcdc_crtc = to_tilcdc_crtc(crtc);
-	struct drm_pending_vblank_event *event;
-	struct drm_device *dev = crtc->dev;
-	unsigned long flags;
-
-	/* Destroy the pending vertical blanking event associated with the
-	 * pending page flip, if any, and disable vertical blanking interrupts.
-	 */
-	spin_lock_irqsave(&dev->event_lock, flags);
-	event = tilcdc_crtc->event;
-	if (event && event->base.file_priv == file) {
-		tilcdc_crtc->event = NULL;
-		event->base.destroy(&event->base);
-		drm_vblank_put(dev, 0);
-	}
-	spin_unlock_irqrestore(&dev->event_lock, flags);
-}
-
-struct drm_crtc *tilcdc_crtc_create(struct drm_device *dev)
-{
+	struct tilcdc_drm_private *priv = ddev_to_tilcdc_priv(dev);
 	struct tilcdc_crtc *tilcdc_crtc;
+	struct tilcdc_plane *primary;
 	struct drm_crtc *crtc;
 	int ret;
 
-	tilcdc_crtc = kzalloc(sizeof(*tilcdc_crtc), GFP_KERNEL);
-	if (!tilcdc_crtc) {
-		dev_err(dev->dev, "allocation failed\n");
-		return NULL;
+	primary = tilcdc_plane_init(dev);
+	if (IS_ERR(primary)) {
+		drm_err(dev, "Failed to initialize plane: %pe\n", primary);
+		return PTR_ERR(primary);
 	}
+
+	tilcdc_crtc = drmm_crtc_alloc_with_planes(dev, struct tilcdc_crtc, base,
+						  &primary->base,
+						  NULL,
+						  &tilcdc_crtc_funcs,
+						  "tilcdc crtc");
+	if (IS_ERR(tilcdc_crtc)) {
+		drm_err(dev, "Failed to init CRTC: %pe\n", tilcdc_crtc);
+		return PTR_ERR(tilcdc_crtc);
+	}
+
+	tilcdc_crtc->primary = primary;
+	priv->crtc = &tilcdc_crtc->base;
+	ret = drmm_add_action_or_reset(dev, tilcdc_crtc_destroy, priv);
+	if (ret)
+		return ret;
+
+	init_completion(&tilcdc_crtc->palette_loaded);
+	tilcdc_crtc->palette_base = dmam_alloc_coherent(dev->dev,
+					TILCDC_PALETTE_SIZE,
+					&tilcdc_crtc->palette_dma_handle,
+					GFP_KERNEL | __GFP_ZERO);
+	if (!tilcdc_crtc->palette_base)
+		return -ENOMEM;
+	*tilcdc_crtc->palette_base = TILCDC_PALETTE_FIRST_ENTRY;
 
 	crtc = &tilcdc_crtc->base;
 
-	tilcdc_crtc->dpms = DRM_MODE_DPMS_OFF;
+	mutex_init(&tilcdc_crtc->enable_lock);
+
 	init_waitqueue_head(&tilcdc_crtc->frame_done_wq);
 
-	ret = kfifo_alloc(&tilcdc_crtc->unref_fifo, 16, GFP_KERNEL);
-	if (ret) {
-		dev_err(dev->dev, "could not allocate unref FIFO\n");
-		goto fail;
-	}
-
-	INIT_WORK(&tilcdc_crtc->work, unref_worker);
-
-	ret = drm_crtc_init(dev, crtc, &tilcdc_crtc_funcs);
-	if (ret < 0)
-		goto fail;
+	spin_lock_init(&tilcdc_crtc->irq_lock);
+	INIT_WORK(&tilcdc_crtc->recover_work, tilcdc_crtc_recover_work);
 
 	drm_crtc_helper_add(crtc, &tilcdc_crtc_helper_funcs);
 
-	return crtc;
-
-fail:
-	tilcdc_crtc_destroy(crtc);
-	return NULL;
+	return 0;
 }

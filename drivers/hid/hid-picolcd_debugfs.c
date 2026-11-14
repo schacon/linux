@@ -1,26 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /***************************************************************************
  *   Copyright (C) 2010-2012 by Bruno Prémont <bonbons@linux-vserver.org>  *
  *                                                                         *
  *   Based on Logitech G13 driver (v0.4)                                   *
  *     Copyright (C) 2009 by Rick L. Vinyard, Jr. <rvinyard@cs.nmsu.edu>   *
  *                                                                         *
- *   This program is free software: you can redistribute it and/or modify  *
- *   it under the terms of the GNU General Public License as published by  *
- *   the Free Software Foundation, version 2 of the License.               *
- *                                                                         *
- *   This driver is distributed in the hope that it will be useful, but    *
- *   WITHOUT ANY WARRANTY; without even the implied warranty of            *
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU      *
- *   General Public License for more details.                              *
- *                                                                         *
- *   You should have received a copy of the GNU General Public License     *
- *   along with this software. If not see <http://www.gnu.org/licenses/>.  *
  ***************************************************************************/
 
 #include <linux/hid.h>
 #include <linux/hid-debug.h>
 
 #include <linux/fb.h>
+#include <linux/hex.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
 
@@ -108,6 +99,15 @@ static ssize_t picolcd_debug_eeprom_read(struct file *f, char __user *u,
 		ret = resp->raw_data[2];
 		if (ret > s)
 			ret = s;
+		/*
+		 * raw_data[2] is a device-supplied length; also clamp it to
+		 * what picolcd_raw_event() actually stored (raw_size), or a
+		 * hostile device overruns the raw_data[] buffer.
+		 */
+		if (ret > resp->raw_size - 3)
+			ret = resp->raw_size - 3;
+		if (ret < 0)
+			ret = 0;
 		if (copy_to_user(u, resp->raw_data+3, ret))
 			ret = -EFAULT;
 		else
@@ -394,7 +394,7 @@ static void dump_buff_as_hex(char *dst, size_t dst_sz, const u8 *data,
 void picolcd_debug_out_report(struct picolcd_data *data,
 		struct hid_device *hdev, struct hid_report *report)
 {
-	u8 raw_data[70];
+	u8 *raw_data;
 	int raw_size = (report->size >> 3) + 1;
 	char *buff;
 #define BUFF_SZ 256
@@ -407,19 +407,19 @@ void picolcd_debug_out_report(struct picolcd_data *data,
 	if (!buff)
 		return;
 
+	raw_data = hid_alloc_report_buf(report, GFP_ATOMIC);
+	if (!raw_data) {
+		kfree(buff);
+		return;
+	}
+
 	snprintf(buff, BUFF_SZ, "\nout report %d (size %d) =  ",
 			report->id, raw_size);
 	hid_debug_event(hdev, buff);
-	if (raw_size + 5 > sizeof(raw_data)) {
-		kfree(buff);
-		hid_debug_event(hdev, " TOO BIG\n");
-		return;
-	} else {
-		raw_data[0] = report->id;
-		hid_output_report(report, raw_data);
-		dump_buff_as_hex(buff, BUFF_SZ, raw_data, raw_size);
-		hid_debug_event(hdev, buff);
-	}
+	raw_data[0] = report->id;
+	hid_output_report(report, raw_data);
+	dump_buff_as_hex(buff, BUFF_SZ, raw_data, raw_size);
+	hid_debug_event(hdev, buff);
 
 	switch (report->id) {
 	case REPORT_LED_STATE:
@@ -644,6 +644,7 @@ void picolcd_debug_out_report(struct picolcd_data *data,
 		break;
 	}
 	wake_up_interruptible(&hdev->debug_wait);
+	kfree(raw_data);
 	kfree(buff);
 }
 
@@ -735,7 +736,7 @@ void picolcd_debug_raw_event(struct picolcd_data *data,
 		}
 		break;
 	case REPORT_MEMORY:
-		/* Data buffer in response to REPORT_READ_MEMORY or REPORT_WRTIE_MEMORY */
+		/* Data buffer in response to REPORT_READ_MEMORY or REPORT_WRITE_MEMORY */
 		snprintf(buff, BUFF_SZ, "report %s (%d, size=%d)\n",
 			"REPORT_MEMORY", report->id, size-1);
 		hid_debug_event(hdev, buff);
@@ -882,16 +883,13 @@ void picolcd_exit_devfs(struct picolcd_data *data)
 
 	dent = data->debug_reset;
 	data->debug_reset = NULL;
-	if (dent)
-		debugfs_remove(dent);
+	debugfs_remove(dent);
 	dent = data->debug_eeprom;
 	data->debug_eeprom = NULL;
-	if (dent)
-		debugfs_remove(dent);
+	debugfs_remove(dent);
 	dent = data->debug_flash;
 	data->debug_flash = NULL;
-	if (dent)
-		debugfs_remove(dent);
+	debugfs_remove(dent);
 	mutex_destroy(&data->mutex_flash);
 }
 

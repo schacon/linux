@@ -1,21 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Advanced  Micro Devices Inc. AMD8111E Linux Network Driver
  * Copyright (C) 2003 Advanced Micro Devices
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307
- * USA
 
 Module Name:
 
@@ -23,14 +10,14 @@ Module Name:
 
 Abstract:
 
- 	 AMD8111 based 10/100 Ethernet Controller driver definitions.
+	 AMD8111 based 10/100 Ethernet Controller driver definitions.
 
 Environment:
 
 	Kernel Mode
 
 Revision History:
- 	3.0.0
+	3.0.0
 	   Initial Revision.
 	3.0.1
 */
@@ -50,7 +37,7 @@ eg., if the value 10011010b is written into the least significant byte of a comm
 /* 32 bit registers */
 
 #define  ASF_STAT		0x00	/* ASF status register */
-#define CHIPID			0x04	/* Chip ID regsiter */
+#define CHIPID			0x04	/* Chip ID register */
 #define	MIB_DATA		0x10	/* MIB data register */
 #define MIB_ADDR		0x14	/* MIB address register */
 #define STAT0			0x30	/* Status0 register */
@@ -563,7 +550,6 @@ typedef enum {
 
 /* Driver definitions */
 
-#define	 PCI_VENDOR_ID_AMD		0x1022
 #define  PCI_DEVICE_ID_AMD8111E_7462	0x7462
 
 #define MAX_UNITS			8 /* Maximum number of devices possible */
@@ -613,10 +599,10 @@ typedef enum {
 #define CSTATE  1
 #define SSTATE  2
 
-/* Assume contoller gets data 10 times the maximum processing time */
+/* Assume controller gets data 10 times the maximum processing time */
 #define  REPEAT_CNT			10
 
-/* amd8111e decriptor flag definitions */
+/* amd8111e descriptor flag definitions */
 typedef enum {
 
 	OWN_BIT		=	(1 << 15),
@@ -650,7 +636,7 @@ typedef enum {
 /* driver ioctl parameters */
 #define AMD8111E_REG_DUMP_LEN	 13*sizeof(u32)
 
-/* amd8111e desriptor format */
+/* amd8111e descriptor format */
 
 struct amd8111e_tx_dr{
 
@@ -705,7 +691,7 @@ enum coal_type{
 };
 
 enum coal_mode{
-       	RX_INTR_COAL,
+	RX_INTR_COAL,
 	TX_INTR_COAL,
 	DISABLE_COAL,
 	ENABLE_COAL,
@@ -753,7 +739,7 @@ struct amd8111e_priv{
 	const char *name;
 	struct pci_dev *pci_dev;	/* Ptr to the associated pci_dev */
 	struct net_device* amd8111e_net_dev; 	/* ptr to associated net_device */
-	/* Transmit and recive skbs */
+	/* Transmit and receive skbs */
 	struct sk_buff *tx_skbuff[NUM_TX_BUFFERS];
 	struct sk_buff *rx_skbuff[NUM_RX_BUFFERS];
 	/* Transmit and receive dma mapped addr */
@@ -777,7 +763,6 @@ struct amd8111e_priv{
 	u32 ext_phy_id;
 
 	struct amd8111e_link_config link_config;
-	int pm_cap;
 
 	struct net_device *next;
 	int mii;

@@ -1,22 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * USB Wishbone-Serial adapter driver
  *
  * Copyright (C) 2013 Wesley W. Terpstra <w.terpstra@gsi.de>
  * Copyright (C) 2013 GSI Helmholtz Centre for Heavy Ion Research GmbH
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
  */
 
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <linux/tty.h>
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
-#include <linux/uaccess.h>
 
 #define GSI_VENDOR_OPENCLOSE 0xB0
 
@@ -75,7 +69,6 @@ static void wishbone_serial_close(struct usb_serial_port *port)
 
 static struct usb_serial_driver wishbone_serial_device = {
 	.driver = {
-		.owner =	THIS_MODULE,
 		.name =		"wishbone_serial",
 	},
 	.id_table =		id_table,

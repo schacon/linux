@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Marvell MVEBU CPU clock handling.
  *
@@ -5,21 +6,28 @@
  *
  * Gregory CLEMENT <gregory.clement@free-electrons.com>
  *
- * This file is licensed under the terms of the GNU General Public
- * License version 2.  This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 #include <linux/kernel.h>
-#include <linux/clkdev.h>
+#include <linux/slab.h>
+#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/of_address.h>
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/delay.h>
+#include <linux/mvebu-pmsu.h>
+#include <asm/smp_plat.h>
 
-#define SYS_CTRL_CLK_DIVIDER_CTRL_OFFSET    0x0
-#define SYS_CTRL_CLK_DIVIDER_VALUE_OFFSET   0xC
-#define SYS_CTRL_CLK_DIVIDER_MASK	    0x3F
+#define SYS_CTRL_CLK_DIVIDER_CTRL_OFFSET               0x0
+#define   SYS_CTRL_CLK_DIVIDER_CTRL_RESET_ALL          0xff
+#define   SYS_CTRL_CLK_DIVIDER_CTRL_RESET_SHIFT        8
+#define SYS_CTRL_CLK_DIVIDER_CTRL2_OFFSET              0x8
+#define   SYS_CTRL_CLK_DIVIDER_CTRL2_NBCLK_RATIO_SHIFT 16
+#define SYS_CTRL_CLK_DIVIDER_VALUE_OFFSET              0xC
+#define SYS_CTRL_CLK_DIVIDER_MASK                      0x3F
+
+#define PMU_DFS_RATIO_SHIFT 16
+#define PMU_DFS_RATIO_MASK  0x3F
 
 #define MAX_CPU	    4
 struct cpu_clk {
@@ -28,6 +36,7 @@ struct cpu_clk {
 	const char *clk_name;
 	const char *parent_name;
 	void __iomem *reg_base;
+	void __iomem *pmu_dfs;
 };
 
 static struct clk **clks;
@@ -47,23 +56,26 @@ static unsigned long clk_cpu_recalc_rate(struct clk_hw *hwclk,
 	return parent_rate / div;
 }
 
-static long clk_cpu_round_rate(struct clk_hw *hwclk, unsigned long rate,
-			       unsigned long *parent_rate)
+static int clk_cpu_determine_rate(struct clk_hw *hw,
+				  struct clk_rate_request *req)
 {
 	/* Valid ratio are 1:1, 1:2 and 1:3 */
 	u32 div;
 
-	div = *parent_rate / rate;
+	div = req->best_parent_rate / req->rate;
 	if (div == 0)
 		div = 1;
 	else if (div > 3)
 		div = 3;
 
-	return *parent_rate / div;
+	req->rate = req->best_parent_rate / div;
+
+	return 0;
 }
 
-static int clk_cpu_set_rate(struct clk_hw *hwclk, unsigned long rate,
-			    unsigned long parent_rate)
+static int clk_cpu_off_set_rate(struct clk_hw *hwclk, unsigned long rate,
+				unsigned long parent_rate)
+
 {
 	struct cpu_clk *cpuclk = to_cpu_clk(hwclk);
 	u32 reg, div;
@@ -95,18 +107,71 @@ static int clk_cpu_set_rate(struct clk_hw *hwclk, unsigned long rate,
 	return 0;
 }
 
+static int clk_cpu_on_set_rate(struct clk_hw *hwclk, unsigned long rate,
+			       unsigned long parent_rate)
+{
+	u32 reg;
+	unsigned long fabric_div, target_div, cur_rate;
+	struct cpu_clk *cpuclk = to_cpu_clk(hwclk);
+
+	/*
+	 * PMU DFS registers are not mapped, Device Tree does not
+	 * describes them. We cannot change the frequency dynamically.
+	 */
+	if (!cpuclk->pmu_dfs)
+		return -ENODEV;
+
+	cur_rate = clk_hw_get_rate(hwclk);
+
+	reg = readl(cpuclk->reg_base + SYS_CTRL_CLK_DIVIDER_CTRL2_OFFSET);
+	fabric_div = (reg >> SYS_CTRL_CLK_DIVIDER_CTRL2_NBCLK_RATIO_SHIFT) &
+		SYS_CTRL_CLK_DIVIDER_MASK;
+
+	/* Frequency is going up */
+	if (rate == 2 * cur_rate)
+		target_div = fabric_div / 2;
+	/* Frequency is going down */
+	else
+		target_div = fabric_div;
+
+	if (target_div == 0)
+		target_div = 1;
+
+	reg = readl(cpuclk->pmu_dfs);
+	reg &= ~(PMU_DFS_RATIO_MASK << PMU_DFS_RATIO_SHIFT);
+	reg |= (target_div << PMU_DFS_RATIO_SHIFT);
+	writel(reg, cpuclk->pmu_dfs);
+
+	reg = readl(cpuclk->reg_base + SYS_CTRL_CLK_DIVIDER_CTRL_OFFSET);
+	reg |= (SYS_CTRL_CLK_DIVIDER_CTRL_RESET_ALL <<
+		SYS_CTRL_CLK_DIVIDER_CTRL_RESET_SHIFT);
+	writel(reg, cpuclk->reg_base + SYS_CTRL_CLK_DIVIDER_CTRL_OFFSET);
+
+	return mvebu_pmsu_dfs_request(cpuclk->cpu);
+}
+
+static int clk_cpu_set_rate(struct clk_hw *hwclk, unsigned long rate,
+			    unsigned long parent_rate)
+{
+	if (clk_hw_is_enabled(hwclk))
+		return clk_cpu_on_set_rate(hwclk, rate, parent_rate);
+	else
+		return clk_cpu_off_set_rate(hwclk, rate, parent_rate);
+}
+
 static const struct clk_ops cpu_ops = {
 	.recalc_rate = clk_cpu_recalc_rate,
-	.round_rate = clk_cpu_round_rate,
+	.determine_rate = clk_cpu_determine_rate,
 	.set_rate = clk_cpu_set_rate,
 };
 
-void __init of_cpu_clk_setup(struct device_node *node)
+static void __init of_cpu_clk_setup(struct device_node *node)
 {
 	struct cpu_clk *cpuclk;
 	void __iomem *clock_complex_base = of_iomap(node, 0);
-	int ncpus = 0;
-	struct device_node *dn;
+	void __iomem *pmu_dfs_base = of_iomap(node, 1);
+	int ncpus = num_possible_cpus();
+	int cpu;
 
 	if (clock_complex_base == NULL) {
 		pr_err("%s: clock-complex base register not set\n",
@@ -114,38 +179,34 @@ void __init of_cpu_clk_setup(struct device_node *node)
 		return;
 	}
 
-	for_each_node_by_type(dn, "cpu")
-		ncpus++;
+	if (pmu_dfs_base == NULL)
+		pr_warn("%s: pmu-dfs base register not set, dynamic frequency scaling not available\n",
+			__func__);
 
-	cpuclk = kzalloc(ncpus * sizeof(*cpuclk), GFP_KERNEL);
+	cpuclk = kzalloc_objs(*cpuclk, ncpus);
 	if (WARN_ON(!cpuclk))
-		return;
+		goto cpuclk_out;
 
-	clks = kzalloc(ncpus * sizeof(*clks), GFP_KERNEL);
+	clks = kzalloc_objs(*clks, ncpus);
 	if (WARN_ON(!clks))
 		goto clks_out;
 
-	for_each_node_by_type(dn, "cpu") {
-		struct clk_init_data init;
+	for_each_possible_cpu(cpu) {
+		struct clk_init_data init = {};
 		struct clk *clk;
-		struct clk *parent_clk;
 		char *clk_name = kzalloc(5, GFP_KERNEL);
-		int cpu, err;
 
 		if (WARN_ON(!clk_name))
 			goto bail_out;
 
-		err = of_property_read_u32(dn, "reg", &cpu);
-		if (WARN_ON(err))
-			goto bail_out;
-
 		sprintf(clk_name, "cpu%d", cpu);
-		parent_clk = of_clk_get(node, 0);
 
-		cpuclk[cpu].parent_name = __clk_get_name(parent_clk);
+		cpuclk[cpu].parent_name = of_clk_get_parent_name(node, 0);
 		cpuclk[cpu].clk_name = clk_name;
 		cpuclk[cpu].cpu = cpu;
 		cpuclk[cpu].reg_base = clock_complex_base;
+		if (pmu_dfs_base)
+			cpuclk[cpu].pmu_dfs = pmu_dfs_base + 4 * cpu;
 		cpuclk[cpu].hw.init = &init;
 
 		init.name = cpuclk[cpu].clk_name;
@@ -170,7 +231,17 @@ bail_out:
 		kfree(cpuclk[ncpus].clk_name);
 clks_out:
 	kfree(cpuclk);
+cpuclk_out:
+	iounmap(clock_complex_base);
 }
 
 CLK_OF_DECLARE(armada_xp_cpu_clock, "marvell,armada-xp-cpu-clock",
 					 of_cpu_clk_setup);
+
+static void __init of_mv98dx3236_cpu_clk_setup(struct device_node *node)
+{
+	of_clk_add_provider(node, of_clk_src_simple_get, NULL);
+}
+
+CLK_OF_DECLARE(mv98dx3236_cpu_clock, "marvell,mv98dx3236-cpu-clock",
+					 of_mv98dx3236_cpu_clk_setup);

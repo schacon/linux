@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * NVEC: NVIDIA compliant embedded controller interface
  *
@@ -7,11 +8,6 @@
  *           Ilya Petrov <ilya.muromec@gmail.com>
  *           Marc Dietrich <marvin24@gmx.de>
  *           Julian Andres Klode <jak@jak-linux.org>
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
- *
  */
 
 #ifndef __LINUX_MFD_NVEC
@@ -23,6 +19,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/notifier.h>
+#include <linux/reset.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
@@ -103,38 +100,14 @@ struct nvec_msg {
 };
 
 /**
- * struct nvec_subdev - A subdevice of nvec, such as nvec_kbd
- * @name: The name of the sub device
- * @platform_data: Platform data
- * @id: Identifier of the sub device
- */
-struct nvec_subdev {
-	const char *name;
-	void *platform_data;
-	int id;
-};
-
-/**
- * struct nvec_platform_data - platform data for a tegra slave controller
- * @i2c_addr: number of i2c slave adapter the ec is connected to
- * @gpio: gpio number for the ec request line
- *
- * Platform data, to be used in board definitions. For an example, take a
- * look at the paz00 board in arch/arm/mach-tegra/board-paz00.c
- */
-struct nvec_platform_data {
-	int i2c_addr;
-	int gpio;
-};
-
-/**
  * struct nvec_chip - A single connection to an NVIDIA Embedded controller
  * @dev: The device
- * @gpio: The same as for &struct nvec_platform_data
+ * @gpiod: GPIO descriptor for the embedded controller request line
  * @irq: The IRQ of the I2C device
  * @i2c_addr: The address of the I2C slave
  * @base: The base of the memory mapped region of the I2C device
- * @clk: The clock of the I2C device
+ * @i2c_clk: The clock of the I2C device
+ * @rst: The reset of the I2C device
  * @notifier_list: Notifiers to be called on received messages, see
  *                 nvec_register_notifier()
  * @rx_data: Received messages that have to be processed
@@ -159,11 +132,12 @@ struct nvec_platform_data {
  */
 struct nvec_chip {
 	struct device *dev;
-	int gpio;
+	struct gpio_desc *gpiod;
 	int irq;
-	int i2c_addr;
+	u32 i2c_addr;
 	void __iomem *base;
 	struct clk *i2c_clk;
+	struct reset_control *rst;
 	struct atomic_notifier_head notifier_list;
 	struct list_head rx_data, tx_data;
 	struct notifier_block nvec_status_notifier;
@@ -187,19 +161,19 @@ struct nvec_chip {
 	int state;
 };
 
-extern int nvec_write_async(struct nvec_chip *nvec, const unsigned char *data,
-			     short size);
+int nvec_write_async(struct nvec_chip *nvec, const unsigned char *data,
+		     short size);
 
-extern struct nvec_msg *nvec_write_sync(struct nvec_chip *nvec,
-					const unsigned char *data, short size);
+int nvec_write_sync(struct nvec_chip *nvec,
+		    const unsigned char *data, short size,
+		    struct nvec_msg **msg);
 
-extern int nvec_register_notifier(struct nvec_chip *nvec,
-				  struct notifier_block *nb,
-				  unsigned int events);
+int nvec_register_notifier(struct nvec_chip *nvec,
+			   struct notifier_block *nb,
+			   unsigned int events);
 
-extern int nvec_unregister_notifier(struct nvec_chip *dev,
-				    struct notifier_block *nb);
+int nvec_unregister_notifier(struct nvec_chip *dev, struct notifier_block *nb);
 
-extern void nvec_msg_free(struct nvec_chip *nvec, struct nvec_msg *msg);
+void nvec_msg_free(struct nvec_chip *nvec, struct nvec_msg *msg);
 
 #endif

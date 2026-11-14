@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * w83l786ng.c - Linux kernel driver for hardware monitoring
  * Copyright (c) 2007 Kevin Lo <kevlo@kevlo.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation - version 2.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301 USA.
  */
 
 /*
@@ -29,7 +16,6 @@
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/hwmon.h>
-#include <linux/hwmon-vid.h>
 #include <linux/hwmon-sysfs.h>
 #include <linux/err.h>
 #include <linux/mutex.h>
@@ -90,15 +76,25 @@ FAN_TO_REG(long rpm, int div)
 	return clamp_val((1350000 + rpm * div / 2) / (rpm * div), 1, 254);
 }
 
-#define FAN_FROM_REG(val, div)	((val) == 0   ? -1 : \
-				((val) == 255 ? 0 : \
-				1350000 / ((val) * (div))))
+static int fan_from_reg(int val, int div)
+{
+	if (val == 0)
+		return -1;
+	if (val == 255)
+		return 0;
+	return 1350000 / (val * div);
+}
 
 /* for temp */
 #define TEMP_TO_REG(val)	(clamp_val(((val) < 0 ? (val) + 0x100 * 1000 \
 						      : (val)) / 1000, 0, 0xff))
-#define TEMP_FROM_REG(val)	(((val) & 0x80 ? \
-				  (val) - 0x100 : (val)) * 1000)
+
+static int temp_from_reg(int val)
+{
+	if (val & 0x80)
+		return (val - 0x100) * 1000;
+	return val * 1000;
+}
 
 /*
  * The analog voltage inputs have 8mV LSB. Since the sysfs output is
@@ -124,9 +120,9 @@ DIV_TO_REG(long val)
 }
 
 struct w83l786ng_data {
-	struct device *hwmon_dev;
+	struct i2c_client *client;
 	struct mutex update_lock;
-	char valid;			/* !=0 if following fields are valid */
+	bool valid;			/* true if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
 	unsigned long last_nonvolatile;	/* In jiffies, last time we update the
 					 * nonvolatile registers */
@@ -148,32 +144,6 @@ struct w83l786ng_data {
 	u8 tolerance[2];
 };
 
-static int w83l786ng_probe(struct i2c_client *client,
-			   const struct i2c_device_id *id);
-static int w83l786ng_detect(struct i2c_client *client,
-			    struct i2c_board_info *info);
-static int w83l786ng_remove(struct i2c_client *client);
-static void w83l786ng_init_client(struct i2c_client *client);
-static struct w83l786ng_data *w83l786ng_update_device(struct device *dev);
-
-static const struct i2c_device_id w83l786ng_id[] = {
-	{ "w83l786ng", 0 },
-	{ }
-};
-MODULE_DEVICE_TABLE(i2c, w83l786ng_id);
-
-static struct i2c_driver w83l786ng_driver = {
-	.class		= I2C_CLASS_HWMON,
-	.driver = {
-		   .name = "w83l786ng",
-	},
-	.probe		= w83l786ng_probe,
-	.remove		= w83l786ng_remove,
-	.id_table	= w83l786ng_id,
-	.detect		= w83l786ng_detect,
-	.address_list	= normal_i2c,
-};
-
 static u8
 w83l786ng_read_value(struct i2c_client *client, u8 reg)
 {
@@ -184,6 +154,77 @@ static int
 w83l786ng_write_value(struct i2c_client *client, u8 reg, u8 value)
 {
 	return i2c_smbus_write_byte_data(client, reg, value);
+}
+
+static struct w83l786ng_data *w83l786ng_update_device(struct device *dev)
+{
+	struct w83l786ng_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
+	int i, j;
+	u8 reg_tmp, pwmcfg;
+
+	mutex_lock(&data->update_lock);
+	if (time_after(jiffies, data->last_updated + HZ + HZ / 2)
+	    || !data->valid) {
+		dev_dbg(&client->dev, "Updating w83l786ng data.\n");
+
+		/* Update the voltages measured value and limits */
+		for (i = 0; i < 3; i++) {
+			data->in[i] = w83l786ng_read_value(client,
+			    W83L786NG_REG_IN(i));
+			data->in_min[i] = w83l786ng_read_value(client,
+			    W83L786NG_REG_IN_MIN(i));
+			data->in_max[i] = w83l786ng_read_value(client,
+			    W83L786NG_REG_IN_MAX(i));
+		}
+
+		/* Update the fan counts and limits */
+		for (i = 0; i < 2; i++) {
+			data->fan[i] = w83l786ng_read_value(client,
+			    W83L786NG_REG_FAN(i));
+			data->fan_min[i] = w83l786ng_read_value(client,
+			    W83L786NG_REG_FAN_MIN(i));
+		}
+
+		/* Update the fan divisor */
+		reg_tmp = w83l786ng_read_value(client, W83L786NG_REG_FAN_DIV);
+		data->fan_div[0] = reg_tmp & 0x07;
+		data->fan_div[1] = (reg_tmp >> 4) & 0x07;
+
+		pwmcfg = w83l786ng_read_value(client, W83L786NG_REG_FAN_CFG);
+		for (i = 0; i < 2; i++) {
+			data->pwm_mode[i] =
+			    ((pwmcfg >> W83L786NG_PWM_MODE_SHIFT[i]) & 1)
+			    ? 0 : 1;
+			data->pwm_enable[i] =
+			    ((pwmcfg >> W83L786NG_PWM_ENABLE_SHIFT[i]) & 3) + 1;
+			data->pwm[i] =
+			    (w83l786ng_read_value(client, W83L786NG_REG_PWM[i])
+			     & 0x0f) * 0x11;
+		}
+
+
+		/* Update the temperature sensors */
+		for (i = 0; i < 2; i++) {
+			for (j = 0; j < 3; j++) {
+				data->temp[i][j] = w83l786ng_read_value(client,
+				    W83L786NG_REG_TEMP[i][j]);
+			}
+		}
+
+		/* Update Smart Fan I/II tolerance */
+		reg_tmp = w83l786ng_read_value(client, W83L786NG_REG_TOLERANCE);
+		data->tolerance[0] = reg_tmp & 0x0f;
+		data->tolerance[1] = (reg_tmp >> 4) & 0x0f;
+
+		data->last_updated = jiffies;
+		data->valid = true;
+
+	}
+
+	mutex_unlock(&data->update_lock);
+
+	return data;
 }
 
 /* following are the sysfs callback functions */
@@ -207,8 +248,8 @@ store_in_##reg(struct device *dev, struct device_attribute *attr, \
 	       const char *buf, size_t count) \
 { \
 	int nr = to_sensor_dev_attr(attr)->index; \
-	struct i2c_client *client = to_i2c_client(dev); \
-	struct w83l786ng_data *data = i2c_get_clientdata(client); \
+	struct w83l786ng_data *data = dev_get_drvdata(dev); \
+	struct i2c_client *client = data->client; \
 	unsigned long val; \
 	int err = kstrtoul(buf, 10, &val); \
 	if (err) \
@@ -249,7 +290,7 @@ static ssize_t show_##reg(struct device *dev, struct device_attribute *attr, \
 	int nr = to_sensor_dev_attr(attr)->index; \
 	struct w83l786ng_data *data = w83l786ng_update_device(dev); \
 	return sprintf(buf, "%d\n", \
-		FAN_FROM_REG(data->fan[nr], DIV_FROM_REG(data->fan_div[nr]))); \
+		fan_from_reg(data->reg[nr], DIV_FROM_REG(data->fan_div[nr]))); \
 }
 
 show_fan_reg(fan);
@@ -260,8 +301,8 @@ store_fan_min(struct device *dev, struct device_attribute *attr,
 	      const char *buf, size_t count)
 {
 	int nr = to_sensor_dev_attr(attr)->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct w83l786ng_data *data = i2c_get_clientdata(client);
+	struct w83l786ng_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 	unsigned long val;
 	int err;
 
@@ -298,8 +339,8 @@ store_fan_div(struct device *dev, struct device_attribute *attr,
 	      const char *buf, size_t count)
 {
 	int nr = to_sensor_dev_attr(attr)->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct w83l786ng_data *data = i2c_get_clientdata(client);
+	struct w83l786ng_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 
 	unsigned long min;
 	u8 tmp_fan_div;
@@ -316,7 +357,7 @@ store_fan_div(struct device *dev, struct device_attribute *attr,
 
 	/* Save fan_min */
 	mutex_lock(&data->update_lock);
-	min = FAN_FROM_REG(data->fan_min[nr], DIV_FROM_REG(data->fan_div[nr]));
+	min = fan_from_reg(data->fan_min[nr], DIV_FROM_REG(data->fan_div[nr]));
 
 	data->fan_div[nr] = DIV_TO_REG(val);
 
@@ -378,7 +419,7 @@ show_temp(struct device *dev, struct device_attribute *attr, char *buf)
 	int nr = sensor_attr->nr;
 	int index = sensor_attr->index;
 	struct w83l786ng_data *data = w83l786ng_update_device(dev);
-	return sprintf(buf, "%d\n", TEMP_FROM_REG(data->temp[nr][index]));
+	return sprintf(buf, "%d\n", temp_from_reg(data->temp[nr][index]));
 }
 
 static ssize_t
@@ -389,8 +430,8 @@ store_temp(struct device *dev, struct device_attribute *attr,
 	    to_sensor_dev_attr_2(attr);
 	int nr = sensor_attr->nr;
 	int index = sensor_attr->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct w83l786ng_data *data = i2c_get_clientdata(client);
+	struct w83l786ng_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 	long val;
 	int err;
 
@@ -444,8 +485,8 @@ store_pwm_mode(struct device *dev, struct device_attribute *attr,
 	       const char *buf, size_t count)
 {
 	int nr = to_sensor_dev_attr(attr)->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct w83l786ng_data *data = i2c_get_clientdata(client);
+	struct w83l786ng_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 	u8 reg;
 	unsigned long val;
 	int err;
@@ -472,8 +513,8 @@ store_pwm(struct device *dev, struct device_attribute *attr,
 	  const char *buf, size_t count)
 {
 	int nr = to_sensor_dev_attr(attr)->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct w83l786ng_data *data = i2c_get_clientdata(client);
+	struct w83l786ng_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 	unsigned long val;
 	int err;
 
@@ -481,9 +522,11 @@ store_pwm(struct device *dev, struct device_attribute *attr,
 	if (err)
 		return err;
 	val = clamp_val(val, 0, 255);
+	val = DIV_ROUND_CLOSEST(val, 0x11);
 
 	mutex_lock(&data->update_lock);
-	data->pwm[nr] = val;
+	data->pwm[nr] = val * 0x11;
+	val |= w83l786ng_read_value(client, W83L786NG_REG_PWM[nr]) & 0xf0;
 	w83l786ng_write_value(client, W83L786NG_REG_PWM[nr], val);
 	mutex_unlock(&data->update_lock);
 	return count;
@@ -494,8 +537,8 @@ store_pwm_enable(struct device *dev, struct device_attribute *attr,
 		 const char *buf, size_t count)
 {
 	int nr = to_sensor_dev_attr(attr)->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct w83l786ng_data *data = i2c_get_clientdata(client);
+	struct w83l786ng_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 	u8 reg;
 	unsigned long val;
 	int err;
@@ -510,7 +553,7 @@ store_pwm_enable(struct device *dev, struct device_attribute *attr,
 	mutex_lock(&data->update_lock);
 	reg = w83l786ng_read_value(client, W83L786NG_REG_FAN_CFG);
 	data->pwm_enable[nr] = val;
-	reg &= ~(0x02 << W83L786NG_PWM_ENABLE_SHIFT[nr]);
+	reg &= ~(0x03 << W83L786NG_PWM_ENABLE_SHIFT[nr]);
 	reg |= (val - 1) << W83L786NG_PWM_ENABLE_SHIFT[nr];
 	w83l786ng_write_value(client, W83L786NG_REG_FAN_CFG, reg);
 	mutex_unlock(&data->update_lock);
@@ -550,8 +593,8 @@ store_tolerance(struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t count)
 {
 	int nr = to_sensor_dev_attr(attr)->index;
-	struct i2c_client *client = to_i2c_client(dev);
-	struct w83l786ng_data *data = i2c_get_clientdata(client);
+	struct w83l786ng_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 	u8 tol_tmp, tol_mask;
 	unsigned long val;
 	int err;
@@ -606,7 +649,7 @@ static struct sensor_device_attribute sda_tolerance[] = {
 #define TOLERANCE_UNIT_ATTRS(X)	\
 	&sda_tolerance[X].dev_attr.attr
 
-static struct attribute *w83l786ng_attributes[] = {
+static struct attribute *w83l786ng_attrs[] = {
 	IN_UNIT_ATTRS(0),
 	IN_UNIT_ATTRS(1),
 	IN_UNIT_ATTRS(2),
@@ -621,9 +664,7 @@ static struct attribute *w83l786ng_attributes[] = {
 	NULL
 };
 
-static const struct attribute_group w83l786ng_group = {
-	.attrs = w83l786ng_attributes,
-};
+ATTRIBUTE_GROUPS(w83l786ng);
 
 static int
 w83l786ng_detect(struct i2c_client *client, struct i2c_board_info *info)
@@ -655,25 +696,38 @@ w83l786ng_detect(struct i2c_client *client, struct i2c_board_info *info)
 		return -ENODEV;
 	}
 
-	strlcpy(info->type, "w83l786ng", I2C_NAME_SIZE);
+	strscpy(info->type, "w83l786ng", I2C_NAME_SIZE);
 
 	return 0;
 }
 
+static void w83l786ng_init_client(struct i2c_client *client)
+{
+	u8 tmp;
+
+	if (reset)
+		w83l786ng_write_value(client, W83L786NG_REG_CONFIG, 0x80);
+
+	/* Start monitoring */
+	tmp = w83l786ng_read_value(client, W83L786NG_REG_CONFIG);
+	if (!(tmp & 0x01))
+		w83l786ng_write_value(client, W83L786NG_REG_CONFIG, tmp | 0x01);
+}
+
 static int
-w83l786ng_probe(struct i2c_client *client, const struct i2c_device_id *id)
+w83l786ng_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct w83l786ng_data *data;
-	int i, err = 0;
+	struct device *hwmon_dev;
+	int i;
 	u8 reg_tmp;
 
-	data = devm_kzalloc(&client->dev, sizeof(struct w83l786ng_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct w83l786ng_data);
 	if (!data)
 		return -ENOMEM;
 
-	i2c_set_clientdata(client, data);
+	data->client = client;
 	mutex_init(&data->update_lock);
 
 	/* Initialize the chip */
@@ -690,120 +744,28 @@ w83l786ng_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	data->fan_div[0] = reg_tmp & 0x07;
 	data->fan_div[1] = (reg_tmp >> 4) & 0x07;
 
-	/* Register sysfs hooks */
-	err = sysfs_create_group(&client->dev.kobj, &w83l786ng_group);
-	if (err)
-		goto exit_remove;
-
-	data->hwmon_dev = hwmon_device_register(dev);
-	if (IS_ERR(data->hwmon_dev)) {
-		err = PTR_ERR(data->hwmon_dev);
-		goto exit_remove;
-	}
-
-	return 0;
-
-	/* Unregister sysfs hooks */
-
-exit_remove:
-	sysfs_remove_group(&client->dev.kobj, &w83l786ng_group);
-	return err;
+	hwmon_dev = devm_hwmon_device_register_with_groups(dev, client->name,
+							   data,
+							   w83l786ng_groups);
+	return PTR_ERR_OR_ZERO(hwmon_dev);
 }
 
-static int
-w83l786ng_remove(struct i2c_client *client)
-{
-	struct w83l786ng_data *data = i2c_get_clientdata(client);
+static const struct i2c_device_id w83l786ng_id[] = {
+	{ .name = "w83l786ng" },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, w83l786ng_id);
 
-	hwmon_device_unregister(data->hwmon_dev);
-	sysfs_remove_group(&client->dev.kobj, &w83l786ng_group);
-
-	return 0;
-}
-
-static void
-w83l786ng_init_client(struct i2c_client *client)
-{
-	u8 tmp;
-
-	if (reset)
-		w83l786ng_write_value(client, W83L786NG_REG_CONFIG, 0x80);
-
-	/* Start monitoring */
-	tmp = w83l786ng_read_value(client, W83L786NG_REG_CONFIG);
-	if (!(tmp & 0x01))
-		w83l786ng_write_value(client, W83L786NG_REG_CONFIG, tmp | 0x01);
-}
-
-static struct w83l786ng_data *w83l786ng_update_device(struct device *dev)
-{
-	struct i2c_client *client = to_i2c_client(dev);
-	struct w83l786ng_data *data = i2c_get_clientdata(client);
-	int i, j;
-	u8 reg_tmp, pwmcfg;
-
-	mutex_lock(&data->update_lock);
-	if (time_after(jiffies, data->last_updated + HZ + HZ / 2)
-	    || !data->valid) {
-		dev_dbg(&client->dev, "Updating w83l786ng data.\n");
-
-		/* Update the voltages measured value and limits */
-		for (i = 0; i < 3; i++) {
-			data->in[i] = w83l786ng_read_value(client,
-			    W83L786NG_REG_IN(i));
-			data->in_min[i] = w83l786ng_read_value(client,
-			    W83L786NG_REG_IN_MIN(i));
-			data->in_max[i] = w83l786ng_read_value(client,
-			    W83L786NG_REG_IN_MAX(i));
-		}
-
-		/* Update the fan counts and limits */
-		for (i = 0; i < 2; i++) {
-			data->fan[i] = w83l786ng_read_value(client,
-			    W83L786NG_REG_FAN(i));
-			data->fan_min[i] = w83l786ng_read_value(client,
-			    W83L786NG_REG_FAN_MIN(i));
-		}
-
-		/* Update the fan divisor */
-		reg_tmp = w83l786ng_read_value(client, W83L786NG_REG_FAN_DIV);
-		data->fan_div[0] = reg_tmp & 0x07;
-		data->fan_div[1] = (reg_tmp >> 4) & 0x07;
-
-		pwmcfg = w83l786ng_read_value(client, W83L786NG_REG_FAN_CFG);
-		for (i = 0; i < 2; i++) {
-			data->pwm_mode[i] =
-			    ((pwmcfg >> W83L786NG_PWM_MODE_SHIFT[i]) & 1)
-			    ? 0 : 1;
-			data->pwm_enable[i] =
-			    ((pwmcfg >> W83L786NG_PWM_ENABLE_SHIFT[i]) & 2) + 1;
-			data->pwm[i] = w83l786ng_read_value(client,
-			    W83L786NG_REG_PWM[i]);
-		}
-
-
-		/* Update the temperature sensors */
-		for (i = 0; i < 2; i++) {
-			for (j = 0; j < 3; j++) {
-				data->temp[i][j] = w83l786ng_read_value(client,
-				    W83L786NG_REG_TEMP[i][j]);
-			}
-		}
-
-		/* Update Smart Fan I/II tolerance */
-		reg_tmp = w83l786ng_read_value(client, W83L786NG_REG_TOLERANCE);
-		data->tolerance[0] = reg_tmp & 0x0f;
-		data->tolerance[1] = (reg_tmp >> 4) & 0x0f;
-
-		data->last_updated = jiffies;
-		data->valid = 1;
-
-	}
-
-	mutex_unlock(&data->update_lock);
-
-	return data;
-}
+static struct i2c_driver w83l786ng_driver = {
+	.class		= I2C_CLASS_HWMON,
+	.driver = {
+		   .name = "w83l786ng",
+	},
+	.probe		= w83l786ng_probe,
+	.id_table	= w83l786ng_id,
+	.detect		= w83l786ng_detect,
+	.address_list	= normal_i2c,
+};
 
 module_i2c_driver(w83l786ng_driver);
 

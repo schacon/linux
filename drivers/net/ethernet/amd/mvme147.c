@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* mvme147.c  : the  Linux/mvme147/lance ethernet driver
  *
  * Copyright (C) 05/1998 Peter Maydell <pmaydell@chiark.greenend.org.uk>
@@ -15,6 +16,7 @@
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/gfp.h>
+#include <linux/pgtable.h>
 /* Used for the temporal inet entries and routing */
 #include <linux/socket.h>
 #include <linux/route.h>
@@ -23,12 +25,11 @@
 #include <linux/skbuff.h>
 
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/mvme147hw.h>
 
-/* We have 16834 bytes of RAM for the init block and buffers. This places
+/* We have 32K of RAM for the init block and buffers. This places
  * an upper limit on the number of buffers we can use. NetBSD uses 8 Rx
- * buffers and 2 Tx buffers.
+ * buffers and 2 Tx buffers, it takes (8 + 2) * 1544 bytes.
  */
 #define LANCE_LOG_TX_BUFFERS 1
 #define LANCE_LOG_RX_BUFFERS 3
@@ -62,18 +63,18 @@ static const struct net_device_ops lance_netdev_ops = {
 	.ndo_start_xmit		= lance_start_xmit,
 	.ndo_set_rx_mode	= lance_set_multicast,
 	.ndo_tx_timeout		= lance_tx_timeout,
-	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 };
 
 /* Initialise the one and only on-board 7990 */
-struct net_device * __init mvme147lance_probe(int unit)
+static struct net_device * __init mvme147lance_probe(void)
 {
 	struct net_device *dev;
 	static int called;
 	static const char name[] = "MVME147 LANCE";
 	struct m147lance_private *lp;
+	u8 macaddr[ETH_ALEN];
 	u_long *addr;
 	u_long address;
 	int err;
@@ -86,41 +87,33 @@ struct net_device * __init mvme147lance_probe(int unit)
 	if (!dev)
 		return ERR_PTR(-ENOMEM);
 
-	if (unit >= 0)
-		sprintf(dev->name, "eth%d", unit);
-
 	/* Fill the dev fields */
 	dev->base_addr = (unsigned long)MVME147_LANCE_BASE;
 	dev->netdev_ops = &lance_netdev_ops;
 	dev->dma = 0;
 
-	addr=(u_long *)ETHERNET_ADDRESS;
+	addr = (u_long *)ETHERNET_ADDRESS;
 	address = *addr;
-	dev->dev_addr[0]=0x08;
-	dev->dev_addr[1]=0x00;
-	dev->dev_addr[2]=0x3e;
-	address=address>>8;
-	dev->dev_addr[5]=address&0xff;
-	address=address>>8;
-	dev->dev_addr[4]=address&0xff;
-	address=address>>8;
-	dev->dev_addr[3]=address&0xff;
-
-	printk("%s: MVME147 at 0x%08lx, irq %d, "
-	       "Hardware Address %pM\n",
-	       dev->name, dev->base_addr, MVME147_LANCE_IRQ,
-	       dev->dev_addr);
+	macaddr[0] = 0x08;
+	macaddr[1] = 0x00;
+	macaddr[2] = 0x3e;
+	address = address >> 8;
+	macaddr[5] = address&0xff;
+	address = address >> 8;
+	macaddr[4] = address&0xff;
+	address = address >> 8;
+	macaddr[3] = address&0xff;
+	eth_hw_addr_set(dev, macaddr);
 
 	lp = netdev_priv(dev);
-	lp->ram = __get_dma_pages(GFP_ATOMIC, 3);	/* 16K */
-	if (!lp->ram)
-	{
+	lp->ram = __get_dma_pages(GFP_ATOMIC, 3);	/* 32K */
+	if (!lp->ram) {
 		printk("%s: No memory for LANCE buffers\n", dev->name);
 		free_netdev(dev);
 		return ERR_PTR(-ENOMEM);
 	}
 
-	lp->lance.name = (char*)name;                   /* discards const, shut up gcc */
+	lp->lance.name = name;
 	lp->lance.base = dev->base_addr;
 	lp->lance.init_block = (struct lance_init_block *)(lp->ram); /* CPU addr */
 	lp->lance.lance_init_block = (struct lance_init_block *)(lp->ram);                 /* LANCE addr of same RAM */
@@ -140,6 +133,9 @@ struct net_device * __init mvme147lance_probe(int unit)
 		free_netdev(dev);
 		return ERR_PTR(err);
 	}
+
+	netdev_info(dev, "MVME147 at 0x%08lx, irq %d, Hardware Address %pM\n",
+		    dev->base_addr, MVME147_LANCE_IRQ, dev->dev_addr);
 
 	return dev;
 }
@@ -167,8 +163,8 @@ static int m147lance_open(struct net_device *dev)
 	if (status)
 		return status;
 	/* enable interrupts at board level. */
-	m147_pcc->lan_cntrl=0;       /* clear the interrupts (if any) */
-	m147_pcc->lan_cntrl=0x08 | 0x04;     /* Enable irq 4 */
+	m147_pcc->lan_cntrl = 0;       /* clear the interrupts (if any) */
+	m147_pcc->lan_cntrl = 0x08 | 0x04;     /* Enable irq 4 */
 
 	return 0;
 }
@@ -176,27 +172,27 @@ static int m147lance_open(struct net_device *dev)
 static int m147lance_close(struct net_device *dev)
 {
 	/* disable interrupts at boardlevel */
-	m147_pcc->lan_cntrl=0x0; /* disable interrupts */
+	m147_pcc->lan_cntrl = 0x0; /* disable interrupts */
 	lance_close(dev);
 	return 0;
 }
 
-#ifdef MODULE
+MODULE_DESCRIPTION("MVME147 LANCE Ethernet driver");
 MODULE_LICENSE("GPL");
 
 static struct net_device *dev_mvme147_lance;
-int __init init_module(void)
+static int __init m147lance_init(void)
 {
-	dev_mvme147_lance = mvme147lance_probe(-1);
-	return PTR_RET(dev_mvme147_lance);
+	dev_mvme147_lance = mvme147lance_probe();
+	return PTR_ERR_OR_ZERO(dev_mvme147_lance);
 }
+module_init(m147lance_init);
 
-void __exit cleanup_module(void)
+static void __exit m147lance_exit(void)
 {
 	struct m147lance_private *lp = netdev_priv(dev_mvme147_lance);
 	unregister_netdev(dev_mvme147_lance);
 	free_pages(lp->ram, 3);
 	free_netdev(dev_mvme147_lance);
 }
-
-#endif /* MODULE */
+module_exit(m147lance_exit);

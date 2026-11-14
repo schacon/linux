@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/drivers/clocksource/acpi_pm.c
  *
@@ -12,8 +13,6 @@
  *
  * Based on parts of linux/drivers/acpi/hardware/hwtimer.c, timer_pit.c,
  * timer_hpet.c, and on Arjan van de Ven's implementation for 2.4.
- *
- * This file is licensed under the GPL v2.
  */
 
 #include <linux/acpi_pmtmr.h>
@@ -24,6 +23,11 @@
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <asm/io.h>
+#include <asm/time.h>
+
+static void *suspend_resume_cb_data;
+
+static void (*suspend_resume_callback)(void *data, bool suspend);
 
 /*
  * The I/O port the PMTMR resides at.
@@ -58,17 +62,45 @@ u32 acpi_pm_read_verified(void)
 	return v2;
 }
 
-static cycle_t acpi_pm_read(struct clocksource *cs)
+void acpi_pmtmr_register_suspend_resume_callback(void (*cb)(void *data, bool suspend), void *data)
 {
-	return (cycle_t)read_pmtmr();
+	suspend_resume_callback = cb;
+	suspend_resume_cb_data = data;
+}
+EXPORT_SYMBOL_GPL(acpi_pmtmr_register_suspend_resume_callback);
+
+void acpi_pmtmr_unregister_suspend_resume_callback(void)
+{
+	suspend_resume_callback = NULL;
+	suspend_resume_cb_data = NULL;
+}
+EXPORT_SYMBOL_GPL(acpi_pmtmr_unregister_suspend_resume_callback);
+
+static void acpi_pm_suspend(struct clocksource *cs)
+{
+	if (suspend_resume_callback)
+		suspend_resume_callback(suspend_resume_cb_data, true);
+}
+
+static void acpi_pm_resume(struct clocksource *cs)
+{
+	if (suspend_resume_callback)
+		suspend_resume_callback(suspend_resume_cb_data, false);
+}
+
+static u64 acpi_pm_read(struct clocksource *cs)
+{
+	return (u64)read_pmtmr();
 }
 
 static struct clocksource clocksource_acpi_pm = {
 	.name		= "acpi_pm",
 	.rating		= 200,
 	.read		= acpi_pm_read,
-	.mask		= (cycle_t)ACPI_PM_MASK,
-	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
+	.mask		= (u64)ACPI_PM_MASK,
+	.flags		= CLOCK_SOURCE_IS_CONTINUOUS | CLOCK_SOURCE_CALIBRATED,
+	.suspend	= acpi_pm_suspend,
+	.resume		= acpi_pm_resume,
 };
 
 
@@ -81,9 +113,9 @@ static int __init acpi_pm_good_setup(char *__str)
 }
 __setup("acpi_pm_good", acpi_pm_good_setup);
 
-static cycle_t acpi_pm_read_slow(struct clocksource *cs)
+static u64 acpi_pm_read_slow(struct clocksource *cs)
 {
-	return (cycle_t)acpi_pm_read_verified();
+	return (u64)acpi_pm_read_verified();
 }
 
 static inline void acpi_pm_need_workaround(void)
@@ -109,10 +141,8 @@ static void acpi_pm_check_blacklist(struct pci_dev *dev)
 
 	/* the bug has been fixed in PIIX4M */
 	if (dev->revision < 3) {
-		printk(KERN_WARNING "* Found PM-Timer Bug on the chipset."
-		       " Due to workarounds for a bug,\n"
-		       "* this clock source is slow. Consider trying"
-		       " other clock sources\n");
+		pr_warn("* Found PM-Timer Bug on the chipset. Due to workarounds for a bug,\n"
+			"* this clock source is slow. Consider trying other clock sources\n");
 
 		acpi_pm_need_workaround();
 	}
@@ -125,12 +155,9 @@ static void acpi_pm_check_graylist(struct pci_dev *dev)
 	if (acpi_pm_good)
 		return;
 
-	printk(KERN_WARNING "* The chipset may have PM-Timer Bug. Due to"
-	       " workarounds for a bug,\n"
-	       "* this clock source is slow. If you are sure your timer"
-	       " does not have\n"
-	       "* this bug, please use \"acpi_pm_good\" to disable the"
-	       " workaround\n");
+	pr_warn("* The chipset may have PM-Timer Bug. Due to workarounds for a bug,\n"
+		"* this clock source is slow. If you are sure your timer does not have\n"
+		"* this bug, please use \"acpi_pm_good\" to disable the workaround\n");
 
 	acpi_pm_need_workaround();
 }
@@ -150,7 +177,7 @@ DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_LE,
  */
 static int verify_pmtmr_rate(void)
 {
-	cycle_t value1, value2;
+	u64 value1, value2;
 	unsigned long count, delta;
 
 	mach_prepare_counter();
@@ -162,8 +189,7 @@ static int verify_pmtmr_rate(void)
 	/* Check that the PMTMR delta is within 5% of what we expect */
 	if (delta < (PMTMR_EXPECTED_RATE * 19) / 20 ||
 	    delta > (PMTMR_EXPECTED_RATE * 21) / 20) {
-		printk(KERN_INFO "PM-Timer running at invalid rate: %lu%% "
-			"of normal - aborting.\n",
+		pr_info("PM-Timer running at invalid rate: %lu%% of normal - aborting.\n",
 			100UL * delta / PMTMR_EXPECTED_RATE);
 		return -1;
 	}
@@ -181,7 +207,7 @@ static int verify_pmtmr_rate(void)
 
 static int __init init_acpi_pm_clocksource(void)
 {
-	cycle_t value1, value2;
+	u64 value1, value2;
 	unsigned int i, j = 0;
 
 	if (!pmtmr_ioport)
@@ -199,15 +225,14 @@ static int __init init_acpi_pm_clocksource(void)
 				break;
 			if ((value2 < value1) && ((value2) < 0xFFF))
 				break;
-			printk(KERN_INFO "PM-Timer had inconsistent results:"
-			       " 0x%#llx, 0x%#llx - aborting.\n",
-			       value1, value2);
+			pr_info("PM-Timer had inconsistent results: %#llx, %#llx - aborting.\n",
+				value1, value2);
 			pmtmr_ioport = 0;
 			return -EINVAL;
 		}
 		if (i == ACPI_PM_READ_CHECKS) {
-			printk(KERN_INFO "PM-Timer failed consistency check "
-			       " (0x%#llx) - aborting.\n", value1);
+			pr_info("PM-Timer failed consistency check  (%#llx) - aborting.\n",
+				value1);
 			pmtmr_ioport = 0;
 			return -ENODEV;
 		}
@@ -218,8 +243,7 @@ static int __init init_acpi_pm_clocksource(void)
 		return -ENODEV;
 	}
 
-	return clocksource_register_hz(&clocksource_acpi_pm,
-						PMTMR_TICKS_PER_SEC);
+	return clocksource_register_hz(&clocksource_acpi_pm, PMTMR_TICKS_PER_SEC);
 }
 
 /* We use fs_initcall because we want the PCI fixups to have run
@@ -237,8 +261,10 @@ static int __init parse_pmtmr(char *arg)
 	int ret;
 
 	ret = kstrtouint(arg, 16, &base);
-	if (ret)
-		return ret;
+	if (ret) {
+		pr_warn("PMTMR: invalid 'pmtmr=' value: '%s'\n", arg);
+		return 1;
+	}
 
 	pr_info("PMTMR IOPort override: 0x%04x -> 0x%04x\n", pmtmr_ioport,
 		base);

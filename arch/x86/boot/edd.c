@@ -1,11 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* -*- linux-c -*- ------------------------------------------------------- *
  *
  *   Copyright (C) 1991, 1992 Linus Torvalds
  *   Copyright 2007 rPath, Inc. - All Rights Reserved
  *   Copyright 2009 Intel Corporation; author H. Peter Anvin
- *
- *   This file is part of the Linux kernel, and is made available under
- *   the terms of the GNU General Public License version 2.
  *
  * ----------------------------------------------------------------------- */
 
@@ -15,8 +13,9 @@
 
 #include "boot.h"
 #include <linux/edd.h>
+#include "string.h"
 
-#if defined(CONFIG_EDD) || defined(CONFIG_EDD_MODULE)
+#if IS_ENABLED(CONFIG_EDD)
 
 /*
  * Read the MBR (first sector) from a specific device.
@@ -75,7 +74,7 @@ static int get_edd_info(u8 devno, struct edd_info *ei)
 {
 	struct biosregs ireg, oreg;
 
-	memset(ei, 0, sizeof *ei);
+	memset(ei, 0, sizeof(*ei));
 
 	/* Check Extensions Present */
 
@@ -121,26 +120,22 @@ static int get_edd_info(u8 devno, struct edd_info *ei)
 void query_edd(void)
 {
 	char eddarg[8];
-	int do_mbr = 1;
-#ifdef CONFIG_EDD_OFF
-	int do_edd = 0;
-#else
-	int do_edd = 1;
-#endif
-	int be_quiet;
+	bool do_mbr = true;
+	bool do_edd = !IS_ENABLED(CONFIG_EDD_OFF);
+	bool be_quiet;
 	int devno;
 	struct edd_info ei, *edp;
 	u32 *mbrptr;
 
-	if (cmdline_find_option("edd", eddarg, sizeof eddarg) > 0) {
+	if (cmdline_find_option("edd", eddarg, sizeof(eddarg)) > 0) {
 		if (!strcmp(eddarg, "skipmbr") || !strcmp(eddarg, "skip")) {
-			do_edd = 1;
-			do_mbr = 0;
+			do_edd = true;
+			do_mbr = false;
 		}
 		else if (!strcmp(eddarg, "off"))
-			do_edd = 0;
+			do_edd = false;
 		else if (!strcmp(eddarg, "on"))
-			do_edd = 1;
+			do_edd = true;
 	}
 
 	be_quiet = cmdline_find_option_bool("quiet");
@@ -165,7 +160,7 @@ void query_edd(void)
 		 */
 		if (!get_edd_info(devno, &ei)
 		    && boot_params.eddbuf_entries < EDDMAXNR) {
-			memcpy(edp, &ei, sizeof ei);
+			memcpy(edp, &ei, sizeof(ei));
 			edp++;
 			boot_params.eddbuf_entries++;
 		}

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
  *  Copyright (C) 2000, 2003  Maciej W. Rozycki
@@ -18,7 +19,7 @@
 #include <asm/dec/ioasic.h>
 #include <asm/dec/machtype.h>
 
-void read_persistent_clock(struct timespec *ts)
+void read_persistent_clock64(struct timespec64 *ts)
 {
 	unsigned int year, mon, day, hour, min, sec, real_year;
 	unsigned long flags;
@@ -53,19 +54,20 @@ void read_persistent_clock(struct timespec *ts)
 
 	year += real_year - 72 + 2000;
 
-	ts->tv_sec = mktime(year, mon, day, hour, min, sec);
+	ts->tv_sec = mktime64(year, mon, day, hour, min, sec);
 	ts->tv_nsec = 0;
 }
 
 /*
- * In order to set the CMOS clock precisely, rtc_mips_set_mmss has to
+ * In order to set the CMOS clock precisely, update_persistent_clock64 has to
  * be called 500 ms after the second nowtime has started, because when
  * nowtime is written into the registers of the CMOS clock, it will
  * jump to the next second precisely 500 ms later.  Check the Dallas
  * DS1287 data sheet for details.
  */
-int rtc_mips_set_mmss(unsigned long nowtime)
+int update_persistent_clock64(struct timespec64 now)
 {
+	time64_t nowtime = now.tv_sec;
 	int retval = 0;
 	int real_seconds, real_minutes, cmos_minutes;
 	unsigned char save_control, save_freq_select;
@@ -90,8 +92,7 @@ int rtc_mips_set_mmss(unsigned long nowtime)
 	 * messing with unknown time zones but requires your
 	 * RTC not to be off by more than 15 minutes
 	 */
-	real_seconds = nowtime % 60;
-	real_minutes = nowtime / 60;
+	real_minutes = div_s64_rem(nowtime, 60, &real_seconds);
 	if (((abs(real_minutes - cmos_minutes) + 15) / 30) & 1)
 		real_minutes += 30;	/* correct for half hour time zone */
 	real_minutes %= 60;
@@ -125,13 +126,18 @@ int rtc_mips_set_mmss(unsigned long nowtime)
 
 void __init plat_time_init(void)
 {
+	int ioasic_clock = 0;
 	u32 start, end;
-	int i = HZ / 10;
+	int i = HZ / 8;
 
 	/* Set up the rate of periodic DS1287 interrupts. */
 	ds1287_set_base_clock(HZ);
 
+	/* On some I/O ASIC systems we have the I/O ASIC's counter.  */
+	if (IOASIC)
+		ioasic_clock = dec_ioasic_clocksource_init() == 0;
 	if (cpu_has_counter) {
+		ds1287_timer_state();
 		while (!ds1287_timer_state())
 			;
 
@@ -143,12 +149,24 @@ void __init plat_time_init(void)
 
 		end = read_c0_count();
 
-		mips_hpt_frequency = (end - start) * 10;
+		mips_hpt_frequency = (end - start) * 8;
 		printk(KERN_INFO "MIPS counter frequency %dHz\n",
 			mips_hpt_frequency);
-	} else if (IOASIC)
-		/* For pre-R4k systems we use the I/O ASIC's counter.  */
-		dec_ioasic_clocksource_init();
+
+		/*
+		 * All R4k DECstations suffer from the CP0 Count erratum,
+		 * so we can't use the timer as a clock source, and a clock
+		 * event both at a time.  An accurate wall clock is more
+		 * important than a high-precision interval timer so only
+		 * use the timer as a clock source, and not a clock event
+		 * if there's no I/O ASIC counter available to serve as a
+		 * clock source.
+		 */
+		if (!ioasic_clock) {
+			init_r4k_clocksource();
+			mips_hpt_frequency = 0;
+		}
+	}
 
 	ds1287_clockevent_init(dec_interrupt[DEC_IRQ_RTC]);
 }

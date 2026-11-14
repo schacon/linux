@@ -1,15 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) ST-Ericsson SA 2012
  *
  * Author: Ola Lilja <ola.o.lilja@stericsson.com>,
  *         Roger Nilsson <roger.xr.nilsson@stericsson.com>
  *         for ST-Ericsson.
- *
- * License terms:
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -17,12 +12,13 @@
 #include <linux/bitops.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
+#include <linux/of.h>
 #include <linux/regulator/consumer.h>
-#include <linux/mfd/dbx500-prcmu.h>
-#include <linux/platform_data/asoc-ux500-msp.h>
+#include <linux/reset.h>
 
 #include <sound/soc.h>
 #include <sound/soc-dai.h>
+#include <sound/dmaengine_pcm.h>
 
 #include "ux500_msp_i2s.h"
 #include "ux500_msp_dai.h"
@@ -38,8 +34,10 @@ static int setup_pcm_multichan(struct snd_soc_dai *dai,
 	if (drvdata->slots > 1) {
 		msp_config->multichannel_configured = 1;
 
-		multi->tx_multichannel_enable = true;
-		multi->rx_multichannel_enable = true;
+		multi->tx_multichannel_enable =
+			msp_config->direction & MSP_DIR_TX;
+		multi->rx_multichannel_enable =
+			msp_config->direction & MSP_DIR_RX;
 		multi->rx_comparison_enable_mode = MSP_COMPARISON_DISABLED;
 
 		multi->tx_channel_0_enable = drvdata->tx_mask;
@@ -61,76 +59,26 @@ static int setup_pcm_multichan(struct snd_soc_dai *dai,
 	return 0;
 }
 
-static int setup_frameper(struct snd_soc_dai *dai, unsigned int rate,
-			struct msp_protdesc *prot_desc)
+static void setup_frameper(struct snd_soc_dai *dai,
+			   struct msp_protdesc *prot_desc)
 {
 	struct ux500_msp_i2s_drvdata *drvdata = dev_get_drvdata(dai->dev);
 
-	switch (drvdata->slots) {
-	case 1:
-		switch (rate) {
-		case 8000:
-			prot_desc->frame_period =
-				FRAME_PER_SINGLE_SLOT_8_KHZ;
-			break;
-
-		case 16000:
-			prot_desc->frame_period =
-				FRAME_PER_SINGLE_SLOT_16_KHZ;
-			break;
-
-		case 44100:
-			prot_desc->frame_period =
-				FRAME_PER_SINGLE_SLOT_44_1_KHZ;
-			break;
-
-		case 48000:
-			prot_desc->frame_period =
-				FRAME_PER_SINGLE_SLOT_48_KHZ;
-			break;
-
-		default:
-			dev_err(dai->dev,
-				"%s: Error: Unsupported sample-rate (freq = %d)!\n",
-				__func__, rate);
-			return -EINVAL;
-		}
-		break;
-
-	case 2:
-		prot_desc->frame_period = FRAME_PER_2_SLOTS;
-		break;
-
-	case 8:
-		prot_desc->frame_period = FRAME_PER_8_SLOTS;
-		break;
-
-	case 16:
-		prot_desc->frame_period = FRAME_PER_16_SLOTS;
-		break;
-	default:
-		dev_err(dai->dev,
-			"%s: Error: Unsupported slot-count (slots = %d)!\n",
-			__func__, drvdata->slots);
-		return -EINVAL;
-	}
-
-	prot_desc->clocks_per_frame =
-			prot_desc->frame_period+1;
+	prot_desc->clocks_per_frame = drvdata->slots * drvdata->slot_width;
+	prot_desc->frame_period = prot_desc->clocks_per_frame - 1;
 
 	dev_dbg(dai->dev, "%s: Clocks per frame: %u\n",
 		__func__,
 		prot_desc->clocks_per_frame);
-
-	return 0;
 }
 
-static int setup_pcm_framing(struct snd_soc_dai *dai, unsigned int rate,
-			struct msp_protdesc *prot_desc)
+static int setup_pcm_framing(struct snd_soc_dai *dai,
+			     struct msp_protdesc *prot_desc)
 {
 	struct ux500_msp_i2s_drvdata *drvdata = dev_get_drvdata(dai->dev);
 
 	u32 frame_length = MSP_FRAME_LEN_1;
+
 	prot_desc->frame_width = 0;
 
 	switch (drvdata->slots) {
@@ -166,7 +114,9 @@ static int setup_pcm_framing(struct snd_soc_dai *dai, unsigned int rate,
 	prot_desc->tx_elem_len_2 = MSP_ELEM_LEN_16;
 	prot_desc->rx_elem_len_2 = MSP_ELEM_LEN_16;
 
-	return setup_frameper(dai, rate, prot_desc);
+	setup_frameper(dai, prot_desc);
+
+	return 0;
 }
 
 static int setup_clocking(struct snd_soc_dai *dai,
@@ -180,21 +130,31 @@ static int setup_clocking(struct snd_soc_dai *dai,
 	case SND_SOC_DAIFMT_NB_IF:
 		msp_config->tx_fsync_pol ^= 1 << TFSPOL_SHIFT;
 		msp_config->rx_fsync_pol ^= 1 << RFSPOL_SHIFT;
+		break;
 
+	case SND_SOC_DAIFMT_IB_NF:
+		msp_config->bclk_inverted = true;
+		break;
+
+	case SND_SOC_DAIFMT_IB_IF:
+		msp_config->bclk_inverted = true;
+		msp_config->tx_fsync_pol ^= 1 << TFSPOL_SHIFT;
+		msp_config->rx_fsync_pol ^= 1 << RFSPOL_SHIFT;
 		break;
 
 	default:
 		dev_err(dai->dev,
-			"%s: Error: Unsopported inversion (fmt = 0x%x)!\n",
+			"%s: Error: Unsupported inversion (fmt = 0x%x)!\n",
 			__func__, fmt);
 
 		return -EINVAL;
 	}
 
-	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_BC_FC:
 		dev_dbg(dai->dev, "%s: Codec is master.\n", __func__);
 
+		msp_config->clock_provider = false;
 		msp_config->iodelay = 0x20;
 		msp_config->rx_fsync_sel = 0;
 		msp_config->tx_fsync_sel = 1 << TFSSEL_SHIFT;
@@ -204,9 +164,10 @@ static int setup_clocking(struct snd_soc_dai *dai,
 
 		break;
 
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_BP_FP:
 		dev_dbg(dai->dev, "%s: Codec is slave.\n", __func__);
 
+		msp_config->clock_provider = true;
 		msp_config->tx_clk_sel = TX_CLK_SEL_SRG;
 		msp_config->tx_fsync_sel = TX_SYNC_SRG_PROG;
 		msp_config->rx_clk_sel = RX_CLK_SEL_SRG;
@@ -216,7 +177,7 @@ static int setup_clocking(struct snd_soc_dai *dai,
 		break;
 
 	default:
-		dev_err(dai->dev, "%s: Error: Unsopported master (fmt = 0x%x)!\n",
+		dev_err(dai->dev, "%s: Error: Unsupported master (fmt = 0x%x)!\n",
 			__func__, fmt);
 
 		return -EINVAL;
@@ -328,15 +289,15 @@ static int setup_msp_config(struct snd_pcm_substream *substream,
 	dev_dbg(dai->dev, "%s: rate: %u, channels: %d.\n", __func__,
 		runtime->rate, runtime->channels);
 	switch (fmt &
-		(SND_SOC_DAIFMT_FORMAT_MASK | SND_SOC_DAIFMT_MASTER_MASK)) {
-	case SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBS_CFS:
+		(SND_SOC_DAIFMT_FORMAT_MASK | SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK)) {
+	case SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_BP_FP:
 		dev_dbg(dai->dev, "%s: SND_SOC_DAIFMT_I2S.\n", __func__);
 
 		msp_config->default_protdesc = 1;
 		msp_config->protocol = MSP_I2S_PROTOCOL;
 		break;
 
-	case SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_BC_FC:
 		dev_dbg(dai->dev, "%s: SND_SOC_DAIFMT_I2S.\n", __func__);
 
 		msp_config->data_size = MSP_DATA_BITS_16;
@@ -348,10 +309,10 @@ static int setup_msp_config(struct snd_pcm_substream *substream,
 
 		break;
 
-	case SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBS_CFS:
-	case SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBM_CFM:
-	case SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_CBS_CFS:
-	case SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_CBM_CFM:
+	case SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_BP_FP:
+	case SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_BC_FC:
+	case SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_BP_FP:
+	case SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_BC_FC:
 		dev_dbg(dai->dev, "%s: PCM format.\n", __func__);
 
 		msp_config->data_size = MSP_DATA_BITS_16;
@@ -365,14 +326,14 @@ static int setup_msp_config(struct snd_pcm_substream *substream,
 		if (ret < 0)
 			return ret;
 
-		ret = setup_pcm_framing(dai, runtime->rate, prot_desc);
+		ret = setup_pcm_framing(dai, prot_desc);
 		if (ret < 0)
 			return ret;
 
 		break;
 
 	default:
-		dev_err(dai->dev, "%s: Error: Unsopported format (%d)!\n",
+		dev_err(dai->dev, "%s: Error: Unsupported format (%d)!\n",
 			__func__, fmt);
 		return -EINVAL;
 	}
@@ -427,21 +388,21 @@ static void ux500_msp_dai_shutdown(struct snd_pcm_substream *substream,
 	int ret;
 	struct ux500_msp_i2s_drvdata *drvdata = dev_get_drvdata(dai->dev);
 	bool is_playback = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK);
+	unsigned int configured = is_playback ? PLAYBACK_CONFIGURED :
+		CAPTURE_CONFIGURED;
+	unsigned int dir = is_playback ? MSP_DIR_TX : MSP_DIR_RX;
 
 	dev_dbg(dai->dev, "%s: MSP %d (%s): Enter.\n", __func__, dai->id,
 		snd_pcm_stream_str(substream));
 
-	if (drvdata->vape_opp_constraint == 1) {
-		prcmu_qos_update_requirement(PRCMU_QOS_APE_OPP,
-					"ux500_msp_i2s", 50);
-		drvdata->vape_opp_constraint = 0;
-	}
-
-	if (ux500_msp_i2s_close(drvdata->msp,
-				is_playback ? MSP_DIR_TX : MSP_DIR_RX)) {
-		dev_err(dai->dev,
-			"%s: Error: MSP %d (%s): Unable to close i2s.\n",
-			__func__, dai->id, snd_pcm_stream_str(substream));
+	if (drvdata->configured & configured) {
+		if (ux500_msp_i2s_close(drvdata->msp, dir)) {
+			dev_err(dai->dev,
+				"%s: Error: MSP %d (%s): Unable to close i2s.\n",
+				__func__, dai->id,
+				snd_pcm_stream_str(substream));
+		}
+		drvdata->configured &= ~configured;
 	}
 
 	/* Disable and unprepare clocks */
@@ -459,15 +420,23 @@ static void ux500_msp_dai_shutdown(struct snd_pcm_substream *substream,
 static int ux500_msp_dai_prepare(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
-	int ret = 0;
 	struct ux500_msp_i2s_drvdata *drvdata = dev_get_drvdata(dai->dev);
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct ux500_msp_config msp_config;
+	bool is_playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
+	unsigned int configured = is_playback ? PLAYBACK_CONFIGURED :
+		CAPTURE_CONFIGURED;
+	int ret;
 
 	dev_dbg(dai->dev, "%s: MSP %d (%s): Enter (rate = %d).\n", __func__,
 		dai->id, snd_pcm_stream_str(substream), runtime->rate);
 
-	setup_msp_config(substream, dai, &msp_config);
+	if (drvdata->configured & configured)
+		return 0;
+
+	ret = setup_msp_config(substream, dai, &msp_config);
+	if (ret)
+		return ret;
 
 	ret = ux500_msp_i2s_open(drvdata->msp, &msp_config);
 	if (ret < 0) {
@@ -476,21 +445,9 @@ static int ux500_msp_dai_prepare(struct snd_pcm_substream *substream,
 		return ret;
 	}
 
-	/* Set OPP-level */
-	if ((drvdata->fmt & SND_SOC_DAIFMT_MASTER_MASK) &&
-		(drvdata->msp->f_bitclk > 19200000)) {
-		/* If the bit-clock is higher than 19.2MHz, Vape should be
-		 * run in 100% OPP. Only when bit-clock is used (MSP master) */
-		prcmu_qos_update_requirement(PRCMU_QOS_APE_OPP,
-					"ux500-msp-i2s", 100);
-		drvdata->vape_opp_constraint = 1;
-	} else {
-		prcmu_qos_update_requirement(PRCMU_QOS_APE_OPP,
-					"ux500-msp-i2s", 50);
-		drvdata->vape_opp_constraint = 0;
-	}
+	drvdata->configured |= configured;
 
-	return ret;
+	return 0;
 }
 
 static int ux500_msp_dai_hw_params(struct snd_pcm_substream *substream,
@@ -498,7 +455,6 @@ static int ux500_msp_dai_hw_params(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
 	unsigned int mask, slots_active;
-	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct ux500_msp_i2s_drvdata *drvdata = dev_get_drvdata(dai->dev);
 
 	dev_dbg(dai->dev, "%s: MSP %d (%s): Enter.\n",
@@ -506,9 +462,8 @@ static int ux500_msp_dai_hw_params(struct snd_pcm_substream *substream,
 
 	switch (drvdata->fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
 	case SND_SOC_DAIFMT_I2S:
-		snd_pcm_hw_constraint_minmax(runtime,
-				SNDRV_PCM_HW_PARAM_CHANNELS,
-				1, 2);
+		if (params_channels(params) < 1 || params_channels(params) > 2)
+			return -EINVAL;
 		break;
 
 	case SND_SOC_DAIFMT_DSP_B:
@@ -520,9 +475,8 @@ static int ux500_msp_dai_hw_params(struct snd_pcm_substream *substream,
 		slots_active = hweight32(mask);
 		dev_dbg(dai->dev, "TDM-slots active: %d", slots_active);
 
-		snd_pcm_hw_constraint_minmax(runtime,
-				SNDRV_PCM_HW_PARAM_CHANNELS,
-				slots_active, slots_active);
+		if (!slots_active || params_channels(params) != slots_active)
+			return -EINVAL;
 		break;
 
 	default:
@@ -543,32 +497,33 @@ static int ux500_msp_dai_set_dai_fmt(struct snd_soc_dai *dai,
 	dev_dbg(dai->dev, "%s: MSP %d: Enter.\n", __func__, dai->id);
 
 	switch (fmt & (SND_SOC_DAIFMT_FORMAT_MASK |
-		SND_SOC_DAIFMT_MASTER_MASK)) {
-	case SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBS_CFS:
-	case SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBM_CFM:
-	case SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_CBS_CFS:
-	case SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_CBM_CFM:
-	case SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBS_CFS:
-	case SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBM_CFM:
+		SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK)) {
+	case SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_BP_FP:
+	case SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_BC_FC:
+	case SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_BP_FP:
+	case SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_BC_FC:
+	case SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_BP_FP:
+	case SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_BC_FC:
 		break;
 
 	default:
 		dev_err(dai->dev,
 			"%s: Error: Unsupported protocol/master (fmt = 0x%x)!\n",
-			__func__, drvdata->fmt);
+			__func__, fmt);
 		return -EINVAL;
 	}
 
 	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
 	case SND_SOC_DAIFMT_NB_NF:
 	case SND_SOC_DAIFMT_NB_IF:
+	case SND_SOC_DAIFMT_IB_NF:
 	case SND_SOC_DAIFMT_IB_IF:
 		break;
 
 	default:
 		dev_err(dai->dev,
 			"%s: Error: Unsupported inversion (fmt = 0x%x)!\n",
-			__func__, drvdata->fmt);
+			__func__, fmt);
 		return -EINVAL;
 	}
 
@@ -602,17 +557,23 @@ static int ux500_msp_dai_set_tdm_slot(struct snd_soc_dai *dai,
 			__func__, slots);
 		return -EINVAL;
 	}
-	drvdata->slots = slots;
 
-	if (!(slot_width == 16)) {
+	if (slot_width != 16) {
 		dev_err(dai->dev, "%s: Error: Unsupported slot-width (%d)!\n",
 			__func__, slot_width);
 		return -EINVAL;
 	}
-	drvdata->slot_width = slot_width;
 
-	drvdata->tx_mask = tx_mask & cap;
-	drvdata->rx_mask = rx_mask & cap;
+	if ((tx_mask | rx_mask) & ~cap) {
+		dev_err(dai->dev, "%s: Slot mask exceeds %d slots\n",
+			__func__, slots);
+		return -EINVAL;
+	}
+
+	drvdata->slots = slots;
+	drvdata->slot_width = slot_width;
+	drvdata->tx_mask = tx_mask;
+	drvdata->rx_mask = rx_mask;
 
 	return 0;
 }
@@ -654,134 +615,77 @@ static int ux500_msp_dai_trigger(struct snd_pcm_substream *substream,
 	return ret;
 }
 
-static int ux500_msp_dai_probe(struct snd_soc_dai *dai)
+static int ux500_msp_dai_of_probe(struct snd_soc_dai *dai)
 {
 	struct ux500_msp_i2s_drvdata *drvdata = dev_get_drvdata(dai->dev);
+	struct snd_dmaengine_dai_dma_data *playback_dma_data;
+	struct snd_dmaengine_dai_dma_data *capture_dma_data;
 
-	drvdata->playback_dma_data.dma_cfg = drvdata->msp->dma_cfg_tx;
-	drvdata->capture_dma_data.dma_cfg = drvdata->msp->dma_cfg_rx;
+	playback_dma_data = devm_kzalloc_obj(dai->dev, *playback_dma_data);
+	if (!playback_dma_data)
+		return -ENOMEM;
 
-	dai->playback_dma_data = &drvdata->playback_dma_data;
-	dai->capture_dma_data = &drvdata->capture_dma_data;
+	capture_dma_data = devm_kzalloc_obj(dai->dev, *capture_dma_data);
+	if (!capture_dma_data)
+		return -ENOMEM;
 
-	drvdata->playback_dma_data.data_size = drvdata->slot_width;
-	drvdata->capture_dma_data.data_size = drvdata->slot_width;
+	playback_dma_data->addr = drvdata->msp->tx_rx_addr;
+	capture_dma_data->addr = drvdata->msp->tx_rx_addr;
+
+	playback_dma_data->maxburst = 4;
+	capture_dma_data->maxburst = 4;
+
+	snd_soc_dai_init_dma_data(dai, playback_dma_data, capture_dma_data);
 
 	return 0;
 }
 
-static struct snd_soc_dai_ops ux500_msp_dai_ops[] = {
-	{
-		.set_sysclk = ux500_msp_dai_set_dai_sysclk,
-		.set_fmt = ux500_msp_dai_set_dai_fmt,
-		.set_tdm_slot = ux500_msp_dai_set_tdm_slot,
-		.startup = ux500_msp_dai_startup,
-		.shutdown = ux500_msp_dai_shutdown,
-		.prepare = ux500_msp_dai_prepare,
-		.trigger = ux500_msp_dai_trigger,
-		.hw_params = ux500_msp_dai_hw_params,
-	}
+static const u64 ux500_msp_dai_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_A	|
+	SND_SOC_POSSIBLE_DAIFMT_DSP_B;
+
+static const struct snd_soc_dai_ops ux500_msp_dai_ops = {
+	.probe		= ux500_msp_dai_of_probe,
+	.set_sysclk	= ux500_msp_dai_set_dai_sysclk,
+	.set_fmt	= ux500_msp_dai_set_dai_fmt,
+	.set_tdm_slot	= ux500_msp_dai_set_tdm_slot,
+	.startup	= ux500_msp_dai_startup,
+	.shutdown	= ux500_msp_dai_shutdown,
+	.prepare	= ux500_msp_dai_prepare,
+	.trigger	= ux500_msp_dai_trigger,
+	.hw_params	= ux500_msp_dai_hw_params,
+	.auto_selectable_formats	= &ux500_msp_dai_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
-static struct snd_soc_dai_driver ux500_msp_dai_drv[UX500_NBR_OF_DAI] = {
-	{
-		.name = "ux500-msp-i2s.0",
-		.probe = ux500_msp_dai_probe,
-		.id = 0,
-		.suspend = NULL,
-		.resume = NULL,
-		.playback = {
-			.channels_min = UX500_MSP_MIN_CHANNELS,
-			.channels_max = UX500_MSP_MAX_CHANNELS,
-			.rates = UX500_I2S_RATES,
-			.formats = UX500_I2S_FORMATS,
-		},
-		.capture = {
-			.channels_min = UX500_MSP_MIN_CHANNELS,
-			.channels_max = UX500_MSP_MAX_CHANNELS,
-			.rates = UX500_I2S_RATES,
-			.formats = UX500_I2S_FORMATS,
-		},
-		.ops = ux500_msp_dai_ops,
-	},
-	{
-		.name = "ux500-msp-i2s.1",
-		.probe = ux500_msp_dai_probe,
-		.id = 1,
-		.suspend = NULL,
-		.resume = NULL,
-		.playback = {
-			.channels_min = UX500_MSP_MIN_CHANNELS,
-			.channels_max = UX500_MSP_MAX_CHANNELS,
-			.rates = UX500_I2S_RATES,
-			.formats = UX500_I2S_FORMATS,
-		},
-		.capture = {
-			.channels_min = UX500_MSP_MIN_CHANNELS,
-			.channels_max = UX500_MSP_MAX_CHANNELS,
-			.rates = UX500_I2S_RATES,
-			.formats = UX500_I2S_FORMATS,
-		},
-		.ops = ux500_msp_dai_ops,
-	},
-	{
-		.name = "ux500-msp-i2s.2",
-		.id = 2,
-		.probe = ux500_msp_dai_probe,
-		.suspend = NULL,
-		.resume = NULL,
-		.playback = {
-			.channels_min = UX500_MSP_MIN_CHANNELS,
-			.channels_max = UX500_MSP_MAX_CHANNELS,
-			.rates = UX500_I2S_RATES,
-			.formats = UX500_I2S_FORMATS,
-		},
-		.capture = {
-			.channels_min = UX500_MSP_MIN_CHANNELS,
-			.channels_max = UX500_MSP_MAX_CHANNELS,
-			.rates = UX500_I2S_RATES,
-			.formats = UX500_I2S_FORMATS,
-		},
-		.ops = ux500_msp_dai_ops,
-	},
-	{
-		.name = "ux500-msp-i2s.3",
-		.probe = ux500_msp_dai_probe,
-		.id = 3,
-		.suspend = NULL,
-		.resume = NULL,
-		.playback = {
-			.channels_min = UX500_MSP_MIN_CHANNELS,
-			.channels_max = UX500_MSP_MAX_CHANNELS,
-			.rates = UX500_I2S_RATES,
-			.formats = UX500_I2S_FORMATS,
-		},
-		.capture = {
-			.channels_min = UX500_MSP_MIN_CHANNELS,
-			.channels_max = UX500_MSP_MAX_CHANNELS,
-			.rates = UX500_I2S_RATES,
-			.formats = UX500_I2S_FORMATS,
-		},
-		.ops = ux500_msp_dai_ops,
-	},
+static struct snd_soc_dai_driver ux500_msp_dai_drv = {
+	.playback.channels_min = UX500_MSP_MIN_CHANNELS,
+	.playback.channels_max = UX500_MSP_MAX_CHANNELS,
+	.playback.rates        = UX500_I2S_RATES,
+	.playback.formats      = UX500_I2S_FORMATS,
+	.capture.channels_min  = UX500_MSP_MIN_CHANNELS,
+	.capture.channels_max  = UX500_MSP_MAX_CHANNELS,
+	.capture.rates         = UX500_I2S_RATES,
+	.capture.formats       = UX500_I2S_FORMATS,
+	.ops                   = &ux500_msp_dai_ops,
 };
 
 static const struct snd_soc_component_driver ux500_msp_component = {
-	.name		= "ux500-msp",
+	.name			= "ux500-msp",
+	.legacy_dai_naming	= 1,
 };
 
 
 static int ux500_msp_drv_probe(struct platform_device *pdev)
 {
 	struct ux500_msp_i2s_drvdata *drvdata;
+	struct reset_control *reset;
 	int ret = 0;
 
-	dev_dbg(&pdev->dev, "%s: Enter (pdev->name = %s).\n", __func__,
-		pdev->name);
-
-	drvdata = devm_kzalloc(&pdev->dev,
-				sizeof(struct ux500_msp_i2s_drvdata),
-				GFP_KERNEL);
+	drvdata = devm_kzalloc_obj(&pdev->dev, struct ux500_msp_i2s_drvdata);
 	if (!drvdata)
 		return -ENOMEM;
 
@@ -790,50 +694,58 @@ static int ux500_msp_drv_probe(struct platform_device *pdev)
 	drvdata->tx_mask = 0x01;
 	drvdata->rx_mask = 0x01;
 	drvdata->slot_width = 16;
-	drvdata->master_clk = MSP_INPUT_FREQ_APB;
 
 	drvdata->reg_vape = devm_regulator_get(&pdev->dev, "v-ape");
 	if (IS_ERR(drvdata->reg_vape)) {
-		ret = (int)PTR_ERR(drvdata->reg_vape);
+		ret = PTR_ERR(drvdata->reg_vape);
 		dev_err(&pdev->dev,
 			"%s: ERROR: Failed to get Vape supply (%d)!\n",
 			__func__, ret);
 		return ret;
 	}
-	prcmu_qos_add_requirement(PRCMU_QOS_APE_OPP, (char *)pdev->name, 50);
-
-	drvdata->pclk = clk_get(&pdev->dev, "apb_pclk");
+	drvdata->pclk = devm_clk_get(&pdev->dev, "apb_pclk");
 	if (IS_ERR(drvdata->pclk)) {
-		ret = (int)PTR_ERR(drvdata->pclk);
-		dev_err(&pdev->dev, "%s: ERROR: clk_get of pclk failed (%d)!\n",
+		ret = PTR_ERR(drvdata->pclk);
+		dev_err(&pdev->dev,
+			"%s: ERROR: devm_clk_get of pclk failed (%d)!\n",
 			__func__, ret);
-		goto err_pclk;
+		return ret;
 	}
 
-	drvdata->clk = clk_get(&pdev->dev, NULL);
+	drvdata->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(drvdata->clk)) {
-		ret = (int)PTR_ERR(drvdata->clk);
-		dev_err(&pdev->dev, "%s: ERROR: clk_get failed (%d)!\n",
+		ret = PTR_ERR(drvdata->clk);
+		dev_err(&pdev->dev,
+			"%s: ERROR: devm_clk_get failed (%d)!\n",
 			__func__, ret);
-		goto err_clk;
+		return ret;
+	}
+	drvdata->master_clk = clk_get_rate(drvdata->clk);
+	if (!drvdata->master_clk) {
+		dev_err(&pdev->dev, "MSP clock has no rate\n");
+		return -EINVAL;
 	}
 
-	ret = ux500_msp_i2s_init_msp(pdev, &drvdata->msp,
-				pdev->dev.platform_data);
-	if (!drvdata->msp) {
+	reset = devm_reset_control_get_exclusive_deasserted(&pdev->dev, NULL);
+	if (IS_ERR(reset))
+		return dev_err_probe(&pdev->dev, PTR_ERR(reset),
+				     "Failed to deassert MSP reset\n");
+
+	ret = ux500_msp_i2s_init_msp(pdev, &drvdata->msp);
+	if (ret) {
 		dev_err(&pdev->dev,
 			"%s: ERROR: Failed to init MSP-struct (%d)!",
 			__func__, ret);
-		goto err_init_msp;
+		return ret;
 	}
 	dev_set_drvdata(&pdev->dev, drvdata);
 
 	ret = snd_soc_register_component(&pdev->dev, &ux500_msp_component,
-					 &ux500_msp_dai_drv[drvdata->msp->id], 1);
+					 &ux500_msp_dai_drv, 1);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Error: %s: Failed to register MSP%d!\n",
 			__func__, drvdata->msp->id);
-		goto err_init_msp;
+		return ret;
 	}
 
 	ret = ux500_pcm_register_platform(pdev);
@@ -848,17 +760,10 @@ static int ux500_msp_drv_probe(struct platform_device *pdev)
 
 err_reg_plat:
 	snd_soc_unregister_component(&pdev->dev);
-err_init_msp:
-	clk_put(drvdata->clk);
-err_clk:
-	clk_put(drvdata->pclk);
-err_pclk:
-	devm_regulator_put(drvdata->reg_vape);
-
 	return ret;
 }
 
-static int ux500_msp_drv_remove(struct platform_device *pdev)
+static void ux500_msp_drv_remove(struct platform_device *pdev)
 {
 	struct ux500_msp_i2s_drvdata *drvdata = dev_get_drvdata(&pdev->dev);
 
@@ -866,26 +771,18 @@ static int ux500_msp_drv_remove(struct platform_device *pdev)
 
 	snd_soc_unregister_component(&pdev->dev);
 
-	devm_regulator_put(drvdata->reg_vape);
-	prcmu_qos_remove_requirement(PRCMU_QOS_APE_OPP, "ux500_msp_i2s");
-
-	clk_put(drvdata->clk);
-	clk_put(drvdata->pclk);
-
 	ux500_msp_i2s_cleanup_msp(pdev, drvdata->msp);
-
-	return 0;
 }
 
 static const struct of_device_id ux500_msp_i2s_match[] = {
 	{ .compatible = "stericsson,ux500-msp-i2s", },
 	{},
 };
+MODULE_DEVICE_TABLE(of, ux500_msp_i2s_match);
 
 static struct platform_driver msp_i2s_driver = {
 	.driver = {
 		.name = "ux500-msp-i2s",
-		.owner = THIS_MODULE,
 		.of_match_table = ux500_msp_i2s_match,
 	},
 	.probe = ux500_msp_drv_probe,
@@ -893,4 +790,5 @@ static struct platform_driver msp_i2s_driver = {
 };
 module_platform_driver(msp_i2s_driver);
 
+MODULE_DESCRIPTION("ASoC Ux500 I2S driver");
 MODULE_LICENSE("GPL v2");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for the Diolan u2c-12 USB-I2C adapter
  *
@@ -6,10 +7,6 @@
  * Derived from:
  *  i2c-tiny-usb.c
  *  Copyright (C) 2006-2007 Till Harbaum (Till@Harbaum.org)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2.
  */
 
 #include <linux/kernel.h>
@@ -25,8 +22,6 @@
 #define USB_VENDOR_ID_DIOLAN		0x0abf
 #define USB_DEVICE_ID_DIOLAN_U2C	0x3370
 
-#define DIOLAN_OUT_EP		0x02
-#define DIOLAN_IN_EP		0x84
 
 /* commands via USB, must match command ids in the firmware */
 #define CMD_I2C_READ		0x01
@@ -69,8 +64,6 @@
 #define U2C_I2C_SPEED_2KHZ	242	/* 2 kHz, minimum speed */
 #define U2C_I2C_SPEED(f)	((DIV_ROUND_UP(1000000, (f)) - 10) / 2 + 1)
 
-#define U2C_I2C_FREQ_FAST	400000
-#define U2C_I2C_FREQ_STD	100000
 #define U2C_I2C_FREQ(s)		(1000000 / (2 * (s - 1) + 10))
 
 #define DIOLAN_USB_TIMEOUT	100	/* in ms */
@@ -84,6 +77,7 @@
 struct i2c_diolan_u2c {
 	u8 obuffer[DIOLAN_OUTBUF_LEN];	/* output buffer */
 	u8 ibuffer[DIOLAN_INBUF_LEN];	/* input buffer */
+	int ep_in, ep_out;              /* Endpoints    */
 	struct usb_device *usb_dev;	/* the usb device for this device */
 	struct usb_interface *interface;/* the interface for this device */
 	struct i2c_adapter adapter;	/* i2c related things */
@@ -91,7 +85,7 @@ struct i2c_diolan_u2c {
 	int ocount;			/* Number of enqueued messages */
 };
 
-static uint frequency = U2C_I2C_FREQ_STD;	/* I2C clock frequency in Hz */
+static uint frequency = I2C_MAX_STANDARD_MODE_FREQ;	/* I2C clock frequency in Hz */
 
 module_param(frequency, uint, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(frequency, "I2C clock frequency in hertz");
@@ -109,7 +103,7 @@ static int diolan_usb_transfer(struct i2c_diolan_u2c *dev)
 		return -EINVAL;
 
 	ret = usb_bulk_msg(dev->usb_dev,
-			   usb_sndbulkpipe(dev->usb_dev, DIOLAN_OUT_EP),
+			   usb_sndbulkpipe(dev->usb_dev, dev->ep_out),
 			   dev->obuffer, dev->olen, &actual,
 			   DIOLAN_USB_TIMEOUT);
 	if (!ret) {
@@ -118,7 +112,7 @@ static int diolan_usb_transfer(struct i2c_diolan_u2c *dev)
 
 			tmpret = usb_bulk_msg(dev->usb_dev,
 					      usb_rcvbulkpipe(dev->usb_dev,
-							      DIOLAN_IN_EP),
+							      dev->ep_in),
 					      dev->ibuffer,
 					      sizeof(dev->ibuffer), &actual,
 					      DIOLAN_USB_TIMEOUT);
@@ -210,7 +204,7 @@ static void diolan_flush_input(struct i2c_diolan_u2c *dev)
 		int ret;
 
 		ret = usb_bulk_msg(dev->usb_dev,
-				   usb_rcvbulkpipe(dev->usb_dev, DIOLAN_IN_EP),
+				   usb_rcvbulkpipe(dev->usb_dev, dev->ep_in),
 				   dev->ibuffer, sizeof(dev->ibuffer), &actual,
 				   DIOLAN_USB_TIMEOUT);
 		if (ret < 0 || actual == 0)
@@ -303,12 +297,12 @@ static int diolan_init(struct i2c_diolan_u2c *dev)
 {
 	int speed, ret;
 
-	if (frequency >= 200000) {
+	if (frequency >= 2 * I2C_MAX_STANDARD_MODE_FREQ) {
 		speed = U2C_I2C_SPEED_FAST;
-		frequency = U2C_I2C_FREQ_FAST;
-	} else if (frequency >= 100000 || frequency == 0) {
+		frequency = I2C_MAX_FAST_MODE_FREQ;
+	} else if (frequency >= I2C_MAX_STANDARD_MODE_FREQ || frequency == 0) {
 		speed = U2C_I2C_SPEED_STD;
-		frequency = U2C_I2C_FREQ_STD;
+		frequency = I2C_MAX_STANDARD_MODE_FREQ;
 	} else {
 		speed = U2C_I2C_SPEED(frequency);
 		if (speed > U2C_I2C_SPEED_2KHZ)
@@ -361,11 +355,11 @@ static int diolan_usb_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs,
 			if (ret < 0)
 				goto abort;
 		}
+		ret = diolan_i2c_put_byte_ack(dev,
+					      i2c_8bit_addr_from_msg(pmsg));
+		if (ret < 0)
+			goto abort;
 		if (pmsg->flags & I2C_M_RD) {
-			ret =
-			    diolan_i2c_put_byte_ack(dev, (pmsg->addr << 1) | 1);
-			if (ret < 0)
-				goto abort;
 			for (j = 0; j < pmsg->len; j++) {
 				u8 byte;
 				bool ack = j < pmsg->len - 1;
@@ -394,9 +388,6 @@ static int diolan_usb_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs,
 				pmsg->buf[j] = byte;
 			}
 		} else {
-			ret = diolan_i2c_put_byte_ack(dev, pmsg->addr << 1);
-			if (ret < 0)
-				goto abort;
 			for (j = 0; j < pmsg->len; j++) {
 				ret = diolan_i2c_put_byte_ack(dev,
 							      pmsg->buf[j]);
@@ -423,7 +414,7 @@ static u32 diolan_usb_func(struct i2c_adapter *a)
 }
 
 static const struct i2c_algorithm diolan_usb_algorithm = {
-	.master_xfer = diolan_usb_xfer,
+	.xfer = diolan_usb_xfer,
 	.functionality = diolan_usb_func,
 };
 
@@ -436,27 +427,27 @@ static const struct usb_device_id diolan_u2c_table[] = {
 
 MODULE_DEVICE_TABLE(usb, diolan_u2c_table);
 
-static void diolan_u2c_free(struct i2c_diolan_u2c *dev)
-{
-	usb_put_dev(dev->usb_dev);
-	kfree(dev);
-}
-
 static int diolan_u2c_probe(struct usb_interface *interface,
 			    const struct usb_device_id *id)
 {
+	struct usb_host_interface *hostif = interface->cur_altsetting;
 	struct i2c_diolan_u2c *dev;
 	int ret;
 
+	if (hostif->desc.bInterfaceNumber != 0
+	    || hostif->desc.bNumEndpoints < 2)
+		return -ENODEV;
+
 	/* allocate memory for our device state and initialize it */
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	dev = kzalloc_obj(*dev);
 	if (dev == NULL) {
-		dev_err(&interface->dev, "no memory for device state\n");
 		ret = -ENOMEM;
 		goto error;
 	}
+	dev->ep_out = hostif->endpoint[0].desc.bEndpointAddress;
+	dev->ep_in = hostif->endpoint[1].desc.bEndpointAddress;
 
-	dev->usb_dev = usb_get_dev(interface_to_usbdev(interface));
+	dev->usb_dev = interface_to_usbdev(interface);
 	dev->interface = interface;
 
 	/* save our data pointer in this interface device */
@@ -482,10 +473,8 @@ static int diolan_u2c_probe(struct usb_interface *interface,
 
 	/* and finally attach to i2c layer */
 	ret = i2c_add_adapter(&dev->adapter);
-	if (ret < 0) {
-		dev_err(&interface->dev, "failed to add I2C adapter\n");
+	if (ret < 0)
 		goto error_free;
-	}
 
 	dev_dbg(&interface->dev, "connected " DRIVER_NAME "\n");
 
@@ -493,7 +482,7 @@ static int diolan_u2c_probe(struct usb_interface *interface,
 
 error_free:
 	usb_set_intfdata(interface, NULL);
-	diolan_u2c_free(dev);
+	kfree(dev);
 error:
 	return ret;
 }
@@ -504,7 +493,7 @@ static void diolan_u2c_disconnect(struct usb_interface *interface)
 
 	i2c_del_adapter(&dev->adapter);
 	usb_set_intfdata(interface, NULL);
-	diolan_u2c_free(dev);
+	kfree(dev);
 
 	dev_dbg(&interface->dev, "disconnected\n");
 }

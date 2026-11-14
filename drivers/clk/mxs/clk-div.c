@@ -1,15 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2012 Freescale Semiconductor, Inc.
- *
- * The code contained herein is licensed under the GNU General Public
- * License. You may obtain a copy of the GNU General Public License
- * Version 2 or later at the following locations:
- *
- * http://www.opensource.org/licenses/gpl-license.html
- * http://www.gnu.org/copyleft/gpl.html
  */
 
-#include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/err.h>
 #include <linux/slab.h>
@@ -23,7 +16,7 @@
  * @busy: busy bit shift
  *
  * The mxs divider clock is a subclass of basic clk_divider with an
- * addtional busy bit.
+ * additional busy bit.
  */
 struct clk_div {
 	struct clk_divider divider;
@@ -34,7 +27,7 @@ struct clk_div {
 
 static inline struct clk_div *to_clk_div(struct clk_hw *hw)
 {
-	struct clk_divider *divider = container_of(hw, struct clk_divider, hw);
+	struct clk_divider *divider = to_clk_divider(hw);
 
 	return container_of(divider, struct clk_div, divider);
 }
@@ -47,12 +40,12 @@ static unsigned long clk_div_recalc_rate(struct clk_hw *hw,
 	return div->ops->recalc_rate(&div->divider.hw, parent_rate);
 }
 
-static long clk_div_round_rate(struct clk_hw *hw, unsigned long rate,
-			       unsigned long *prate)
+static int clk_div_determine_rate(struct clk_hw *hw,
+				  struct clk_rate_request *req)
 {
 	struct clk_div *div = to_clk_div(hw);
 
-	return div->ops->round_rate(&div->divider.hw, rate, prate);
+	return div->ops->determine_rate(&div->divider.hw, req);
 }
 
 static int clk_div_set_rate(struct clk_hw *hw, unsigned long rate,
@@ -68,20 +61,20 @@ static int clk_div_set_rate(struct clk_hw *hw, unsigned long rate,
 	return ret;
 }
 
-static struct clk_ops clk_div_ops = {
+static const struct clk_ops clk_div_ops = {
 	.recalc_rate = clk_div_recalc_rate,
-	.round_rate = clk_div_round_rate,
+	.determine_rate = clk_div_determine_rate,
 	.set_rate = clk_div_set_rate,
 };
 
 struct clk *mxs_clk_div(const char *name, const char *parent_name,
 			void __iomem *reg, u8 shift, u8 width, u8 busy)
 {
+	struct clk_init_data init = {};
 	struct clk_div *div;
 	struct clk *clk;
-	struct clk_init_data init;
 
-	div = kzalloc(sizeof(*div), GFP_KERNEL);
+	div = kzalloc_obj(*div);
 	if (!div)
 		return ERR_PTR(-ENOMEM);
 

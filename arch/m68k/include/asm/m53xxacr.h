@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /****************************************************************************/
 
 /*
@@ -31,7 +32,7 @@
 #define CACR_DCM_PRE	0x00000200	/* Cache inhibited, precise */
 #define CACR_DCM_IMPRE	0x00000300	/* Cache inhibited, imprecise */
 #define CACR_WPROTECT	0x00000020	/* Write protect*/
-#define CACR_EUSP	0x00000010	/* Eanble separate user a7 */
+#define CACR_EUSP	0x00000010	/* Enable separate user a7 */
 
 /*
  * Define the Access Control register flags.
@@ -88,9 +89,9 @@
  * coherency though in all cases. And for copyback caches we will need
  * to push cached data as well.
  */
-#define CACHE_INIT	  CACR_CINVA
-#define CACHE_INVALIDATE  CACR_CINVA
-#define CACHE_INVALIDATED CACR_CINVA
+#define CACHE_INIT        (CACHE_MODE + CACR_CINVA - CACR_EC)
+#define CACHE_INVALIDATE  (CACHE_MODE + CACR_CINVA)
+#define CACHE_INVALIDATED (CACHE_MODE + CACR_CINVA)
 
 #define ACR0_MODE	((CONFIG_RAMBASE & 0xff000000) + \
 			 (0x000f0000) + \

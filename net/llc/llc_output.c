@@ -1,16 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * llc_output.c - LLC minimal output path
  *
  * Copyright (c) 1997 by Procom Technology, Inc.
  * 		 2001-2003 by Arnaldo Carvalho de Melo <acme@conectiva.com.br>
- *
- * This program can be redistributed or modified under the terms of the
- * GNU General Public License version 2 as published by the Free Software
- * Foundation.
- * This program is distributed without any warranty or implied warranty
- * of merchantability or fitness for a particular purpose.
- *
- * See the GNU General Public License version 2 for more details.
  */
 
 #include <linux/if_arp.h>
@@ -43,7 +36,7 @@ int llc_mac_hdr_init(struct sk_buff *skb,
 			rc = 0;
 		break;
 	default:
-		WARN(1, "device type not supported: %d\n", skb->dev->type);
+		break;
 	}
 	return rc;
 }
@@ -63,15 +56,16 @@ int llc_mac_hdr_init(struct sk_buff *skb,
  *	package primitive as an event and send to SAP event handler
  */
 int llc_build_and_send_ui_pkt(struct llc_sap *sap, struct sk_buff *skb,
-			      unsigned char *dmac, unsigned char dsap)
+			      const unsigned char *dmac, unsigned char dsap)
 {
 	int rc;
-	llc_pdu_header_init(skb, LLC_PDU_TYPE_U, sap->laddr.lsap,
-			    dsap, LLC_PDU_CMD);
+	llc_pdu_header_init(skb, sap->lsap, dsap, LLC_PDU_CMD);
 	llc_pdu_init_as_ui_cmd(skb);
 	rc = llc_mac_hdr_init(skb, skb->dev->dev_addr, dmac);
 	if (likely(!rc))
 		rc = dev_queue_xmit(skb);
+	else
+		kfree_skb(skb);
 	return rc;
 }
 

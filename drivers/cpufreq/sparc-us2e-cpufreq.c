@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* us2e_cpufreq.c: UltraSPARC-IIe cpu frequency support
  *
  * Copyright (C) 2003 David S. Miller (davem@redhat.com)
@@ -18,8 +19,6 @@
 
 #include <asm/asi.h>
 #include <asm/timer.h>
-
-static struct cpufreq_driver *cpufreq_us2e_driver;
 
 struct us2e_freq_percpu_info {
 	struct cpufreq_frequency_table table[6];
@@ -118,10 +117,6 @@ static void us2e_transition(unsigned long estar, unsigned long new_bits,
 			    unsigned long clock_tick,
 			    unsigned long old_divisor, unsigned long divisor)
 {
-	unsigned long flags;
-
-	local_irq_save(flags);
-
 	estar &= ~ESTAR_MODE_DIV_MASK;
 
 	/* This is based upon the state transition diagram in the IIe manual.  */
@@ -152,8 +147,6 @@ static void us2e_transition(unsigned long estar, unsigned long new_bits,
 	} else {
 		BUG();
 	}
-
-	local_irq_restore(flags);
 }
 
 static unsigned long index_to_estar_mode(unsigned int index)
@@ -229,111 +222,92 @@ static unsigned long estar_to_divisor(unsigned long estar)
 	return ret;
 }
 
+static void __us2e_freq_get(void *arg)
+{
+	unsigned long *estar = arg;
+
+	*estar = read_hbreg(HBIRD_ESTAR_MODE_ADDR);
+}
+
 static unsigned int us2e_freq_get(unsigned int cpu)
 {
-	cpumask_t cpus_allowed;
 	unsigned long clock_tick, estar;
 
-	cpumask_copy(&cpus_allowed, tsk_cpus_allowed(current));
-	set_cpus_allowed_ptr(current, cpumask_of(cpu));
-
 	clock_tick = sparc64_get_clock_tick(cpu) / 1000;
-	estar = read_hbreg(HBIRD_ESTAR_MODE_ADDR);
-
-	set_cpus_allowed_ptr(current, &cpus_allowed);
+	if (smp_call_function_single(cpu, __us2e_freq_get, &estar, 1))
+		return 0;
 
 	return clock_tick / estar_to_divisor(estar);
 }
 
-static void us2e_set_cpu_divider_index(struct cpufreq_policy *policy,
-		unsigned int index)
+static void __us2e_freq_target(void *arg)
 {
-	unsigned int cpu = policy->cpu;
+	unsigned int cpu = smp_processor_id();
+	unsigned int *index = arg;
 	unsigned long new_bits, new_freq;
 	unsigned long clock_tick, divisor, old_divisor, estar;
-	cpumask_t cpus_allowed;
-	struct cpufreq_freqs freqs;
-
-	cpumask_copy(&cpus_allowed, tsk_cpus_allowed(current));
-	set_cpus_allowed_ptr(current, cpumask_of(cpu));
 
 	new_freq = clock_tick = sparc64_get_clock_tick(cpu) / 1000;
-	new_bits = index_to_estar_mode(index);
-	divisor = index_to_divisor(index);
+	new_bits = index_to_estar_mode(*index);
+	divisor = index_to_divisor(*index);
 	new_freq /= divisor;
 
 	estar = read_hbreg(HBIRD_ESTAR_MODE_ADDR);
 
 	old_divisor = estar_to_divisor(estar);
 
-	freqs.old = clock_tick / old_divisor;
-	freqs.new = new_freq;
-	cpufreq_notify_transition(policy, &freqs, CPUFREQ_PRECHANGE);
-
-	if (old_divisor != divisor)
+	if (old_divisor != divisor) {
 		us2e_transition(estar, new_bits, clock_tick * 1000,
 				old_divisor, divisor);
-
-	cpufreq_notify_transition(policy, &freqs, CPUFREQ_POSTCHANGE);
-
-	set_cpus_allowed_ptr(current, &cpus_allowed);
+	}
 }
 
-static int us2e_freq_target(struct cpufreq_policy *policy,
-			  unsigned int target_freq,
-			  unsigned int relation)
+static int us2e_freq_target(struct cpufreq_policy *policy, unsigned int index)
 {
-	unsigned int new_index = 0;
+	unsigned int cpu = policy->cpu;
 
-	if (cpufreq_frequency_table_target(policy,
-					   &us2e_freq_table[policy->cpu].table[0],
-					   target_freq, relation, &new_index))
-		return -EINVAL;
-
-	us2e_set_cpu_divider_index(policy, new_index);
-
-	return 0;
+	return smp_call_function_single(cpu, __us2e_freq_target, &index, 1);
 }
 
-static int us2e_freq_verify(struct cpufreq_policy *policy)
-{
-	return cpufreq_frequency_table_verify(policy,
-					      &us2e_freq_table[policy->cpu].table[0]);
-}
-
-static int __init us2e_freq_cpu_init(struct cpufreq_policy *policy)
+static int us2e_freq_cpu_init(struct cpufreq_policy *policy)
 {
 	unsigned int cpu = policy->cpu;
 	unsigned long clock_tick = sparc64_get_clock_tick(cpu) / 1000;
 	struct cpufreq_frequency_table *table =
 		&us2e_freq_table[cpu].table[0];
 
-	table[0].index = 0;
+	table[0].driver_data = 0;
 	table[0].frequency = clock_tick / 1;
-	table[1].index = 1;
+	table[1].driver_data = 1;
 	table[1].frequency = clock_tick / 2;
-	table[2].index = 2;
+	table[2].driver_data = 2;
 	table[2].frequency = clock_tick / 4;
-	table[2].index = 3;
-	table[2].frequency = clock_tick / 6;
-	table[2].index = 4;
-	table[2].frequency = clock_tick / 8;
-	table[2].index = 5;
-	table[3].frequency = CPUFREQ_TABLE_END;
+	table[3].driver_data = 3;
+	table[3].frequency = clock_tick / 6;
+	table[4].driver_data = 4;
+	table[4].frequency = clock_tick / 8;
+	table[5].frequency = CPUFREQ_TABLE_END;
 
 	policy->cpuinfo.transition_latency = 0;
 	policy->cur = clock_tick;
-
-	return cpufreq_frequency_table_cpuinfo(policy, table);
-}
-
-static int us2e_freq_cpu_exit(struct cpufreq_policy *policy)
-{
-	if (cpufreq_us2e_driver)
-		us2e_set_cpu_divider_index(policy, 0);
+	policy->freq_table = table;
 
 	return 0;
 }
+
+static void us2e_freq_cpu_exit(struct cpufreq_policy *policy)
+{
+	us2e_freq_target(policy, 0);
+}
+
+static struct cpufreq_driver cpufreq_us2e_driver = {
+	.name = "UltraSPARC-IIe",
+	.init = us2e_freq_cpu_init,
+	.verify = cpufreq_generic_frequency_table_verify,
+	.target_index = us2e_freq_target,
+	.get = us2e_freq_get,
+	.exit = us2e_freq_cpu_exit,
+};
 
 static int __init us2e_freq_init(void)
 {
@@ -348,41 +322,14 @@ static int __init us2e_freq_init(void)
 	impl  = ((ver >> 32) & 0xffff);
 
 	if (manuf == 0x17 && impl == 0x13) {
-		struct cpufreq_driver *driver;
-
-		ret = -ENOMEM;
-		driver = kzalloc(sizeof(struct cpufreq_driver), GFP_KERNEL);
-		if (!driver)
-			goto err_out;
-
-		us2e_freq_table = kzalloc(
-			(NR_CPUS * sizeof(struct us2e_freq_percpu_info)),
-			GFP_KERNEL);
+		us2e_freq_table = kzalloc_objs(*us2e_freq_table, NR_CPUS);
 		if (!us2e_freq_table)
-			goto err_out;
+			return -ENOMEM;
 
-		driver->init = us2e_freq_cpu_init;
-		driver->verify = us2e_freq_verify;
-		driver->target = us2e_freq_target;
-		driver->get = us2e_freq_get;
-		driver->exit = us2e_freq_cpu_exit;
-		driver->owner = THIS_MODULE,
-		strcpy(driver->name, "UltraSPARC-IIe");
-
-		cpufreq_us2e_driver = driver;
-		ret = cpufreq_register_driver(driver);
+		ret = cpufreq_register_driver(&cpufreq_us2e_driver);
 		if (ret)
-			goto err_out;
+			kfree(us2e_freq_table);
 
-		return 0;
-
-err_out:
-		if (driver) {
-			kfree(driver);
-			cpufreq_us2e_driver = NULL;
-		}
-		kfree(us2e_freq_table);
-		us2e_freq_table = NULL;
 		return ret;
 	}
 
@@ -391,13 +338,8 @@ err_out:
 
 static void __exit us2e_freq_exit(void)
 {
-	if (cpufreq_us2e_driver) {
-		cpufreq_unregister_driver(cpufreq_us2e_driver);
-		kfree(cpufreq_us2e_driver);
-		cpufreq_us2e_driver = NULL;
-		kfree(us2e_freq_table);
-		us2e_freq_table = NULL;
-	}
+	cpufreq_unregister_driver(&cpufreq_us2e_driver);
+	kfree(us2e_freq_table);
 }
 
 MODULE_AUTHOR("David S. Miller <davem@redhat.com>");

@@ -1,25 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2009-2010 Pengutronix
  * Uwe Kleine-Koenig <u.kleine-koenig@pengutronix.de>
  *
  * loosely based on an earlier driver that has
  * Copyright 2009 Pengutronix, Sascha Hauer <s.hauer@pengutronix.de>
- *
- * This program is free software; you can redistribute it and/or modify it under
- * the terms of the GNU General Public License version 2 as published by the
- * Free Software Foundation.
  */
 
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
-#include <linux/mutex.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/mc13xxx.h>
-#include <linux/of.h>
-#include <linux/of_device.h>
-#include <linux/of_gpio.h>
 #include <linux/err.h>
 #include <linux/spi/spi.h>
 
@@ -49,7 +42,7 @@ static const struct of_device_id mc13xxx_dt_ids[] = {
 };
 MODULE_DEVICE_TABLE(of, mc13xxx_dt_ids);
 
-static struct regmap_config mc13xxx_regmap_spi_config = {
+static const struct regmap_config mc13xxx_regmap_spi_config = {
 	.reg_bits = 7,
 	.pad_bits = 1,
 	.val_bits = 24,
@@ -58,7 +51,8 @@ static struct regmap_config mc13xxx_regmap_spi_config = {
 	.max_register = MC13XXX_NUMREGS,
 
 	.cache_type = REGCACHE_NONE,
-	.use_single_rw = 1,
+	.use_single_read = true,
+	.use_single_write = true,
 };
 
 static int mc13xxx_spi_read(void *context, const void *reg, size_t reg_size,
@@ -94,9 +88,14 @@ static int mc13xxx_spi_write(void *context, const void *data, size_t count)
 {
 	struct device *dev = context;
 	struct spi_device *spi = to_spi_device(dev);
+	const char *reg = data;
 
 	if (count != 4)
 		return -ENOTSUPP;
+
+	/* include errata fix for spi audio problems */
+	if (*reg == MC13783_AUDIO_CODEC || *reg == MC13783_AUDIO_DAC)
+		spi_write(spi, data, count);
 
 	return spi_write(spi, data, count);
 }
@@ -113,10 +112,10 @@ static int mc13xxx_spi_write(void *context, const void *data, size_t count)
  * result, the SS will negate before all of the data has been
  * transferred to/from the peripheral."
  * We workaround this by accessing the SPI controller with a
- * single transfert.
+ * single transfer.
  */
 
-static struct regmap_bus regmap_mc13xxx_bus = {
+static const struct regmap_bus regmap_mc13xxx_bus = {
 	.write = mc13xxx_spi_write,
 	.read = mc13xxx_spi_read,
 };
@@ -124,58 +123,46 @@ static struct regmap_bus regmap_mc13xxx_bus = {
 static int mc13xxx_spi_probe(struct spi_device *spi)
 {
 	struct mc13xxx *mc13xxx;
-	struct mc13xxx_platform_data *pdata = dev_get_platdata(&spi->dev);
 	int ret;
 
-	mc13xxx = devm_kzalloc(&spi->dev, sizeof(*mc13xxx), GFP_KERNEL);
+	mc13xxx = devm_kzalloc_obj(&spi->dev, *mc13xxx);
 	if (!mc13xxx)
 		return -ENOMEM;
 
-	spi_set_drvdata(spi, mc13xxx);
+	dev_set_drvdata(&spi->dev, mc13xxx);
+
 	spi->mode = SPI_MODE_0 | SPI_CS_HIGH;
 
-	mc13xxx->dev = &spi->dev;
-	mutex_init(&mc13xxx->lock);
+	mc13xxx->irq = spi->irq;
+
+	spi->max_speed_hz = spi->max_speed_hz ? : 26000000;
+	ret = spi_setup(spi);
+	if (ret)
+		return ret;
 
 	mc13xxx->regmap = devm_regmap_init(&spi->dev, &regmap_mc13xxx_bus,
 					   &spi->dev,
 					   &mc13xxx_regmap_spi_config);
 	if (IS_ERR(mc13xxx->regmap)) {
 		ret = PTR_ERR(mc13xxx->regmap);
-		dev_err(mc13xxx->dev, "Failed to initialize register map: %d\n",
-				ret);
-		spi_set_drvdata(spi, NULL);
+		dev_err(&spi->dev, "Failed to initialize regmap: %d\n", ret);
 		return ret;
 	}
 
-	if (spi->dev.of_node) {
-		const struct of_device_id *of_id =
-			of_match_device(mc13xxx_dt_ids, &spi->dev);
+	mc13xxx->variant = spi_get_device_match_data(spi);
 
-		mc13xxx->variant = of_id->data;
-	} else {
-		const struct spi_device_id *id_entry = spi_get_device_id(spi);
-
-		mc13xxx->variant = (void *)id_entry->driver_data;
-	}
-
-	return mc13xxx_common_init(mc13xxx, pdata, spi->irq);
+	return mc13xxx_common_init(&spi->dev);
 }
 
-static int mc13xxx_spi_remove(struct spi_device *spi)
+static void mc13xxx_spi_remove(struct spi_device *spi)
 {
-	struct mc13xxx *mc13xxx = spi_get_drvdata(spi);
-
-	mc13xxx_common_cleanup(mc13xxx);
-
-	return 0;
+	mc13xxx_common_exit(&spi->dev);
 }
 
 static struct spi_driver mc13xxx_spi_driver = {
 	.id_table = mc13xxx_device_id,
 	.driver = {
 		.name = "mc13xxx",
-		.owner = THIS_MODULE,
 		.of_match_table = mc13xxx_dt_ids,
 	},
 	.probe = mc13xxx_spi_probe,

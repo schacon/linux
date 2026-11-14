@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AppArmor security module
  *
@@ -5,11 +6,6 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation, version 2 of the
- * License.
  */
 
 #include <linux/audit.h>
@@ -18,64 +14,13 @@
 #include "include/apparmor.h"
 #include "include/audit.h"
 #include "include/policy.h"
-
-const char *const op_table[] = {
-	"null",
-
-	"sysctl",
-	"capable",
-
-	"unlink",
-	"mkdir",
-	"rmdir",
-	"mknod",
-	"truncate",
-	"link",
-	"symlink",
-	"rename_src",
-	"rename_dest",
-	"chmod",
-	"chown",
-	"getattr",
-	"open",
-
-	"file_perm",
-	"file_lock",
-	"file_mmap",
-	"file_mprotect",
-
-	"create",
-	"post_create",
-	"bind",
-	"connect",
-	"listen",
-	"accept",
-	"sendmsg",
-	"recvmsg",
-	"getsockname",
-	"getpeername",
-	"getsockopt",
-	"setsockopt",
-	"socket_shutdown",
-
-	"ptrace",
-
-	"exec",
-	"change_hat",
-	"change_profile",
-	"change_onexec",
-
-	"setprocattr",
-	"setrlimit",
-
-	"profile_replace",
-	"profile_load",
-	"profile_remove"
-};
+#include "include/policy_ns.h"
+#include "include/secid.h"
 
 const char *const audit_mode_names[] = {
 	"normal",
 	"quiet_denied",
+	"quiet.allowed",
 	"quiet",
 	"noquiet",
 	"all"
@@ -88,9 +33,46 @@ static const char *const aa_audit_type[] = {
 	"HINT",
 	"STATUS",
 	"ERROR",
-	"KILLED"
+	"KILLED",
 	"AUTO"
 };
+
+static const char *const aa_class_names[] = {
+	"none",
+	"unknown",
+	"file",
+	"cap",
+	"net",
+	"rlimits",
+	"domain",
+	"mount",
+	"unknown",
+	"ptrace",
+	"signal",
+	"xmatch",
+	"unknown",
+	"unknown",
+	"net",
+	"netv9",
+	"label",
+	"posix_mqueue",
+	"io_uring",
+	"module",
+	"lsm",
+	"namespace",
+	"io_uring",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"netv9_packet",
+	"X",
+	"dbus",
+};
+
 
 /*
  * Currently AppArmor auditing is fed straight into the audit framework.
@@ -102,93 +84,127 @@ static const char *const aa_audit_type[] = {
  */
 
 /**
- * audit_base - core AppArmor function.
+ * audit_pre() - core AppArmor function.
  * @ab: audit buffer to fill (NOT NULL)
- * @ca: audit structure containing data to audit (NOT NULL)
+ * @va: audit structure containing data to audit (NOT NULL)
  *
- * Record common AppArmor audit data from @sa
+ * Record common AppArmor audit data from @va
  */
-static void audit_pre(struct audit_buffer *ab, void *ca)
+static void audit_pre(struct audit_buffer *ab, void *va)
 {
-	struct common_audit_data *sa = ca;
-	struct task_struct *tsk = sa->aad->tsk ? sa->aad->tsk : current;
+	struct apparmor_audit_data *ad = aad_of_va(va);
 
 	if (aa_g_audit_header) {
-		audit_log_format(ab, "apparmor=");
-		audit_log_string(ab, aa_audit_type[sa->aad->type]);
+		audit_log_format(ab, "apparmor=\"%s\"",
+				 aa_audit_type[ad->type]);
 	}
 
-	if (sa->aad->op) {
-		audit_log_format(ab, " operation=");
-		audit_log_string(ab, op_table[sa->aad->op]);
+	if (ad->op)
+		audit_log_format(ab, " operation=\"%s\"", ad->op);
+
+	if (ad->class)
+		audit_log_format(ab, " class=\"%s\"",
+				 ad->class <= AA_CLASS_LAST ?
+				 aa_class_names[ad->class] :
+				 "unknown");
+
+	if (ad->info) {
+		audit_log_format(ab, " info=\"%s\"", ad->info);
+		if (ad->error)
+			audit_log_format(ab, " error=%d", ad->error);
 	}
 
-	if (sa->aad->info) {
-		audit_log_format(ab, " info=");
-		audit_log_string(ab, sa->aad->info);
-		if (sa->aad->error)
-			audit_log_format(ab, " error=%d", sa->aad->error);
-	}
+	if (ad->subj_label) {
+		struct aa_label *label = ad->subj_label;
 
-	if (sa->aad->profile) {
-		struct aa_profile *profile = sa->aad->profile;
-		pid_t pid;
-		rcu_read_lock();
-		pid = rcu_dereference(tsk->real_parent)->pid;
-		rcu_read_unlock();
-		audit_log_format(ab, " parent=%d", pid);
-		if (profile->ns != root_ns) {
-			audit_log_format(ab, " namespace=");
-			audit_log_untrustedstring(ab, profile->ns->base.hname);
+		if (label_isprofile(label)) {
+			struct aa_profile *profile = labels_profile(label);
+
+			if (profile->ns != root_ns) {
+				audit_log_format(ab, " namespace=");
+				audit_log_untrustedstring(ab,
+						       profile->ns->base.hname);
+			}
+			audit_log_format(ab, " profile=");
+			audit_log_untrustedstring(ab, profile->base.hname);
+		} else {
+			audit_log_format(ab, " label=");
+			aa_label_xaudit(ab, root_ns, label, FLAG_VIEW_SUBNS,
+					GFP_ATOMIC);
 		}
-		audit_log_format(ab, " profile=");
-		audit_log_untrustedstring(ab, profile->base.hname);
 	}
 
-	if (sa->aad->name) {
+	if (ad->name) {
 		audit_log_format(ab, " name=");
-		audit_log_untrustedstring(ab, sa->aad->name);
+		audit_log_untrustedstring(ab, ad->name);
 	}
+}
 
-	if (sa->aad->tsk) {
-		audit_log_format(ab, " pid=%d comm=", tsk->pid);
-		audit_log_untrustedstring(ab, tsk->comm);
-	}
-
+int aa_select_audit_type(u32 denied, const struct aa_perms *perms)
+{
+	if (likely(!denied))
+		return AUDIT_APPARMOR_AUDIT;
+	else if (denied & perms->kill)
+		return AUDIT_APPARMOR_KILL;
+	else if (denied == (denied & perms->complain))
+		return AUDIT_APPARMOR_ALLOWED;
+	return AUDIT_APPARMOR_DENIED;
 }
 
 /**
  * aa_audit_msg - Log a message to the audit subsystem
- * @sa: audit event structure (NOT NULL)
+ * @type: audit type for the message
+ * @ad: audit event structure (NOT NULL)
  * @cb: optional callback fn for type specific fields (MAYBE NULL)
  */
-void aa_audit_msg(int type, struct common_audit_data *sa,
+void aa_audit_msg(int type, struct apparmor_audit_data *ad,
 		  void (*cb) (struct audit_buffer *, void *))
 {
-	sa->aad->type = type;
-	common_lsm_audit(sa, audit_pre, cb);
+	ad->type = type;
+	common_lsm_audit(&ad->common, audit_pre, cb);
+}
+
+int aa_audit_perm_error(struct aa_label *label, u32 request, int error,
+			struct apparmor_audit_data *ad,
+			void (*cb)(struct audit_buffer *, void *))
+{
+	int type = aa_select_audit_type(request, &nullperms);
+
+	if (ad) {
+		struct aa_profile *profile;
+		struct label_it i;
+
+		ad->request = request;
+		ad->denied = request;
+		ad->error = error;
+		label_for_each_confined(i, label, profile) {
+			ad->subj_label = &profile->label;
+			aa_audit_msg(type, ad, cb);
+		}
+	}
+
+	return error;
 }
 
 /**
  * aa_audit - Log a profile based audit event to the audit subsystem
  * @type: audit type for the message
  * @profile: profile to check against (NOT NULL)
- * @gfp: allocation flags to use
- * @sa: audit event (NOT NULL)
+ * @ad: audit event (NOT NULL)
  * @cb: optional callback fn for type specific fields (MAYBE NULL)
  *
  * Handle default message switching based off of audit mode flags
  *
  * Returns: error on failure
  */
-int aa_audit(int type, struct aa_profile *profile, gfp_t gfp,
-	     struct common_audit_data *sa,
+int aa_audit(int type, struct aa_profile *profile,
+	     struct apparmor_audit_data *ad,
 	     void (*cb) (struct audit_buffer *, void *))
 {
-	BUG_ON(!profile);
+	AA_BUG(!profile);
 
 	if (type == AUDIT_APPARMOR_AUTO) {
-		if (likely(!sa->aad->error)) {
+		if (likely(!ad->error)) {
 			if (AUDIT_MODE(profile) != AUDIT_ALL)
 				return 0;
 			type = AUDIT_APPARMOR_AUDIT;
@@ -199,23 +215,111 @@ int aa_audit(int type, struct aa_profile *profile, gfp_t gfp,
 	}
 	if (AUDIT_MODE(profile) == AUDIT_QUIET ||
 	    (type == AUDIT_APPARMOR_DENIED &&
-	     AUDIT_MODE(profile) == AUDIT_QUIET))
-		return sa->aad->error;
+	     AUDIT_MODE(profile) == AUDIT_QUIET_DENIED))
+		return ad->error;
 
 	if (KILL_MODE(profile) && type == AUDIT_APPARMOR_DENIED)
 		type = AUDIT_APPARMOR_KILL;
 
-	if (!unconfined(profile))
-		sa->aad->profile = profile;
+	ad->subj_label = &profile->label;
 
-	aa_audit_msg(type, sa, cb);
+	aa_audit_msg(type, ad, cb);
 
-	if (sa->aad->type == AUDIT_APPARMOR_KILL)
-		(void)send_sig_info(SIGKILL, NULL,
-				    sa->aad->tsk ?  sa->aad->tsk : current);
+	if (ad->type == AUDIT_APPARMOR_KILL)
+		send_sig_info(profile->signal, SEND_SIG_NOINFO,
+			ad->common.type == LSM_AUDIT_DATA_TASK &&
+			ad->common.u.tsk ? ad->common.u.tsk : current);
 
-	if (sa->aad->type == AUDIT_APPARMOR_ALLOWED)
-		return complain_error(sa->aad->error);
+	if (ad->type == AUDIT_APPARMOR_ALLOWED)
+		return complain_error(ad->error);
 
-	return sa->aad->error;
+	return ad->error;
+}
+
+struct aa_audit_rule {
+	struct aa_label *label;
+};
+
+void aa_audit_rule_free(void *vrule)
+{
+	struct aa_audit_rule *rule = vrule;
+
+	if (rule) {
+		if (!IS_ERR(rule->label))
+			aa_put_label(rule->label);
+		kfree(rule);
+	}
+}
+
+int aa_audit_rule_init(u32 field, u32 op, char *rulestr, void **vrule, gfp_t gfp)
+{
+	struct aa_audit_rule *rule;
+
+	switch (field) {
+	case AUDIT_SUBJ_ROLE:
+		if (op != Audit_equal && op != Audit_not_equal)
+			return -EINVAL;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	rule = kzalloc_obj(struct aa_audit_rule, gfp);
+
+	if (!rule)
+		return -ENOMEM;
+
+	/* Currently rules are treated as coming from the root ns */
+	rule->label = aa_label_parse(&root_ns->unconfined->label, rulestr,
+				     gfp, true, false);
+	if (IS_ERR(rule->label)) {
+		int err = PTR_ERR(rule->label);
+		aa_audit_rule_free(rule);
+		return err;
+	}
+
+	*vrule = rule;
+	return 0;
+}
+
+int aa_audit_rule_known(struct audit_krule *rule)
+{
+	int i;
+
+	for (i = 0; i < rule->field_count; i++) {
+		struct audit_field *f = &rule->fields[i];
+
+		switch (f->type) {
+		case AUDIT_SUBJ_ROLE:
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+int aa_audit_rule_match(struct lsm_prop *prop, u32 field, u32 op, void *vrule)
+{
+	struct aa_audit_rule *rule = vrule;
+	struct aa_label *label;
+	int found = 0;
+
+	label = prop->apparmor.label;
+
+	if (!label)
+		return -ENOENT;
+
+	if (aa_label_is_subset(label, rule->label))
+		found = 1;
+
+	switch (field) {
+	case AUDIT_SUBJ_ROLE:
+		switch (op) {
+		case Audit_equal:
+			return found;
+		case Audit_not_equal:
+			return !found;
+		}
+	}
+	return 0;
 }

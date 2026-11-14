@@ -8,6 +8,7 @@
  * Copyright (C) 1999-2001 Hewlett-Packard Company
  * Copyright (C) 1999-2001 Grant Grundler
  */
+#include <linux/align.h>
 #include <linux/eisa.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -34,25 +35,14 @@
 #define DBG_RES(x...)
 #endif
 
-/* To be used as: mdelay(pci_post_reset_delay);
- *
- * post_reset is the time the kernel should stall to prevent anyone from
- * accessing the PCI bus once #RESET is de-asserted. 
- * PCI spec somewhere says 1 second but with multi-PCI bus systems,
- * this makes the boot time much longer than necessary.
- * 20ms seems to work for all the HP PCI implementations to date.
- *
- * #define pci_post_reset_delay 50
- */
+struct pci_port_ops *pci_port __ro_after_init;
+struct pci_bios_ops *pci_bios __ro_after_init;
 
-struct pci_port_ops *pci_port __read_mostly;
-struct pci_bios_ops *pci_bios __read_mostly;
-
-static int pci_hba_count __read_mostly;
+static int pci_hba_count __ro_after_init;
 
 /* parisc_pci_hba used by pci_port->in/out() ops to lookup bus data.  */
 #define PCI_HBA_MAX 32
-static struct pci_hba_data *parisc_pci_hba[PCI_HBA_MAX] __read_mostly;
+static struct pci_hba_data *parisc_pci_hba[PCI_HBA_MAX] __ro_after_init;
 
 
 /********************************************************************
@@ -170,23 +160,31 @@ void pcibios_set_master(struct pci_dev *dev)
 			      (0x80 << 8) | pci_cache_line_size);
 }
 
-
-void __init pcibios_init_bus(struct pci_bus *bus)
+/*
+ * pcibios_init_bridge() initializes cache line and default latency
+ * for pci controllers and pci-pci bridges
+ */
+void __ref pcibios_init_bridge(struct pci_dev *dev)
 {
-	struct pci_dev *dev = bus->self;
-	unsigned short bridge_ctl;
+	unsigned short bridge_ctl, bridge_ctl_new;
 
 	/* We deal only with pci controllers and pci-pci bridges. */
 	if (!dev || (dev->class >> 8) != PCI_CLASS_BRIDGE_PCI)
 		return;
 
 	/* PCI-PCI bridge - set the cache line and default latency
-	   (32) for primary and secondary buses. */
+	 * (32) for primary and secondary buses.
+	 */
 	pci_write_config_byte(dev, PCI_SEC_LATENCY_TIMER, 32);
 
 	pci_read_config_word(dev, PCI_BRIDGE_CONTROL, &bridge_ctl);
-	bridge_ctl |= PCI_BRIDGE_CTL_PARITY | PCI_BRIDGE_CTL_SERR;
-	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, bridge_ctl);
+
+	bridge_ctl_new = bridge_ctl | PCI_BRIDGE_CTL_PARITY |
+		PCI_BRIDGE_CTL_SERR | PCI_BRIDGE_CTL_MASTER_ABORT;
+	dev_info(&dev->dev, "Changing bridge control from 0x%08x to 0x%08x\n",
+		bridge_ctl, bridge_ctl_new);
+
+	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, bridge_ctl_new);
 }
 
 /*
@@ -199,9 +197,12 @@ void __init pcibios_init_bus(struct pci_bus *bus)
  * than res->start.
  */
 resource_size_t pcibios_align_resource(void *data, const struct resource *res,
-				resource_size_t size, resource_size_t alignment)
+				       const struct resource *empty_res,
+				       resource_size_t size,
+				       resource_size_t alignment)
 {
-	resource_size_t mask, align, start = res->start;
+	struct pci_dev *dev = data;
+	resource_size_t align, start = res->start;
 
 	DBG_RES("pcibios_align_resource(%s, (%p) [%lx,%lx]/%x, 0x%lx, 0x%lx)\n",
 		pci_name(((struct pci_dev *) data)),
@@ -210,15 +211,13 @@ resource_size_t pcibios_align_resource(void *data, const struct resource *res,
 
 	/* If it's not IO, then it's gotta be MEM */
 	align = (res->flags & IORESOURCE_IO) ? PCIBIOS_MIN_IO : PCIBIOS_MIN_MEM;
-
-	/* Align to largest of MIN or input size */
-	mask = max(alignment, align) - 1;
-	start += mask;
-	start &= ~mask;
+	if (align > alignment)
+		start = ALIGN(start, align);
+	else
+		start = pci_align_resource(dev, res, empty_res, size, alignment);
 
 	return start;
 }
-
 
 /*
  * A driver is enabling the device.  We make sure that all the appropriate

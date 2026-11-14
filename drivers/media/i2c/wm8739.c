@@ -1,35 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * wm8739
  *
  * Copyright (C) 2005 T. Adachi <tadachi@tadachi-net.com>
  *
- * Copyright (C) 2005 Hans Verkuil <hverkuil@xs4all.nl>
+ * Copyright (C) 2005 Hans Verkuil <hverkuil@kernel.org>
  * - Cleanup
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/ioctl.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/i2c.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-device.h>
-#include <media/v4l2-chip-ident.h>
 #include <media/v4l2-ctrls.h>
 
 MODULE_DESCRIPTION("wm8739 driver");
@@ -160,13 +146,6 @@ static int wm8739_s_clock_freq(struct v4l2_subdev *sd, u32 audiofreq)
 	return 0;
 }
 
-static int wm8739_g_chip_ident(struct v4l2_subdev *sd, struct v4l2_dbg_chip_ident *chip)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	return v4l2_chip_ident_i2c_client(client, chip, V4L2_IDENT_WM8739, 0);
-}
-
 static int wm8739_log_status(struct v4l2_subdev *sd)
 {
 	struct wm8739_state *state = to_state(sd);
@@ -184,14 +163,6 @@ static const struct v4l2_ctrl_ops wm8739_ctrl_ops = {
 
 static const struct v4l2_subdev_core_ops wm8739_core_ops = {
 	.log_status = wm8739_log_status,
-	.g_chip_ident = wm8739_g_chip_ident,
-	.g_ext_ctrls = v4l2_subdev_g_ext_ctrls,
-	.try_ext_ctrls = v4l2_subdev_try_ext_ctrls,
-	.s_ext_ctrls = v4l2_subdev_s_ext_ctrls,
-	.g_ctrl = v4l2_subdev_g_ctrl,
-	.s_ctrl = v4l2_subdev_s_ctrl,
-	.queryctrl = v4l2_subdev_queryctrl,
-	.querymenu = v4l2_subdev_querymenu,
 };
 
 static const struct v4l2_subdev_audio_ops wm8739_audio_ops = {
@@ -207,8 +178,7 @@ static const struct v4l2_subdev_ops wm8739_ops = {
 
 /* i2c implementation */
 
-static int wm8739_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int wm8739_probe(struct i2c_client *client)
 {
 	struct wm8739_state *state;
 	struct v4l2_subdev *sd;
@@ -220,7 +190,7 @@ static int wm8739_probe(struct i2c_client *client,
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	state = kzalloc(sizeof(struct wm8739_state), GFP_KERNEL);
+	state = devm_kzalloc_obj(&client->dev, *state);
 	if (state == NULL)
 		return -ENOMEM;
 	sd = &state->sd;
@@ -237,7 +207,6 @@ static int wm8739_probe(struct i2c_client *client,
 		int err = state->hdl.error;
 
 		v4l2_ctrl_handler_free(&state->hdl);
-		kfree(state);
 		return err;
 	}
 	v4l2_ctrl_cluster(3, &state->volume);
@@ -248,7 +217,7 @@ static int wm8739_probe(struct i2c_client *client,
 
 	/* reset */
 	wm8739_write(sd, R15, 0x00);
-	/* filter setting, high path, offet clear */
+	/* filter setting, high path, offset clear */
 	wm8739_write(sd, R5, 0x000);
 	/* ADC, OSC, Power Off mode Disable */
 	wm8739_write(sd, R6, 0x000);
@@ -264,26 +233,23 @@ static int wm8739_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int wm8739_remove(struct i2c_client *client)
+static void wm8739_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct wm8739_state *state = to_state(sd);
 
 	v4l2_device_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(&state->hdl);
-	kfree(to_state(sd));
-	return 0;
 }
 
 static const struct i2c_device_id wm8739_id[] = {
-	{ "wm8739", 0 },
+	{ .name = "wm8739" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, wm8739_id);
 
 static struct i2c_driver wm8739_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "wm8739",
 	},
 	.probe		= wm8739_probe,

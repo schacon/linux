@@ -38,7 +38,7 @@
 /*
  *	MMU Operation register.
  */
-#define	MMUOR_UAA	0x00000001		/* Update allocatiom address */
+#define	MMUOR_UAA	0x00000001		/* Update allocation address */
 #define	MMUOR_ACC	0x00000002		/* TLB access */
 #define	MMUOR_RD	0x00000004		/* TLB access read */
 #define	MMUOR_WR	0x00000000		/* TLB access write */
@@ -88,7 +88,7 @@
 #define	MMUDR_PAN	10			/* Physical address */
 #define	MMUDR_PAMASK	0xfffffc00		/* PA mask */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /*
  *	Simple access functions for the MMU registers. Nothing fancy
@@ -105,6 +105,8 @@ static inline void mmu_write(u32 a, u32 v)
 	__asm__ __volatile__ ("nop");
 }
 
+void cf_bootmem_alloc(void);
+void cf_mmu_context_init(void);
 int cf_tlb_miss(struct pt_regs *regs, int write, int dtlb, int extension_word);
 
 #endif

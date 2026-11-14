@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  fs/ext4/mballoc.h
  *
@@ -23,32 +24,15 @@
 #include "ext4.h"
 
 /*
- * with AGGRESSIVE_CHECK allocator runs consistency checks over
- * structures. these checks slow things down a lot
- */
-#define AGGRESSIVE_CHECK__
-
-/*
- * with DOUBLE_CHECK defined mballoc creates persistent in-core
- * bitmaps, maintains and uses them to check for double allocations
- */
-#define DOUBLE_CHECK__
-
-/*
+ * mb_debug() dynamic printk msgs could be used to debug mballoc code.
  */
 #ifdef CONFIG_EXT4_DEBUG
-extern ushort ext4_mballoc_debug;
-
-#define mb_debug(n, fmt, a...)	                                        \
-	do {								\
-		if ((n) <= ext4_mballoc_debug) {		        \
-			printk(KERN_DEBUG "(%s, %d): %s: ",		\
-			       __FILE__, __LINE__, __func__);		\
-			printk(fmt, ## a);				\
-		}							\
-	} while (0)
+#define mb_debug(sb, fmt, ...)						\
+	pr_debug("[%s/%d] EXT4-fs (%s): (%s, %d): %s: " fmt,		\
+		current->comm, task_pid_nr(current), sb->s_id,		\
+	       __FILE__, __LINE__, __func__, ##__VA_ARGS__)
 #else
-#define mb_debug(n, fmt, a...)
+#define mb_debug(sb, fmt, ...)	no_printk(fmt, ##__VA_ARGS__)
 #endif
 
 #define EXT4_MB_HISTORY_ALLOC		1	/* allocation */
@@ -65,7 +49,7 @@ extern ushort ext4_mballoc_debug;
 #define MB_DEFAULT_MIN_TO_SCAN		10
 
 /*
- * with 'ext4_mb_stats' allocator will collect stats that will be
+ * with 's_mb_stats' allocator will collect stats that will be
  * shown at umount. The collecting costs though!
  */
 #define MB_DEFAULT_STATS		0
@@ -75,7 +59,7 @@ extern ushort ext4_mballoc_debug;
  * by the stream allocator, which purpose is to pack requests
  * as close each to other as possible to produce smooth I/O traffic
  * We use locality group prealloc space for stream request.
- * We can tune the same via /proc/fs/ext4/<parition>/stream_req
+ * We can tune the same via /proc/fs/ext4/<partition>/stream_req
  */
 #define MB_DEFAULT_STREAM_THRESHOLD	16	/* 64K */
 
@@ -89,12 +73,33 @@ extern ushort ext4_mballoc_debug;
  */
 #define MB_DEFAULT_GROUP_PREALLOC	512
 
+/*
+ * Number of groups to search linearly before performing group scanning
+ * optimization.
+ */
+#define MB_DEFAULT_LINEAR_LIMIT		4
+
+/*
+ * Minimum number of groups that should be present in the file system to perform
+ * group scanning optimizations.
+ */
+#define MB_DEFAULT_LINEAR_SCAN_THRESHOLD	16
+
+/*
+ * The maximum order upto which CR_BEST_AVAIL_LEN can trim a particular
+ * allocation request. Example, if we have an order 7 request and max trim order
+ * of 3, we can trim this request upto order 4.
+ */
+#define MB_DEFAULT_BEST_AVAIL_TRIM_ORDER	3
+
+/*
+ * Number of valid buddy orders
+ */
+#define MB_NUM_ORDERS(sb)		((sb)->s_blocksize_bits + 2)
 
 struct ext4_free_data {
-	/* MUST be the first member */
-	struct ext4_journal_cb_entry	efd_jce;
-
-	/* ext4_free_data private data starts from here */
+	/* this links the free block information from sb_info */
+	struct list_head		efd_list;
 
 	/* this links the free block information from group_info */
 	struct rb_node			efd_node;
@@ -111,7 +116,10 @@ struct ext4_free_data {
 };
 
 struct ext4_prealloc_space {
-	struct list_head	pa_inode_list;
+	union {
+		struct rb_node	inode_node;		/* for inode PA rbtree */
+		struct list_head	lg_list;	/* for lg PAs */
+	} pa_node;
 	struct list_head	pa_group_list;
 	union {
 		struct list_head pa_tmp_list;
@@ -125,8 +133,11 @@ struct ext4_prealloc_space {
 	ext4_grpblk_t		pa_len;		/* len of preallocated chunk */
 	ext4_grpblk_t		pa_free;	/* how many blocks are free */
 	unsigned short		pa_type;	/* pa type. inode or group */
-	spinlock_t		*pa_obj_lock;
-	struct inode		*pa_inode;	/* hack, for history only */
+	union {
+		rwlock_t		*inode_lock;	/* locks the rbtree holding this PA */
+		spinlock_t		*lg_lock;	/* locks the lg list holding this PA */
+	} pa_node_lock;
+	struct inode		*pa_inode;	/* used to get the inode during group discard */
 };
 
 enum {
@@ -175,20 +186,33 @@ struct ext4_allocation_context {
 	/* copy of the best found extent taken before preallocation efforts */
 	struct ext4_free_extent ac_f_ex;
 
-	/* number of iterations done. we have to track to limit searching */
-	unsigned long ac_ex_scanned;
+	/*
+	 * goal len can change in CR_BEST_AVAIL_LEN, so save the original len.
+	 * This is used while adjusting the PA window and for accounting.
+	 */
+	ext4_grpblk_t	ac_orig_goal_len;
+
+	ext4_group_t ac_prefetch_grp;
+	unsigned int ac_prefetch_ios;
+	unsigned int ac_prefetch_nr;
+
+	int ac_first_err;
+
+	__u32 ac_flags;		/* allocation hints */
 	__u16 ac_groups_scanned;
 	__u16 ac_found;
+	__u16 ac_cX_found[EXT4_MB_NUM_CRS];
 	__u16 ac_tail;
 	__u16 ac_buddy;
-	__u16 ac_flags;		/* allocation hints */
 	__u8 ac_status;
 	__u8 ac_criteria;
 	__u8 ac_2order;		/* if request is to allocate 2^N blocks and
 				 * N > 0, the field stores N, otherwise 0 */
 	__u8 ac_op;		/* operation, for history only */
-	struct page *ac_bitmap_page;
-	struct page *ac_buddy_page;
+
+	struct ext4_buddy *ac_e4b;
+	struct folio *ac_bitmap_folio;
+	struct folio *ac_buddy_folio;
 	struct ext4_prealloc_space *ac_pa;
 	struct ext4_locality_group *ac_lg;
 };
@@ -198,9 +222,9 @@ struct ext4_allocation_context {
 #define AC_STATUS_BREAK		3
 
 struct ext4_buddy {
-	struct page *bd_buddy_page;
+	struct folio *bd_buddy_folio;
 	void *bd_buddy;
-	struct page *bd_bitmap_page;
+	struct folio *bd_bitmap_folio;
 	void *bd_bitmap;
 	struct ext4_group_info *bd_info;
 	struct super_block *bd_sb;
@@ -214,4 +238,66 @@ static inline ext4_fsblk_t ext4_grp_offs_to_block(struct super_block *sb,
 	return ext4_group_first_block_no(sb, fex->fe_group) +
 		(fex->fe_start << EXT4_SB(sb)->s_cluster_bits);
 }
+
+static inline loff_t extent_logical_end(struct ext4_sb_info *sbi,
+					struct ext4_free_extent *fex)
+{
+	/* Use loff_t to avoid end exceeding ext4_lblk_t max. */
+	return (loff_t)fex->fe_logical + EXT4_C2B(sbi, fex->fe_len);
+}
+
+static inline loff_t pa_logical_end(struct ext4_sb_info *sbi,
+				    struct ext4_prealloc_space *pa)
+{
+	/* Use loff_t to avoid end exceeding ext4_lblk_t max. */
+	return (loff_t)pa->pa_lstart + EXT4_C2B(sbi, pa->pa_len);
+}
+
+typedef int (*ext4_mballoc_query_range_fn)(
+	struct super_block		*sb,
+	ext4_group_t			agno,
+	ext4_grpblk_t			start,
+	ext4_grpblk_t			len,
+	void				*priv);
+
+int
+ext4_mballoc_query_range(
+	struct super_block		*sb,
+	ext4_group_t			agno,
+	ext4_grpblk_t			start,
+	ext4_grpblk_t			end,
+	ext4_mballoc_query_range_fn	meta_formatter,
+	ext4_mballoc_query_range_fn	formatter,
+	void				*priv);
+
+extern int ext4_mb_mark_context(handle_t *handle,
+		struct super_block *sb, bool state,
+		ext4_group_t group, ext4_grpblk_t blkoff,
+		ext4_grpblk_t len, int flags,
+		ext4_grpblk_t *ret_changed);
+#if IS_ENABLED(CONFIG_EXT4_KUNIT_TESTS)
+extern void mb_clear_bits_test(void *bm, int cur, int len);
+extern ext4_fsblk_t
+ext4_mb_new_blocks_simple_test(struct ext4_allocation_request *ar,
+			       int *errp);
+extern int mb_find_next_zero_bit_test(void *addr, int max, int start);
+extern int mb_find_next_bit_test(void *addr, int max, int start);
+extern void mb_clear_bit_test(int bit, void *addr);
+extern int mb_test_bit_test(int bit, void *addr);
+extern int
+ext4_mb_mark_diskspace_used_test(struct ext4_allocation_context *ac,
+				 handle_t *handle);
+extern int mb_mark_used_test(struct ext4_buddy *e4b,
+			     struct ext4_free_extent *ex);
+extern void ext4_mb_generate_buddy_test(struct super_block *sb,
+		void *buddy, void *bitmap, ext4_group_t group,
+		struct ext4_group_info *grp);
+extern int ext4_mb_load_buddy_test(struct super_block *sb,
+		ext4_group_t group, struct ext4_buddy *e4b);
+extern void ext4_mb_unload_buddy_test(struct ext4_buddy *e4b);
+extern void mb_free_blocks_test(struct inode *inode,
+		struct ext4_buddy *e4b, int first, int count);
+extern void ext4_free_blocks_simple_test(struct inode *inode,
+		ext4_fsblk_t block, unsigned long count);
+#endif
 #endif

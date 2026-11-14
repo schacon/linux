@@ -1,15 +1,9 @@
-# Built-in dtb
-builtindtb-y		:= angel4
+# SPDX-License-Identifier: GPL-2.0
 
-ifneq ($(CONFIG_ARC_BUILTIN_DTB_NAME),"")
-	builtindtb-y	:= $(patsubst "%",%,$(CONFIG_ARC_BUILTIN_DTB_NAME))
-endif
+dtb-y	:= $(addsuffix .dtb, $(CONFIG_BUILTIN_DTB_NAME))
 
-obj-y   += $(builtindtb-y).dtb.o
-targets += $(builtindtb-y).dtb
+# for CONFIG_OF_ALL_DTBS test
+dtb-	:= $(patsubst $(src)/%.dts,%.dtb, $(wildcard $(src)/*.dts))
 
-.SECONDARY: $(obj)/$(builtindtb-y).dtb.S
-
-dtbs:  $(addprefix  $(obj)/, $(builtindtb-y).dtb)
-
-clean-files := *.dtb  *.dtb.S
+# board-specific dtc flags
+DTC_FLAGS_hsdk += --pad 20

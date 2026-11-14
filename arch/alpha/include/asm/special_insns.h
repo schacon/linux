@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ALPHA_SPECIAL_INSNS_H
 #define __ALPHA_SPECIAL_INSNS_H
 
@@ -14,10 +15,7 @@ enum implver_enum {
    (enum implver_enum) __implver; })
 #else
 /* Try to eliminate some dead code.  */
-#ifdef CONFIG_ALPHA_EV4
-#define implver() IMPLVER_EV4
-#endif
-#ifdef CONFIG_ALPHA_EV5
+#ifdef CONFIG_ALPHA_EV56
 #define implver() IMPLVER_EV5
 #endif
 #if defined(CONFIG_ALPHA_EV6)

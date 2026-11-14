@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Ethernet on Serial Communications Controller (SCC) driver for Motorola MPC8xx and MPC82xx.
  *
@@ -6,10 +7,6 @@
  *
  * 2005 (c) MontaVista Software, Inc.
  * Vitaly Bordug <vbordug@ru.mvista.com>
- *
- * This file is licensed under the terms of the GNU General Public License
- * version 2. This program is licensed "as is" without any warranty of any
- * kind, whether express or implied.
  */
 
 #include <linux/module.h>
@@ -20,28 +17,20 @@
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
-#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
-#include <linux/mii.h>
 #include <linux/ethtool.h>
 #include <linux/bitops.h>
 #include <linux/fs.h>
 #include <linux/platform_device.h>
-#include <linux/of_platform.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
 
 #include <asm/irq.h>
-#include <asm/uaccess.h>
-
-#ifdef CONFIG_8xx
-#include <asm/8xx_immap.h>
-#include <asm/pgtable.h>
-#include <asm/mpc8xx.h>
-#include <asm/cpm1.h>
-#endif
+#include <linux/uaccess.h>
 
 #include "fs_enet.h"
 
@@ -98,8 +87,8 @@ static int do_pd_setup(struct fs_enet_private *fep)
 {
 	struct platform_device *ofdev = to_platform_device(fep->dev);
 
-	fep->interrupt = of_irq_to_resource(ofdev->dev.of_node, 0, NULL);
-	if (fep->interrupt == NO_IRQ)
+	fep->interrupt = irq_of_parse_and_map(ofdev->dev.of_node, 0);
+	if (!fep->interrupt)
 		return -EINVAL;
 
 	fep->scc.sccp = of_iomap(ofdev->dev.of_node, 0);
@@ -115,9 +104,8 @@ static int do_pd_setup(struct fs_enet_private *fep)
 	return 0;
 }
 
-#define SCC_NAPI_RX_EVENT_MSK	(SCCE_ENET_RXF | SCCE_ENET_RXB)
-#define SCC_RX_EVENT		(SCCE_ENET_RXF)
-#define SCC_TX_EVENT		(SCCE_ENET_TXB)
+#define SCC_NAPI_EVENT_MSK	(SCCE_ENET_RXF | SCCE_ENET_RXB | SCCE_ENET_TXB)
+#define SCC_EVENT		(SCCE_ENET_RXF | SCCE_ENET_TXB)
 #define SCC_ERR_EVENT_MSK	(SCCE_ENET_TXE | SCCE_ENET_BSY)
 
 static int setup_data(struct net_device *dev)
@@ -129,9 +117,8 @@ static int setup_data(struct net_device *dev)
 	fep->scc.hthi = 0;
 	fep->scc.htlo = 0;
 
-	fep->ev_napi_rx = SCC_NAPI_RX_EVENT_MSK;
-	fep->ev_rx = SCC_RX_EVENT;
-	fep->ev_tx = SCC_TX_EVENT | SCCE_ENET_TXE;
+	fep->ev_napi = SCC_NAPI_EVENT_MSK;
+	fep->ev = SCC_EVENT | SCCE_ENET_TXE;
 	fep->ev_err = SCC_ERR_EVENT_MSK;
 
 	return 0;
@@ -140,15 +127,14 @@ static int setup_data(struct net_device *dev)
 static int allocate_bd(struct net_device *dev)
 {
 	struct fs_enet_private *fep = netdev_priv(dev);
-	const struct fs_platform_info *fpi = fep->fpi;
+	struct fs_platform_info *fpi = fep->fpi;
 
-	fep->ring_mem_addr = cpm_dpalloc((fpi->tx_ring + fpi->rx_ring) *
-					 sizeof(cbd_t), 8);
-	if (IS_ERR_VALUE(fep->ring_mem_addr))
+	fpi->dpram_offset = cpm_muram_alloc((fpi->tx_ring + fpi->rx_ring) *
+					    sizeof(cbd_t), 8);
+	if (IS_ERR_VALUE(fpi->dpram_offset))
 		return -ENOMEM;
 
-	fep->ring_base = (void __iomem __force*)
-		cpm_dpram_addr(fep->ring_mem_addr);
+	fep->ring_base = cpm_muram_addr(fpi->dpram_offset);
 
 	return 0;
 }
@@ -156,9 +142,10 @@ static int allocate_bd(struct net_device *dev)
 static void free_bd(struct net_device *dev)
 {
 	struct fs_enet_private *fep = netdev_priv(dev);
+	const struct fs_platform_info *fpi = fep->fpi;
 
 	if (fep->ring_base)
-		cpm_dpfree(fep->ring_mem_addr);
+		cpm_muram_free(fpi->dpram_offset);
 }
 
 static void cleanup_data(struct net_device *dev)
@@ -239,7 +226,8 @@ static void set_multicast_list(struct net_device *dev)
  * change.  This only happens when switching between half and full
  * duplex.
  */
-static void restart(struct net_device *dev)
+static void restart(struct net_device *dev, phy_interface_t interface,
+		    int speed, int duplex)
 {
 	struct fs_enet_private *fep = netdev_priv(dev);
 	scc_t __iomem *sccp = fep->scc.sccp;
@@ -256,9 +244,9 @@ static void restart(struct net_device *dev)
 		__fs_out8((u8 __iomem *)ep + i, 0);
 
 	/* point to bds */
-	W16(ep, sen_genscc.scc_rbase, fep->ring_mem_addr);
+	W16(ep, sen_genscc.scc_rbase, fpi->dpram_offset);
 	W16(ep, sen_genscc.scc_tbase,
-	    fep->ring_mem_addr + sizeof(cbd_t) * fpi->rx_ring);
+	    fpi->dpram_offset + sizeof(cbd_t) * fpi->rx_ring);
 
 	/* Initialize function code registers for big-endian.
 	 */
@@ -350,8 +338,11 @@ static void restart(struct net_device *dev)
 	W16(sccp, scc_psmr, SCC_PSMR_ENCRC | SCC_PSMR_NIB22);
 
 	/* Set full duplex mode if needed */
-	if (fep->phydev->duplex)
+	if (duplex == DUPLEX_FULL)
 		S16(sccp, scc_psmr, SCC_PSMR_LPB | SCC_PSMR_FDE);
+
+	/* Restore multicast and promiscuous settings */
+	set_multicast_list(dev);
 
 	S32(sccp, scc_gsmrl, SCC_GSMRL_ENR | SCC_GSMRL_ENT);
 }
@@ -374,28 +365,28 @@ static void stop(struct net_device *dev)
 	fs_cleanup_bds(dev);
 }
 
-static void napi_clear_rx_event(struct net_device *dev)
+static void napi_clear_event_fs(struct net_device *dev)
 {
 	struct fs_enet_private *fep = netdev_priv(dev);
 	scc_t __iomem *sccp = fep->scc.sccp;
 
-	W16(sccp, scc_scce, SCC_NAPI_RX_EVENT_MSK);
+	W16(sccp, scc_scce, SCC_NAPI_EVENT_MSK);
 }
 
-static void napi_enable_rx(struct net_device *dev)
+static void napi_enable_fs(struct net_device *dev)
 {
 	struct fs_enet_private *fep = netdev_priv(dev);
 	scc_t __iomem *sccp = fep->scc.sccp;
 
-	S16(sccp, scc_sccm, SCC_NAPI_RX_EVENT_MSK);
+	S16(sccp, scc_sccm, SCC_NAPI_EVENT_MSK);
 }
 
-static void napi_disable_rx(struct net_device *dev)
+static void napi_disable_fs(struct net_device *dev)
 {
 	struct fs_enet_private *fep = netdev_priv(dev);
 	scc_t __iomem *sccp = fep->scc.sccp;
 
-	C16(sccp, scc_sccm, SCC_NAPI_RX_EVENT_MSK);
+	C16(sccp, scc_sccm, SCC_NAPI_EVENT_MSK);
 }
 
 static void rx_bd_done(struct net_device *dev)
@@ -468,9 +459,9 @@ const struct fs_ops fs_scc_ops = {
 	.set_multicast_list	= set_multicast_list,
 	.restart		= restart,
 	.stop			= stop,
-	.napi_clear_rx_event	= napi_clear_rx_event,
-	.napi_enable_rx		= napi_enable_rx,
-	.napi_disable_rx	= napi_disable_rx,
+	.napi_clear_event	= napi_clear_event_fs,
+	.napi_enable		= napi_enable_fs,
+	.napi_disable		= napi_disable_fs,
 	.rx_bd_done		= rx_bd_done,
 	.tx_kickstart		= tx_kickstart,
 	.get_int_events		= get_int_events,

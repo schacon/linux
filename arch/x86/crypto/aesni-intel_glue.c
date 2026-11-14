@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Support for Intel AES-NI instructions. This file contains glue
- * code, the real AES implementation is in intel-aes_asm.S.
+ * Support for AES-NI and VAES instructions.  This file contains glue code.
+ * The real AES implementations are in .S files.
  *
  * Copyright (C) 2008, Intel Corp.
  *    Author: Huang Ying <ying.huang@intel.com>
@@ -13,800 +14,373 @@
  *             Aidan O'Mahony (aidan.o.mahony@intel.com)
  *    Copyright (c) 2010, Intel Corporation.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * Copyright 2024 Google LLC
  */
 
 #include <linux/hardirq.h>
 #include <linux/types.h>
-#include <linux/crypto.h>
 #include <linux/module.h>
 #include <linux/err.h>
 #include <crypto/algapi.h>
 #include <crypto/aes.h>
-#include <crypto/cryptd.h>
-#include <crypto/ctr.h>
 #include <crypto/b128ops.h>
-#include <crypto/lrw.h>
-#include <crypto/xts.h>
+#include <crypto/gcm.h>
+#include <crypto/gf128mul.h>
 #include <asm/cpu_device_id.h>
-#include <asm/i387.h>
-#include <asm/crypto/aes.h>
-#include <asm/crypto/ablk_helper.h>
+#include <asm/simd.h>
 #include <crypto/scatterwalk.h>
 #include <crypto/internal/aead.h>
+#include <crypto/internal/simd.h>
+#include <crypto/internal/skcipher.h>
+#include <linux/jump_label.h>
 #include <linux/workqueue.h>
 #include <linux/spinlock.h>
-#ifdef CONFIG_X86_64
-#include <asm/crypto/glue_helper.h>
-#endif
+#include <linux/static_call.h>
 
-#if defined(CONFIG_CRYPTO_PCBC) || defined(CONFIG_CRYPTO_PCBC_MODULE)
-#define HAS_PCBC
-#endif
+/* The common part of the x86_64 AES-GCM key struct */
+struct aes_gcm_key {
+	/* Expanded AES key and the AES key length in bytes */
+	struct aes_enckey aes_key;
 
-/* This data is stored at the end of the crypto_tfm struct.
- * It's a type of per "session" data storage location.
- * This needs to be 16 byte aligned.
- */
-struct aesni_rfc4106_gcm_ctx {
-	u8 hash_subkey[16];
-	struct crypto_aes_ctx aes_key_expanded;
-	u8 nonce[4];
-	struct cryptd_aead *cryptd_tfm;
+	/* RFC4106 nonce (used only by the rfc4106 algorithms) */
+	u32 rfc4106_nonce;
 };
 
-struct aesni_gcm_set_hash_subkey_result {
-	int err;
-	struct completion completion;
-};
-
-struct aesni_hash_subkey_req_data {
-	u8 iv[16];
-	struct aesni_gcm_set_hash_subkey_result result;
-	struct scatterlist sg;
-};
-
-#define AESNI_ALIGN	(16)
-#define AES_BLOCK_MASK	(~(AES_BLOCK_SIZE-1))
-#define RFC4106_HASH_SUBKEY_SIZE 16
-
-struct aesni_lrw_ctx {
-	struct lrw_table_ctx lrw_table;
-	u8 raw_aes_ctx[sizeof(struct crypto_aes_ctx) + AESNI_ALIGN - 1];
-};
-
-struct aesni_xts_ctx {
-	u8 raw_tweak_ctx[sizeof(struct crypto_aes_ctx) + AESNI_ALIGN - 1];
-	u8 raw_crypt_ctx[sizeof(struct crypto_aes_ctx) + AESNI_ALIGN - 1];
-};
-
-asmlinkage int aesni_set_key(struct crypto_aes_ctx *ctx, const u8 *in_key,
-			     unsigned int key_len);
-asmlinkage void aesni_enc(struct crypto_aes_ctx *ctx, u8 *out,
-			  const u8 *in);
-asmlinkage void aesni_dec(struct crypto_aes_ctx *ctx, u8 *out,
-			  const u8 *in);
-asmlinkage void aesni_ecb_enc(struct crypto_aes_ctx *ctx, u8 *out,
-			      const u8 *in, unsigned int len);
-asmlinkage void aesni_ecb_dec(struct crypto_aes_ctx *ctx, u8 *out,
-			      const u8 *in, unsigned int len);
-asmlinkage void aesni_cbc_enc(struct crypto_aes_ctx *ctx, u8 *out,
-			      const u8 *in, unsigned int len, u8 *iv);
-asmlinkage void aesni_cbc_dec(struct crypto_aes_ctx *ctx, u8 *out,
-			      const u8 *in, unsigned int len, u8 *iv);
-
-int crypto_fpu_init(void);
-void crypto_fpu_exit(void);
-
-#ifdef CONFIG_X86_64
-asmlinkage void aesni_ctr_enc(struct crypto_aes_ctx *ctx, u8 *out,
-			      const u8 *in, unsigned int len, u8 *iv);
-
-asmlinkage void aesni_xts_crypt8(struct crypto_aes_ctx *ctx, u8 *out,
-				 const u8 *in, bool enc, u8 *iv);
-
-/* asmlinkage void aesni_gcm_enc()
- * void *ctx,  AES Key schedule. Starts on a 16 byte boundary.
- * u8 *out, Ciphertext output. Encrypt in-place is allowed.
- * const u8 *in, Plaintext input
- * unsigned long plaintext_len, Length of data in bytes for encryption.
- * u8 *iv, Pre-counter block j0: 4 byte salt (from Security Association)
- *         concatenated with 8 byte Initialisation Vector (from IPSec ESP
- *         Payload) concatenated with 0x00000001. 16-byte aligned pointer.
- * u8 *hash_subkey, the Hash sub key input. Data starts on a 16-byte boundary.
- * const u8 *aad, Additional Authentication Data (AAD)
- * unsigned long aad_len, Length of AAD in bytes. With RFC4106 this
- *          is going to be 8 or 12 bytes
- * u8 *auth_tag, Authenticated Tag output.
- * unsigned long auth_tag_len), Authenticated Tag Length in bytes.
- *          Valid values are 16 (most likely), 12 or 8.
- */
-asmlinkage void aesni_gcm_enc(void *ctx, u8 *out,
-			const u8 *in, unsigned long plaintext_len, u8 *iv,
-			u8 *hash_subkey, const u8 *aad, unsigned long aad_len,
-			u8 *auth_tag, unsigned long auth_tag_len);
-
-/* asmlinkage void aesni_gcm_dec()
- * void *ctx, AES Key schedule. Starts on a 16 byte boundary.
- * u8 *out, Plaintext output. Decrypt in-place is allowed.
- * const u8 *in, Ciphertext input
- * unsigned long ciphertext_len, Length of data in bytes for decryption.
- * u8 *iv, Pre-counter block j0: 4 byte salt (from Security Association)
- *         concatenated with 8 byte Initialisation Vector (from IPSec ESP
- *         Payload) concatenated with 0x00000001. 16-byte aligned pointer.
- * u8 *hash_subkey, the Hash sub key input. Data starts on a 16-byte boundary.
- * const u8 *aad, Additional Authentication Data (AAD)
- * unsigned long aad_len, Length of AAD in bytes. With RFC4106 this is going
- * to be 8 or 12 bytes
- * u8 *auth_tag, Authenticated Tag output.
- * unsigned long auth_tag_len) Authenticated Tag Length in bytes.
- * Valid values are 16 (most likely), 12 or 8.
- */
-asmlinkage void aesni_gcm_dec(void *ctx, u8 *out,
-			const u8 *in, unsigned long ciphertext_len, u8 *iv,
-			u8 *hash_subkey, const u8 *aad, unsigned long aad_len,
-			u8 *auth_tag, unsigned long auth_tag_len);
-
-static inline struct
-aesni_rfc4106_gcm_ctx *aesni_rfc4106_gcm_ctx_get(struct crypto_aead *tfm)
-{
-	return
-		(struct aesni_rfc4106_gcm_ctx *)
-		PTR_ALIGN((u8 *)
-		crypto_tfm_ctx(crypto_aead_tfm(tfm)), AESNI_ALIGN);
-}
-#endif
-
-static inline struct crypto_aes_ctx *aes_ctx(void *raw_ctx)
-{
-	unsigned long addr = (unsigned long)raw_ctx;
-	unsigned long align = AESNI_ALIGN;
-
-	if (align <= crypto_tfm_ctx_alignment())
-		align = 1;
-	return (struct crypto_aes_ctx *)ALIGN(addr, align);
-}
-
-static int aes_set_key_common(struct crypto_tfm *tfm, void *raw_ctx,
-			      const u8 *in_key, unsigned int key_len)
-{
-	struct crypto_aes_ctx *ctx = aes_ctx(raw_ctx);
-	u32 *flags = &tfm->crt_flags;
-	int err;
-
-	if (key_len != AES_KEYSIZE_128 && key_len != AES_KEYSIZE_192 &&
-	    key_len != AES_KEYSIZE_256) {
-		*flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
-		return -EINVAL;
-	}
-
-	if (!irq_fpu_usable())
-		err = crypto_aes_expand_key(ctx, in_key, key_len);
-	else {
-		kernel_fpu_begin();
-		err = aesni_set_key(ctx, in_key, key_len);
-		kernel_fpu_end();
-	}
-
-	return err;
-}
-
-static int aes_set_key(struct crypto_tfm *tfm, const u8 *in_key,
-		       unsigned int key_len)
-{
-	return aes_set_key_common(tfm, crypto_tfm_ctx(tfm), in_key, key_len);
-}
-
-static void aes_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
-{
-	struct crypto_aes_ctx *ctx = aes_ctx(crypto_tfm_ctx(tfm));
-
-	if (!irq_fpu_usable())
-		crypto_aes_encrypt_x86(ctx, dst, src);
-	else {
-		kernel_fpu_begin();
-		aesni_enc(ctx, dst, src);
-		kernel_fpu_end();
-	}
-}
-
-static void aes_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
-{
-	struct crypto_aes_ctx *ctx = aes_ctx(crypto_tfm_ctx(tfm));
-
-	if (!irq_fpu_usable())
-		crypto_aes_decrypt_x86(ctx, dst, src);
-	else {
-		kernel_fpu_begin();
-		aesni_dec(ctx, dst, src);
-		kernel_fpu_end();
-	}
-}
-
-static void __aes_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
-{
-	struct crypto_aes_ctx *ctx = aes_ctx(crypto_tfm_ctx(tfm));
-
-	aesni_enc(ctx, dst, src);
-}
-
-static void __aes_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
-{
-	struct crypto_aes_ctx *ctx = aes_ctx(crypto_tfm_ctx(tfm));
-
-	aesni_dec(ctx, dst, src);
-}
-
-static int ecb_encrypt(struct blkcipher_desc *desc,
-		       struct scatterlist *dst, struct scatterlist *src,
-		       unsigned int nbytes)
-{
-	struct crypto_aes_ctx *ctx = aes_ctx(crypto_blkcipher_ctx(desc->tfm));
-	struct blkcipher_walk walk;
-	int err;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	err = blkcipher_walk_virt(desc, &walk);
-	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
-
-	kernel_fpu_begin();
-	while ((nbytes = walk.nbytes)) {
-		aesni_ecb_enc(ctx, walk.dst.virt.addr, walk.src.virt.addr,
-			      nbytes & AES_BLOCK_MASK);
-		nbytes &= AES_BLOCK_SIZE - 1;
-		err = blkcipher_walk_done(desc, &walk, nbytes);
-	}
-	kernel_fpu_end();
-
-	return err;
-}
-
-static int ecb_decrypt(struct blkcipher_desc *desc,
-		       struct scatterlist *dst, struct scatterlist *src,
-		       unsigned int nbytes)
-{
-	struct crypto_aes_ctx *ctx = aes_ctx(crypto_blkcipher_ctx(desc->tfm));
-	struct blkcipher_walk walk;
-	int err;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	err = blkcipher_walk_virt(desc, &walk);
-	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
-
-	kernel_fpu_begin();
-	while ((nbytes = walk.nbytes)) {
-		aesni_ecb_dec(ctx, walk.dst.virt.addr, walk.src.virt.addr,
-			      nbytes & AES_BLOCK_MASK);
-		nbytes &= AES_BLOCK_SIZE - 1;
-		err = blkcipher_walk_done(desc, &walk, nbytes);
-	}
-	kernel_fpu_end();
-
-	return err;
-}
-
-static int cbc_encrypt(struct blkcipher_desc *desc,
-		       struct scatterlist *dst, struct scatterlist *src,
-		       unsigned int nbytes)
-{
-	struct crypto_aes_ctx *ctx = aes_ctx(crypto_blkcipher_ctx(desc->tfm));
-	struct blkcipher_walk walk;
-	int err;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	err = blkcipher_walk_virt(desc, &walk);
-	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
-
-	kernel_fpu_begin();
-	while ((nbytes = walk.nbytes)) {
-		aesni_cbc_enc(ctx, walk.dst.virt.addr, walk.src.virt.addr,
-			      nbytes & AES_BLOCK_MASK, walk.iv);
-		nbytes &= AES_BLOCK_SIZE - 1;
-		err = blkcipher_walk_done(desc, &walk, nbytes);
-	}
-	kernel_fpu_end();
-
-	return err;
-}
-
-static int cbc_decrypt(struct blkcipher_desc *desc,
-		       struct scatterlist *dst, struct scatterlist *src,
-		       unsigned int nbytes)
-{
-	struct crypto_aes_ctx *ctx = aes_ctx(crypto_blkcipher_ctx(desc->tfm));
-	struct blkcipher_walk walk;
-	int err;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	err = blkcipher_walk_virt(desc, &walk);
-	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
-
-	kernel_fpu_begin();
-	while ((nbytes = walk.nbytes)) {
-		aesni_cbc_dec(ctx, walk.dst.virt.addr, walk.src.virt.addr,
-			      nbytes & AES_BLOCK_MASK, walk.iv);
-		nbytes &= AES_BLOCK_SIZE - 1;
-		err = blkcipher_walk_done(desc, &walk, nbytes);
-	}
-	kernel_fpu_end();
-
-	return err;
-}
-
-#ifdef CONFIG_X86_64
-static void ctr_crypt_final(struct crypto_aes_ctx *ctx,
-			    struct blkcipher_walk *walk)
-{
-	u8 *ctrblk = walk->iv;
-	u8 keystream[AES_BLOCK_SIZE];
-	u8 *src = walk->src.virt.addr;
-	u8 *dst = walk->dst.virt.addr;
-	unsigned int nbytes = walk->nbytes;
-
-	aesni_enc(ctx, keystream, ctrblk);
-	crypto_xor(keystream, src, nbytes);
-	memcpy(dst, keystream, nbytes);
-	crypto_inc(ctrblk, AES_BLOCK_SIZE);
-}
-
-static int ctr_crypt(struct blkcipher_desc *desc,
-		     struct scatterlist *dst, struct scatterlist *src,
-		     unsigned int nbytes)
-{
-	struct crypto_aes_ctx *ctx = aes_ctx(crypto_blkcipher_ctx(desc->tfm));
-	struct blkcipher_walk walk;
-	int err;
-
-	blkcipher_walk_init(&walk, dst, src, nbytes);
-	err = blkcipher_walk_virt_block(desc, &walk, AES_BLOCK_SIZE);
-	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
-
-	kernel_fpu_begin();
-	while ((nbytes = walk.nbytes) >= AES_BLOCK_SIZE) {
-		aesni_ctr_enc(ctx, walk.dst.virt.addr, walk.src.virt.addr,
-			      nbytes & AES_BLOCK_MASK, walk.iv);
-		nbytes &= AES_BLOCK_SIZE - 1;
-		err = blkcipher_walk_done(desc, &walk, nbytes);
-	}
-	if (walk.nbytes) {
-		ctr_crypt_final(ctx, &walk);
-		err = blkcipher_walk_done(desc, &walk, 0);
-	}
-	kernel_fpu_end();
-
-	return err;
-}
-#endif
-
-static int ablk_ecb_init(struct crypto_tfm *tfm)
-{
-	return ablk_init_common(tfm, "__driver-ecb-aes-aesni");
-}
-
-static int ablk_cbc_init(struct crypto_tfm *tfm)
-{
-	return ablk_init_common(tfm, "__driver-cbc-aes-aesni");
-}
-
-#ifdef CONFIG_X86_64
-static int ablk_ctr_init(struct crypto_tfm *tfm)
-{
-	return ablk_init_common(tfm, "__driver-ctr-aes-aesni");
-}
-
-#endif
-
-#ifdef HAS_PCBC
-static int ablk_pcbc_init(struct crypto_tfm *tfm)
-{
-	return ablk_init_common(tfm, "fpu(pcbc(__driver-aes-aesni))");
-}
-#endif
-
-static void lrw_xts_encrypt_callback(void *ctx, u8 *blks, unsigned int nbytes)
-{
-	aesni_ecb_enc(ctx, blks, blks, nbytes);
-}
-
-static void lrw_xts_decrypt_callback(void *ctx, u8 *blks, unsigned int nbytes)
-{
-	aesni_ecb_dec(ctx, blks, blks, nbytes);
-}
-
-static int lrw_aesni_setkey(struct crypto_tfm *tfm, const u8 *key,
-			    unsigned int keylen)
-{
-	struct aesni_lrw_ctx *ctx = crypto_tfm_ctx(tfm);
-	int err;
-
-	err = aes_set_key_common(tfm, ctx->raw_aes_ctx, key,
-				 keylen - AES_BLOCK_SIZE);
-	if (err)
-		return err;
-
-	return lrw_init_table(&ctx->lrw_table, key + keylen - AES_BLOCK_SIZE);
-}
-
-static void lrw_aesni_exit_tfm(struct crypto_tfm *tfm)
-{
-	struct aesni_lrw_ctx *ctx = crypto_tfm_ctx(tfm);
-
-	lrw_free_table(&ctx->lrw_table);
-}
-
-static int lrw_encrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
-		       struct scatterlist *src, unsigned int nbytes)
-{
-	struct aesni_lrw_ctx *ctx = crypto_blkcipher_ctx(desc->tfm);
-	be128 buf[8];
-	struct lrw_crypt_req req = {
-		.tbuf = buf,
-		.tbuflen = sizeof(buf),
-
-		.table_ctx = &ctx->lrw_table,
-		.crypt_ctx = aes_ctx(ctx->raw_aes_ctx),
-		.crypt_fn = lrw_xts_encrypt_callback,
-	};
-	int ret;
-
-	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
-
-	kernel_fpu_begin();
-	ret = lrw_crypt(desc, dst, src, nbytes, &req);
-	kernel_fpu_end();
-
-	return ret;
-}
-
-static int lrw_decrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
-		       struct scatterlist *src, unsigned int nbytes)
-{
-	struct aesni_lrw_ctx *ctx = crypto_blkcipher_ctx(desc->tfm);
-	be128 buf[8];
-	struct lrw_crypt_req req = {
-		.tbuf = buf,
-		.tbuflen = sizeof(buf),
-
-		.table_ctx = &ctx->lrw_table,
-		.crypt_ctx = aes_ctx(ctx->raw_aes_ctx),
-		.crypt_fn = lrw_xts_decrypt_callback,
-	};
-	int ret;
-
-	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
-
-	kernel_fpu_begin();
-	ret = lrw_crypt(desc, dst, src, nbytes, &req);
-	kernel_fpu_end();
-
-	return ret;
-}
-
-static int xts_aesni_setkey(struct crypto_tfm *tfm, const u8 *key,
-			    unsigned int keylen)
-{
-	struct aesni_xts_ctx *ctx = crypto_tfm_ctx(tfm);
-	u32 *flags = &tfm->crt_flags;
-	int err;
-
-	/* key consists of keys of equal size concatenated, therefore
-	 * the length must be even
+/* Key struct used by the AES-NI implementations of AES-GCM */
+struct aes_gcm_key_aesni {
+	/*
+	 * Common part of the key.  16-byte alignment is required by the
+	 * assembly code.
 	 */
-	if (keylen % 2) {
-		*flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
-		return -EINVAL;
-	}
+	struct aes_gcm_key base __aligned(16);
 
-	/* first half of xts-key is for crypt */
-	err = aes_set_key_common(tfm, ctx->raw_crypt_ctx, key, keylen / 2);
-	if (err)
-		return err;
+	/*
+	 * Powers of the hash key H^8 through H^1.  These are 128-bit values.
+	 * They all have an extra factor of x^-1 and are byte-reversed.  16-byte
+	 * alignment is required by the assembly code.
+	 */
+	u64 h_powers[8][2] __aligned(16);
 
-	/* second half of xts-key is for tweak */
-	return aes_set_key_common(tfm, ctx->raw_tweak_ctx, key + keylen / 2,
-				  keylen / 2);
-}
+	/*
+	 * h_powers_xored[i] contains the two 64-bit halves of h_powers[i] XOR'd
+	 * together.  It's used for Karatsuba multiplication.  16-byte alignment
+	 * is required by the assembly code.
+	 */
+	u64 h_powers_xored[8] __aligned(16);
 
+	/*
+	 * H^1 times x^64 (and also the usual extra factor of x^-1).  16-byte
+	 * alignment is required by the assembly code.
+	 */
+	u64 h_times_x64[2] __aligned(16);
+};
+#define AES_GCM_KEY_AESNI(key)	\
+	container_of((key), struct aes_gcm_key_aesni, base)
+#define AES_GCM_KEY_AESNI_SIZE	\
+	(sizeof(struct aes_gcm_key_aesni) + (15 & ~(CRYPTO_MINALIGN - 1)))
 
-static void aesni_xts_tweak(void *ctx, u8 *out, const u8 *in)
-{
-	aesni_enc(ctx, out, in);
-}
+/* Key struct used by the VAES + AVX2 implementation of AES-GCM */
+struct aes_gcm_key_vaes_avx2 {
+	/*
+	 * Common part of the key.  The assembly code prefers 16-byte alignment
+	 * for this.
+	 */
+	struct aes_gcm_key base __aligned(16);
 
-#ifdef CONFIG_X86_64
+	/*
+	 * Powers of the hash key H^8 through H^1.  These are 128-bit values.
+	 * They all have an extra factor of x^-1 and are byte-reversed.
+	 * The assembly code prefers 32-byte alignment for this.
+	 */
+	u64 h_powers[8][2] __aligned(32);
 
-static void aesni_xts_enc(void *ctx, u128 *dst, const u128 *src, le128 *iv)
-{
-	glue_xts_crypt_128bit_one(ctx, dst, src, iv, GLUE_FUNC_CAST(aesni_enc));
-}
-
-static void aesni_xts_dec(void *ctx, u128 *dst, const u128 *src, le128 *iv)
-{
-	glue_xts_crypt_128bit_one(ctx, dst, src, iv, GLUE_FUNC_CAST(aesni_dec));
-}
-
-static void aesni_xts_enc8(void *ctx, u128 *dst, const u128 *src, le128 *iv)
-{
-	aesni_xts_crypt8(ctx, (u8 *)dst, (const u8 *)src, true, (u8 *)iv);
-}
-
-static void aesni_xts_dec8(void *ctx, u128 *dst, const u128 *src, le128 *iv)
-{
-	aesni_xts_crypt8(ctx, (u8 *)dst, (const u8 *)src, false, (u8 *)iv);
-}
-
-static const struct common_glue_ctx aesni_enc_xts = {
-	.num_funcs = 2,
-	.fpu_blocks_limit = 1,
-
-	.funcs = { {
-		.num_blocks = 8,
-		.fn_u = { .xts = GLUE_XTS_FUNC_CAST(aesni_xts_enc8) }
-	}, {
-		.num_blocks = 1,
-		.fn_u = { .xts = GLUE_XTS_FUNC_CAST(aesni_xts_enc) }
-	} }
+	/*
+	 * Each entry in this array contains the two halves of an entry of
+	 * h_powers XOR'd together, in the following order:
+	 * H^8,H^6,H^7,H^5,H^4,H^2,H^3,H^1 i.e. indices 0,2,1,3,4,6,5,7.
+	 * This is used for Karatsuba multiplication.
+	 */
+	u64 h_powers_xored[8];
 };
 
-static const struct common_glue_ctx aesni_dec_xts = {
-	.num_funcs = 2,
-	.fpu_blocks_limit = 1,
+#define AES_GCM_KEY_VAES_AVX2(key) \
+	container_of((key), struct aes_gcm_key_vaes_avx2, base)
+#define AES_GCM_KEY_VAES_AVX2_SIZE \
+	(sizeof(struct aes_gcm_key_vaes_avx2) + (31 & ~(CRYPTO_MINALIGN - 1)))
 
-	.funcs = { {
-		.num_blocks = 8,
-		.fn_u = { .xts = GLUE_XTS_FUNC_CAST(aesni_xts_dec8) }
-	}, {
-		.num_blocks = 1,
-		.fn_u = { .xts = GLUE_XTS_FUNC_CAST(aesni_xts_dec) }
-	} }
+/* Key struct used by the VAES + AVX512 implementation of AES-GCM */
+struct aes_gcm_key_vaes_avx512 {
+	/*
+	 * Common part of the key.  The assembly code prefers 16-byte alignment
+	 * for this.
+	 */
+	struct aes_gcm_key base __aligned(16);
+
+	/*
+	 * Powers of the hash key H^16 through H^1.  These are 128-bit values.
+	 * They all have an extra factor of x^-1 and are byte-reversed.  This
+	 * array is aligned to a 64-byte boundary to make it naturally aligned
+	 * for 512-bit loads, which can improve performance.  (The assembly code
+	 * doesn't *need* the alignment; this is just an optimization.)
+	 */
+	u64 h_powers[16][2] __aligned(64);
+
+	/* Three padding blocks required by the assembly code */
+	u64 padding[3][2];
 };
+#define AES_GCM_KEY_VAES_AVX512(key) \
+	container_of((key), struct aes_gcm_key_vaes_avx512, base)
+#define AES_GCM_KEY_VAES_AVX512_SIZE \
+	(sizeof(struct aes_gcm_key_vaes_avx512) + (63 & ~(CRYPTO_MINALIGN - 1)))
 
-static int xts_encrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
-		       struct scatterlist *src, unsigned int nbytes)
+/*
+ * These flags are passed to the AES-GCM helper functions to specify the
+ * specific version of AES-GCM (RFC4106 or not), whether it's encryption or
+ * decryption, and which assembly functions should be called.  Assembly
+ * functions are selected using flags instead of function pointers to avoid
+ * indirect calls (which are very expensive on x86) regardless of inlining.
+ */
+#define FLAG_RFC4106	BIT(0)
+#define FLAG_ENC	BIT(1)
+#define FLAG_AVX	BIT(2)
+#define FLAG_VAES_AVX2	BIT(3)
+#define FLAG_VAES_AVX512 BIT(4)
+
+static inline struct aes_gcm_key *
+aes_gcm_key_get(struct crypto_aead *tfm, int flags)
 {
-	struct aesni_xts_ctx *ctx = crypto_blkcipher_ctx(desc->tfm);
-
-	return glue_xts_crypt_128bit(&aesni_enc_xts, desc, dst, src, nbytes,
-				     XTS_TWEAK_CAST(aesni_xts_tweak),
-				     aes_ctx(ctx->raw_tweak_ctx),
-				     aes_ctx(ctx->raw_crypt_ctx));
+	if (flags & FLAG_VAES_AVX512)
+		return PTR_ALIGN(crypto_aead_ctx(tfm), 64);
+	else if (flags & FLAG_VAES_AVX2)
+		return PTR_ALIGN(crypto_aead_ctx(tfm), 32);
+	else
+		return PTR_ALIGN(crypto_aead_ctx(tfm), 16);
 }
 
-static int xts_decrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
-		       struct scatterlist *src, unsigned int nbytes)
-{
-	struct aesni_xts_ctx *ctx = crypto_blkcipher_ctx(desc->tfm);
+asmlinkage void
+aes_gcm_precompute_aesni(struct aes_gcm_key_aesni *key);
+asmlinkage void
+aes_gcm_precompute_aesni_avx(struct aes_gcm_key_aesni *key);
+asmlinkage void
+aes_gcm_precompute_vaes_avx2(struct aes_gcm_key_vaes_avx2 *key);
+asmlinkage void
+aes_gcm_precompute_vaes_avx512(struct aes_gcm_key_vaes_avx512 *key);
 
-	return glue_xts_crypt_128bit(&aesni_dec_xts, desc, dst, src, nbytes,
-				     XTS_TWEAK_CAST(aesni_xts_tweak),
-				     aes_ctx(ctx->raw_tweak_ctx),
-				     aes_ctx(ctx->raw_crypt_ctx));
+static void aes_gcm_precompute(struct aes_gcm_key *key, int flags)
+{
+	if (flags & FLAG_VAES_AVX512)
+		aes_gcm_precompute_vaes_avx512(AES_GCM_KEY_VAES_AVX512(key));
+	else if (flags & FLAG_VAES_AVX2)
+		aes_gcm_precompute_vaes_avx2(AES_GCM_KEY_VAES_AVX2(key));
+	else if (flags & FLAG_AVX)
+		aes_gcm_precompute_aesni_avx(AES_GCM_KEY_AESNI(key));
+	else
+		aes_gcm_precompute_aesni(AES_GCM_KEY_AESNI(key));
 }
 
-#else
+asmlinkage void
+aes_gcm_aad_update_aesni(const struct aes_gcm_key_aesni *key,
+			 u8 ghash_acc[16], const u8 *aad, int aadlen);
+asmlinkage void
+aes_gcm_aad_update_aesni_avx(const struct aes_gcm_key_aesni *key,
+			     u8 ghash_acc[16], const u8 *aad, int aadlen);
+asmlinkage void
+aes_gcm_aad_update_vaes_avx2(const struct aes_gcm_key_vaes_avx2 *key,
+			     u8 ghash_acc[16], const u8 *aad, int aadlen);
+asmlinkage void
+aes_gcm_aad_update_vaes_avx512(const struct aes_gcm_key_vaes_avx512 *key,
+			       u8 ghash_acc[16], const u8 *aad, int aadlen);
 
-static int xts_encrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
-		       struct scatterlist *src, unsigned int nbytes)
+static void aes_gcm_aad_update(const struct aes_gcm_key *key, u8 ghash_acc[16],
+			       const u8 *aad, int aadlen, int flags)
 {
-	struct aesni_xts_ctx *ctx = crypto_blkcipher_ctx(desc->tfm);
-	be128 buf[8];
-	struct xts_crypt_req req = {
-		.tbuf = buf,
-		.tbuflen = sizeof(buf),
-
-		.tweak_ctx = aes_ctx(ctx->raw_tweak_ctx),
-		.tweak_fn = aesni_xts_tweak,
-		.crypt_ctx = aes_ctx(ctx->raw_crypt_ctx),
-		.crypt_fn = lrw_xts_encrypt_callback,
-	};
-	int ret;
-
-	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
-
-	kernel_fpu_begin();
-	ret = xts_crypt(desc, dst, src, nbytes, &req);
-	kernel_fpu_end();
-
-	return ret;
+	if (flags & FLAG_VAES_AVX512)
+		aes_gcm_aad_update_vaes_avx512(AES_GCM_KEY_VAES_AVX512(key),
+					       ghash_acc, aad, aadlen);
+	else if (flags & FLAG_VAES_AVX2)
+		aes_gcm_aad_update_vaes_avx2(AES_GCM_KEY_VAES_AVX2(key),
+					     ghash_acc, aad, aadlen);
+	else if (flags & FLAG_AVX)
+		aes_gcm_aad_update_aesni_avx(AES_GCM_KEY_AESNI(key), ghash_acc,
+					     aad, aadlen);
+	else
+		aes_gcm_aad_update_aesni(AES_GCM_KEY_AESNI(key), ghash_acc,
+					 aad, aadlen);
 }
 
-static int xts_decrypt(struct blkcipher_desc *desc, struct scatterlist *dst,
-		       struct scatterlist *src, unsigned int nbytes)
+asmlinkage void
+aes_gcm_enc_update_aesni(const struct aes_gcm_key_aesni *key,
+			 const u32 le_ctr[4], u8 ghash_acc[16],
+			 const u8 *src, u8 *dst, int datalen);
+asmlinkage void
+aes_gcm_enc_update_aesni_avx(const struct aes_gcm_key_aesni *key,
+			     const u32 le_ctr[4], u8 ghash_acc[16],
+			     const u8 *src, u8 *dst, int datalen);
+asmlinkage void
+aes_gcm_enc_update_vaes_avx2(const struct aes_gcm_key_vaes_avx2 *key,
+			     const u32 le_ctr[4], u8 ghash_acc[16],
+			     const u8 *src, u8 *dst, int datalen);
+asmlinkage void
+aes_gcm_enc_update_vaes_avx512(const struct aes_gcm_key_vaes_avx512 *key,
+			       const u32 le_ctr[4], u8 ghash_acc[16],
+			       const u8 *src, u8 *dst, int datalen);
+
+asmlinkage void
+aes_gcm_dec_update_aesni(const struct aes_gcm_key_aesni *key,
+			 const u32 le_ctr[4], u8 ghash_acc[16],
+			 const u8 *src, u8 *dst, int datalen);
+asmlinkage void
+aes_gcm_dec_update_aesni_avx(const struct aes_gcm_key_aesni *key,
+			     const u32 le_ctr[4], u8 ghash_acc[16],
+			     const u8 *src, u8 *dst, int datalen);
+asmlinkage void
+aes_gcm_dec_update_vaes_avx2(const struct aes_gcm_key_vaes_avx2 *key,
+			     const u32 le_ctr[4], u8 ghash_acc[16],
+			     const u8 *src, u8 *dst, int datalen);
+asmlinkage void
+aes_gcm_dec_update_vaes_avx512(const struct aes_gcm_key_vaes_avx512 *key,
+			       const u32 le_ctr[4], u8 ghash_acc[16],
+			       const u8 *src, u8 *dst, int datalen);
+
+/* __always_inline to optimize out the branches based on @flags */
+static __always_inline void
+aes_gcm_update(const struct aes_gcm_key *key,
+	       const u32 le_ctr[4], u8 ghash_acc[16],
+	       const u8 *src, u8 *dst, int datalen, int flags)
 {
-	struct aesni_xts_ctx *ctx = crypto_blkcipher_ctx(desc->tfm);
-	be128 buf[8];
-	struct xts_crypt_req req = {
-		.tbuf = buf,
-		.tbuflen = sizeof(buf),
-
-		.tweak_ctx = aes_ctx(ctx->raw_tweak_ctx),
-		.tweak_fn = aesni_xts_tweak,
-		.crypt_ctx = aes_ctx(ctx->raw_crypt_ctx),
-		.crypt_fn = lrw_xts_decrypt_callback,
-	};
-	int ret;
-
-	desc->flags &= ~CRYPTO_TFM_REQ_MAY_SLEEP;
-
-	kernel_fpu_begin();
-	ret = xts_crypt(desc, dst, src, nbytes, &req);
-	kernel_fpu_end();
-
-	return ret;
-}
-
-#endif
-
-#ifdef CONFIG_X86_64
-static int rfc4106_init(struct crypto_tfm *tfm)
-{
-	struct cryptd_aead *cryptd_tfm;
-	struct aesni_rfc4106_gcm_ctx *ctx = (struct aesni_rfc4106_gcm_ctx *)
-		PTR_ALIGN((u8 *)crypto_tfm_ctx(tfm), AESNI_ALIGN);
-	struct crypto_aead *cryptd_child;
-	struct aesni_rfc4106_gcm_ctx *child_ctx;
-	cryptd_tfm = cryptd_alloc_aead("__driver-gcm-aes-aesni", 0, 0);
-	if (IS_ERR(cryptd_tfm))
-		return PTR_ERR(cryptd_tfm);
-
-	cryptd_child = cryptd_aead_child(cryptd_tfm);
-	child_ctx = aesni_rfc4106_gcm_ctx_get(cryptd_child);
-	memcpy(child_ctx, ctx, sizeof(*ctx));
-	ctx->cryptd_tfm = cryptd_tfm;
-	tfm->crt_aead.reqsize = sizeof(struct aead_request)
-		+ crypto_aead_reqsize(&cryptd_tfm->base);
-	return 0;
-}
-
-static void rfc4106_exit(struct crypto_tfm *tfm)
-{
-	struct aesni_rfc4106_gcm_ctx *ctx =
-		(struct aesni_rfc4106_gcm_ctx *)
-		PTR_ALIGN((u8 *)crypto_tfm_ctx(tfm), AESNI_ALIGN);
-	if (!IS_ERR(ctx->cryptd_tfm))
-		cryptd_free_aead(ctx->cryptd_tfm);
-	return;
-}
-
-static void
-rfc4106_set_hash_subkey_done(struct crypto_async_request *req, int err)
-{
-	struct aesni_gcm_set_hash_subkey_result *result = req->data;
-
-	if (err == -EINPROGRESS)
-		return;
-	result->err = err;
-	complete(&result->completion);
-}
-
-static int
-rfc4106_set_hash_subkey(u8 *hash_subkey, const u8 *key, unsigned int key_len)
-{
-	struct crypto_ablkcipher *ctr_tfm;
-	struct ablkcipher_request *req;
-	int ret = -EINVAL;
-	struct aesni_hash_subkey_req_data *req_data;
-
-	ctr_tfm = crypto_alloc_ablkcipher("ctr(aes)", 0, 0);
-	if (IS_ERR(ctr_tfm))
-		return PTR_ERR(ctr_tfm);
-
-	crypto_ablkcipher_clear_flags(ctr_tfm, ~0);
-
-	ret = crypto_ablkcipher_setkey(ctr_tfm, key, key_len);
-	if (ret)
-		goto out_free_ablkcipher;
-
-	ret = -ENOMEM;
-	req = ablkcipher_request_alloc(ctr_tfm, GFP_KERNEL);
-	if (!req)
-		goto out_free_ablkcipher;
-
-	req_data = kmalloc(sizeof(*req_data), GFP_KERNEL);
-	if (!req_data)
-		goto out_free_request;
-
-	memset(req_data->iv, 0, sizeof(req_data->iv));
-
-	/* Clear the data in the hash sub key container to zero.*/
-	/* We want to cipher all zeros to create the hash sub key. */
-	memset(hash_subkey, 0, RFC4106_HASH_SUBKEY_SIZE);
-
-	init_completion(&req_data->result.completion);
-	sg_init_one(&req_data->sg, hash_subkey, RFC4106_HASH_SUBKEY_SIZE);
-	ablkcipher_request_set_tfm(req, ctr_tfm);
-	ablkcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_SLEEP |
-					CRYPTO_TFM_REQ_MAY_BACKLOG,
-					rfc4106_set_hash_subkey_done,
-					&req_data->result);
-
-	ablkcipher_request_set_crypt(req, &req_data->sg,
-		&req_data->sg, RFC4106_HASH_SUBKEY_SIZE, req_data->iv);
-
-	ret = crypto_ablkcipher_encrypt(req);
-	if (ret == -EINPROGRESS || ret == -EBUSY) {
-		ret = wait_for_completion_interruptible
-			(&req_data->result.completion);
-		if (!ret)
-			ret = req_data->result.err;
+	if (flags & FLAG_ENC) {
+		if (flags & FLAG_VAES_AVX512)
+			aes_gcm_enc_update_vaes_avx512(AES_GCM_KEY_VAES_AVX512(key),
+						       le_ctr, ghash_acc,
+						       src, dst, datalen);
+		else if (flags & FLAG_VAES_AVX2)
+			aes_gcm_enc_update_vaes_avx2(AES_GCM_KEY_VAES_AVX2(key),
+						     le_ctr, ghash_acc,
+						     src, dst, datalen);
+		else if (flags & FLAG_AVX)
+			aes_gcm_enc_update_aesni_avx(AES_GCM_KEY_AESNI(key),
+						     le_ctr, ghash_acc,
+						     src, dst, datalen);
+		else
+			aes_gcm_enc_update_aesni(AES_GCM_KEY_AESNI(key), le_ctr,
+						 ghash_acc, src, dst, datalen);
+	} else {
+		if (flags & FLAG_VAES_AVX512)
+			aes_gcm_dec_update_vaes_avx512(AES_GCM_KEY_VAES_AVX512(key),
+						       le_ctr, ghash_acc,
+						       src, dst, datalen);
+		else if (flags & FLAG_VAES_AVX2)
+			aes_gcm_dec_update_vaes_avx2(AES_GCM_KEY_VAES_AVX2(key),
+						     le_ctr, ghash_acc,
+						     src, dst, datalen);
+		else if (flags & FLAG_AVX)
+			aes_gcm_dec_update_aesni_avx(AES_GCM_KEY_AESNI(key),
+						     le_ctr, ghash_acc,
+						     src, dst, datalen);
+		else
+			aes_gcm_dec_update_aesni(AES_GCM_KEY_AESNI(key),
+						 le_ctr, ghash_acc,
+						 src, dst, datalen);
 	}
-	kfree(req_data);
-out_free_request:
-	ablkcipher_request_free(req);
-out_free_ablkcipher:
-	crypto_free_ablkcipher(ctr_tfm);
-	return ret;
 }
 
-static int rfc4106_set_key(struct crypto_aead *parent, const u8 *key,
-						   unsigned int key_len)
+asmlinkage void
+aes_gcm_enc_final_aesni(const struct aes_gcm_key_aesni *key,
+			const u32 le_ctr[4], u8 ghash_acc[16],
+			u64 total_aadlen, u64 total_datalen);
+asmlinkage void
+aes_gcm_enc_final_aesni_avx(const struct aes_gcm_key_aesni *key,
+			    const u32 le_ctr[4], u8 ghash_acc[16],
+			    u64 total_aadlen, u64 total_datalen);
+asmlinkage void
+aes_gcm_enc_final_vaes_avx2(const struct aes_gcm_key_vaes_avx2 *key,
+			    const u32 le_ctr[4], u8 ghash_acc[16],
+			    u64 total_aadlen, u64 total_datalen);
+asmlinkage void
+aes_gcm_enc_final_vaes_avx512(const struct aes_gcm_key_vaes_avx512 *key,
+			      const u32 le_ctr[4], u8 ghash_acc[16],
+			      u64 total_aadlen, u64 total_datalen);
+
+/* __always_inline to optimize out the branches based on @flags */
+static __always_inline void
+aes_gcm_enc_final(const struct aes_gcm_key *key,
+		  const u32 le_ctr[4], u8 ghash_acc[16],
+		  u64 total_aadlen, u64 total_datalen, int flags)
 {
-	int ret = 0;
-	struct crypto_tfm *tfm = crypto_aead_tfm(parent);
-	struct aesni_rfc4106_gcm_ctx *ctx = aesni_rfc4106_gcm_ctx_get(parent);
-	struct crypto_aead *cryptd_child = cryptd_aead_child(ctx->cryptd_tfm);
-	struct aesni_rfc4106_gcm_ctx *child_ctx =
-                                 aesni_rfc4106_gcm_ctx_get(cryptd_child);
-	u8 *new_key_align, *new_key_mem = NULL;
-
-	if (key_len < 4) {
-		crypto_tfm_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_LEN);
-		return -EINVAL;
-	}
-	/*Account for 4 byte nonce at the end.*/
-	key_len -= 4;
-	if (key_len != AES_KEYSIZE_128) {
-		crypto_tfm_set_flags(tfm, CRYPTO_TFM_RES_BAD_KEY_LEN);
-		return -EINVAL;
-	}
-
-	memcpy(ctx->nonce, key + key_len, sizeof(ctx->nonce));
-	/*This must be on a 16 byte boundary!*/
-	if ((unsigned long)(&(ctx->aes_key_expanded.key_enc[0])) % AESNI_ALIGN)
-		return -EINVAL;
-
-	if ((unsigned long)key % AESNI_ALIGN) {
-		/*key is not aligned: use an auxuliar aligned pointer*/
-		new_key_mem = kmalloc(key_len+AESNI_ALIGN, GFP_KERNEL);
-		if (!new_key_mem)
-			return -ENOMEM;
-
-		new_key_align = PTR_ALIGN(new_key_mem, AESNI_ALIGN);
-		memcpy(new_key_align, key, key_len);
-		key = new_key_align;
-	}
-
-	if (!irq_fpu_usable())
-		ret = crypto_aes_expand_key(&(ctx->aes_key_expanded),
-		key, key_len);
-	else {
-		kernel_fpu_begin();
-		ret = aesni_set_key(&(ctx->aes_key_expanded), key, key_len);
-		kernel_fpu_end();
-	}
-	/*This must be on a 16 byte boundary!*/
-	if ((unsigned long)(&(ctx->hash_subkey[0])) % AESNI_ALIGN) {
-		ret = -EINVAL;
-		goto exit;
-	}
-	ret = rfc4106_set_hash_subkey(ctx->hash_subkey, key, key_len);
-	memcpy(child_ctx, ctx, sizeof(*ctx));
-exit:
-	kfree(new_key_mem);
-	return ret;
+	if (flags & FLAG_VAES_AVX512)
+		aes_gcm_enc_final_vaes_avx512(AES_GCM_KEY_VAES_AVX512(key),
+					      le_ctr, ghash_acc,
+					      total_aadlen, total_datalen);
+	else if (flags & FLAG_VAES_AVX2)
+		aes_gcm_enc_final_vaes_avx2(AES_GCM_KEY_VAES_AVX2(key),
+					    le_ctr, ghash_acc,
+					    total_aadlen, total_datalen);
+	else if (flags & FLAG_AVX)
+		aes_gcm_enc_final_aesni_avx(AES_GCM_KEY_AESNI(key),
+					    le_ctr, ghash_acc,
+					    total_aadlen, total_datalen);
+	else
+		aes_gcm_enc_final_aesni(AES_GCM_KEY_AESNI(key),
+					le_ctr, ghash_acc,
+					total_aadlen, total_datalen);
 }
 
-/* This is the Integrity Check Value (aka the authentication tag length and can
- * be 8, 12 or 16 bytes long. */
-static int rfc4106_set_authsize(struct crypto_aead *parent,
-				unsigned int authsize)
-{
-	struct aesni_rfc4106_gcm_ctx *ctx = aesni_rfc4106_gcm_ctx_get(parent);
-	struct crypto_aead *cryptd_child = cryptd_aead_child(ctx->cryptd_tfm);
+asmlinkage bool __must_check
+aes_gcm_dec_final_aesni(const struct aes_gcm_key_aesni *key,
+			const u32 le_ctr[4], const u8 ghash_acc[16],
+			u64 total_aadlen, u64 total_datalen,
+			const u8 tag[16], int taglen);
+asmlinkage bool __must_check
+aes_gcm_dec_final_aesni_avx(const struct aes_gcm_key_aesni *key,
+			    const u32 le_ctr[4], const u8 ghash_acc[16],
+			    u64 total_aadlen, u64 total_datalen,
+			    const u8 tag[16], int taglen);
+asmlinkage bool __must_check
+aes_gcm_dec_final_vaes_avx2(const struct aes_gcm_key_vaes_avx2 *key,
+			    const u32 le_ctr[4], const u8 ghash_acc[16],
+			    u64 total_aadlen, u64 total_datalen,
+			    const u8 tag[16], int taglen);
+asmlinkage bool __must_check
+aes_gcm_dec_final_vaes_avx512(const struct aes_gcm_key_vaes_avx512 *key,
+			      const u32 le_ctr[4], const u8 ghash_acc[16],
+			      u64 total_aadlen, u64 total_datalen,
+			      const u8 tag[16], int taglen);
 
+/* __always_inline to optimize out the branches based on @flags */
+static __always_inline bool __must_check
+aes_gcm_dec_final(const struct aes_gcm_key *key, const u32 le_ctr[4],
+		  u8 ghash_acc[16], u64 total_aadlen, u64 total_datalen,
+		  u8 tag[16], int taglen, int flags)
+{
+	if (flags & FLAG_VAES_AVX512)
+		return aes_gcm_dec_final_vaes_avx512(AES_GCM_KEY_VAES_AVX512(key),
+						     le_ctr, ghash_acc,
+						     total_aadlen, total_datalen,
+						     tag, taglen);
+	else if (flags & FLAG_VAES_AVX2)
+		return aes_gcm_dec_final_vaes_avx2(AES_GCM_KEY_VAES_AVX2(key),
+						   le_ctr, ghash_acc,
+						   total_aadlen, total_datalen,
+						   tag, taglen);
+	else if (flags & FLAG_AVX)
+		return aes_gcm_dec_final_aesni_avx(AES_GCM_KEY_AESNI(key),
+						   le_ctr, ghash_acc,
+						   total_aadlen, total_datalen,
+						   tag, taglen);
+	else
+		return aes_gcm_dec_final_aesni(AES_GCM_KEY_AESNI(key),
+					       le_ctr, ghash_acc,
+					       total_aadlen, total_datalen,
+					       tag, taglen);
+}
+
+/*
+ * This is the Integrity Check Value (aka the authentication tag) length and can
+ * be 8, 12 or 16 bytes long.
+ */
+static int common_rfc4106_set_authsize(struct crypto_aead *aead,
+				       unsigned int authsize)
+{
 	switch (authsize) {
 	case 8:
 	case 12:
@@ -815,534 +389,460 @@ static int rfc4106_set_authsize(struct crypto_aead *parent,
 	default:
 		return -EINVAL;
 	}
-	crypto_aead_crt(parent)->authsize = authsize;
-	crypto_aead_crt(cryptd_child)->authsize = authsize;
+
 	return 0;
 }
 
-static int rfc4106_encrypt(struct aead_request *req)
+static int generic_gcmaes_set_authsize(struct crypto_aead *tfm,
+				       unsigned int authsize)
 {
-	int ret;
-	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
-	struct aesni_rfc4106_gcm_ctx *ctx = aesni_rfc4106_gcm_ctx_get(tfm);
-
-	if (!irq_fpu_usable()) {
-		struct aead_request *cryptd_req =
-			(struct aead_request *) aead_request_ctx(req);
-		memcpy(cryptd_req, req, sizeof(*req));
-		aead_request_set_tfm(cryptd_req, &ctx->cryptd_tfm->base);
-		return crypto_aead_encrypt(cryptd_req);
-	} else {
-		struct crypto_aead *cryptd_child = cryptd_aead_child(ctx->cryptd_tfm);
-		kernel_fpu_begin();
-		ret = cryptd_child->base.crt_aead.encrypt(req);
-		kernel_fpu_end();
-		return ret;
-	}
-}
-
-static int rfc4106_decrypt(struct aead_request *req)
-{
-	int ret;
-	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
-	struct aesni_rfc4106_gcm_ctx *ctx = aesni_rfc4106_gcm_ctx_get(tfm);
-
-	if (!irq_fpu_usable()) {
-		struct aead_request *cryptd_req =
-			(struct aead_request *) aead_request_ctx(req);
-		memcpy(cryptd_req, req, sizeof(*req));
-		aead_request_set_tfm(cryptd_req, &ctx->cryptd_tfm->base);
-		return crypto_aead_decrypt(cryptd_req);
-	} else {
-		struct crypto_aead *cryptd_child = cryptd_aead_child(ctx->cryptd_tfm);
-		kernel_fpu_begin();
-		ret = cryptd_child->base.crt_aead.decrypt(req);
-		kernel_fpu_end();
-		return ret;
-	}
-}
-
-static int __driver_rfc4106_encrypt(struct aead_request *req)
-{
-	u8 one_entry_in_sg = 0;
-	u8 *src, *dst, *assoc;
-	__be32 counter = cpu_to_be32(1);
-	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
-	struct aesni_rfc4106_gcm_ctx *ctx = aesni_rfc4106_gcm_ctx_get(tfm);
-	void *aes_ctx = &(ctx->aes_key_expanded);
-	unsigned long auth_tag_len = crypto_aead_authsize(tfm);
-	u8 iv_tab[16+AESNI_ALIGN];
-	u8* iv = (u8 *) PTR_ALIGN((u8 *)iv_tab, AESNI_ALIGN);
-	struct scatter_walk src_sg_walk;
-	struct scatter_walk assoc_sg_walk;
-	struct scatter_walk dst_sg_walk;
-	unsigned int i;
-
-	/* Assuming we are supporting rfc4106 64-bit extended */
-	/* sequence numbers We need to have the AAD length equal */
-	/* to 8 or 12 bytes */
-	if (unlikely(req->assoclen != 8 && req->assoclen != 12))
+	switch (authsize) {
+	case 4:
+	case 8:
+	case 12:
+	case 13:
+	case 14:
+	case 15:
+	case 16:
+		break;
+	default:
 		return -EINVAL;
-	/* IV below built */
-	for (i = 0; i < 4; i++)
-		*(iv+i) = ctx->nonce[i];
-	for (i = 0; i < 8; i++)
-		*(iv+4+i) = req->iv[i];
-	*((__be32 *)(iv+12)) = counter;
-
-	if ((sg_is_last(req->src)) && (sg_is_last(req->assoc))) {
-		one_entry_in_sg = 1;
-		scatterwalk_start(&src_sg_walk, req->src);
-		scatterwalk_start(&assoc_sg_walk, req->assoc);
-		src = scatterwalk_map(&src_sg_walk);
-		assoc = scatterwalk_map(&assoc_sg_walk);
-		dst = src;
-		if (unlikely(req->src != req->dst)) {
-			scatterwalk_start(&dst_sg_walk, req->dst);
-			dst = scatterwalk_map(&dst_sg_walk);
-		}
-
-	} else {
-		/* Allocate memory for src, dst, assoc */
-		src = kmalloc(req->cryptlen + auth_tag_len + req->assoclen,
-			GFP_ATOMIC);
-		if (unlikely(!src))
-			return -ENOMEM;
-		assoc = (src + req->cryptlen + auth_tag_len);
-		scatterwalk_map_and_copy(src, req->src, 0, req->cryptlen, 0);
-		scatterwalk_map_and_copy(assoc, req->assoc, 0,
-					req->assoclen, 0);
-		dst = src;
 	}
 
-	aesni_gcm_enc(aes_ctx, dst, src, (unsigned long)req->cryptlen, iv,
-		ctx->hash_subkey, assoc, (unsigned long)req->assoclen, dst
-		+ ((unsigned long)req->cryptlen), auth_tag_len);
+	return 0;
+}
 
-	/* The authTag (aka the Integrity Check Value) needs to be written
-	 * back to the packet. */
-	if (one_entry_in_sg) {
-		if (unlikely(req->src != req->dst)) {
-			scatterwalk_unmap(dst);
-			scatterwalk_done(&dst_sg_walk, 0, 0);
-		}
-		scatterwalk_unmap(src);
-		scatterwalk_unmap(assoc);
-		scatterwalk_done(&src_sg_walk, 0, 0);
-		scatterwalk_done(&assoc_sg_walk, 0, 0);
+/*
+ * This is the setkey function for the x86_64 implementations of AES-GCM.  It
+ * saves the RFC4106 nonce if applicable, expands the AES key, and precomputes
+ * powers of the hash key.
+ *
+ * To comply with the crypto_aead API, this has to be usable in no-SIMD context.
+ * For that reason, this function includes a portable C implementation of the
+ * needed logic.  However, the portable C implementation is very slow, taking
+ * about the same time as encrypting 37 KB of data.  To be ready for users that
+ * may set a key even somewhat frequently, we therefore also include a SIMD
+ * assembly implementation, expanding the AES key using AES-NI and precomputing
+ * the hash key powers using PCLMULQDQ or VPCLMULQDQ.
+ */
+static int gcm_setkey(struct crypto_aead *tfm, const u8 *raw_key,
+		      unsigned int keylen, int flags)
+{
+	struct aes_gcm_key *key = aes_gcm_key_get(tfm, flags);
+	int err;
+
+	if (flags & FLAG_RFC4106) {
+		if (keylen < 4)
+			return -EINVAL;
+		keylen -= 4;
+		key->rfc4106_nonce = get_unaligned_be32(raw_key + keylen);
+	}
+
+	/* The assembly code assumes the following offsets. */
+	static_assert(offsetof(struct aes_gcm_key_aesni, base.aes_key.len) == 0);
+	static_assert(offsetof(struct aes_gcm_key_aesni, base.aes_key.k.rndkeys) == 16);
+	static_assert(offsetof(struct aes_gcm_key_aesni, h_powers) == 272);
+	static_assert(offsetof(struct aes_gcm_key_aesni, h_powers_xored) == 400);
+	static_assert(offsetof(struct aes_gcm_key_aesni, h_times_x64) == 464);
+	static_assert(offsetof(struct aes_gcm_key_vaes_avx2, base.aes_key.len) == 0);
+	static_assert(offsetof(struct aes_gcm_key_vaes_avx2, base.aes_key.k.rndkeys) == 16);
+	static_assert(offsetof(struct aes_gcm_key_vaes_avx2, h_powers) == 288);
+	static_assert(offsetof(struct aes_gcm_key_vaes_avx2, h_powers_xored) == 416);
+	static_assert(offsetof(struct aes_gcm_key_vaes_avx512, base.aes_key.len) == 0);
+	static_assert(offsetof(struct aes_gcm_key_vaes_avx512, base.aes_key.k.rndkeys) == 16);
+	static_assert(offsetof(struct aes_gcm_key_vaes_avx512, h_powers) == 320);
+	static_assert(offsetof(struct aes_gcm_key_vaes_avx512, padding) == 576);
+
+	err = aes_prepareenckey(&key->aes_key, raw_key, keylen);
+	if (err)
+		return err;
+
+	if (likely(crypto_simd_usable())) {
+		kernel_fpu_begin();
+		aes_gcm_precompute(key, flags);
+		kernel_fpu_end();
 	} else {
-		scatterwalk_map_and_copy(dst, req->dst, 0,
-			req->cryptlen + auth_tag_len, 1);
-		kfree(src);
+		static const u8 x_to_the_minus1[16] __aligned(__alignof__(be128)) = {
+			[0] = 0xc2, [15] = 1
+		};
+		static const u8 x_to_the_63[16] __aligned(__alignof__(be128)) = {
+			[7] = 1,
+		};
+		be128 h1 = {};
+		be128 h;
+		int i;
+
+		/* Encrypt the all-zeroes block to get the hash key H^1 */
+		aes_encrypt(&key->aes_key, (u8 *)&h1, (u8 *)&h1);
+
+		/* Compute H^1 * x^-1 */
+		h = h1;
+		gf128mul_lle(&h, (const be128 *)x_to_the_minus1);
+
+		/* Compute the needed key powers */
+		if (flags & FLAG_VAES_AVX512) {
+			struct aes_gcm_key_vaes_avx512 *k =
+				AES_GCM_KEY_VAES_AVX512(key);
+
+			for (i = ARRAY_SIZE(k->h_powers) - 1; i >= 0; i--) {
+				k->h_powers[i][0] = be64_to_cpu(h.b);
+				k->h_powers[i][1] = be64_to_cpu(h.a);
+				gf128mul_lle(&h, &h1);
+			}
+			memset(k->padding, 0, sizeof(k->padding));
+		} else if (flags & FLAG_VAES_AVX2) {
+			struct aes_gcm_key_vaes_avx2 *k =
+				AES_GCM_KEY_VAES_AVX2(key);
+			static const u8 indices[8] = { 0, 2, 1, 3, 4, 6, 5, 7 };
+
+			for (i = ARRAY_SIZE(k->h_powers) - 1; i >= 0; i--) {
+				k->h_powers[i][0] = be64_to_cpu(h.b);
+				k->h_powers[i][1] = be64_to_cpu(h.a);
+				gf128mul_lle(&h, &h1);
+			}
+			for (i = 0; i < ARRAY_SIZE(k->h_powers_xored); i++) {
+				int j = indices[i];
+
+				k->h_powers_xored[i] = k->h_powers[j][0] ^
+						       k->h_powers[j][1];
+			}
+		} else {
+			struct aes_gcm_key_aesni *k = AES_GCM_KEY_AESNI(key);
+
+			for (i = ARRAY_SIZE(k->h_powers) - 1; i >= 0; i--) {
+				k->h_powers[i][0] = be64_to_cpu(h.b);
+				k->h_powers[i][1] = be64_to_cpu(h.a);
+				k->h_powers_xored[i] = k->h_powers[i][0] ^
+						       k->h_powers[i][1];
+				gf128mul_lle(&h, &h1);
+			}
+			gf128mul_lle(&h1, (const be128 *)x_to_the_63);
+			k->h_times_x64[0] = be64_to_cpu(h1.b);
+			k->h_times_x64[1] = be64_to_cpu(h1.a);
+		}
 	}
 	return 0;
 }
 
-static int __driver_rfc4106_decrypt(struct aead_request *req)
+/*
+ * Initialize @ghash_acc, then pass all @assoclen bytes of associated data
+ * (a.k.a. additional authenticated data) from @sg_src through the GHASH update
+ * assembly function.  kernel_fpu_begin() must have already been called.
+ */
+static void gcm_process_assoc(const struct aes_gcm_key *key, u8 ghash_acc[16],
+			      struct scatterlist *sg_src, unsigned int assoclen,
+			      int flags)
 {
-	u8 one_entry_in_sg = 0;
-	u8 *src, *dst, *assoc;
-	unsigned long tempCipherLen = 0;
-	__be32 counter = cpu_to_be32(1);
-	int retval = 0;
-	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
-	struct aesni_rfc4106_gcm_ctx *ctx = aesni_rfc4106_gcm_ctx_get(tfm);
-	void *aes_ctx = &(ctx->aes_key_expanded);
-	unsigned long auth_tag_len = crypto_aead_authsize(tfm);
-	u8 iv_and_authTag[32+AESNI_ALIGN];
-	u8 *iv = (u8 *) PTR_ALIGN((u8 *)iv_and_authTag, AESNI_ALIGN);
-	u8 *authTag = iv + 16;
-	struct scatter_walk src_sg_walk;
-	struct scatter_walk assoc_sg_walk;
-	struct scatter_walk dst_sg_walk;
-	unsigned int i;
+	struct scatter_walk walk;
+	/*
+	 * The assembly function requires that the length of any non-last
+	 * segment of associated data be a multiple of 16 bytes, so this
+	 * function does the buffering needed to achieve that.
+	 */
+	unsigned int pos = 0;
+	u8 buf[16];
 
-	if (unlikely((req->cryptlen < auth_tag_len) ||
-		(req->assoclen != 8 && req->assoclen != 12)))
-		return -EINVAL;
-	/* Assuming we are supporting rfc4106 64-bit extended */
-	/* sequence numbers We need to have the AAD length */
-	/* equal to 8 or 12 bytes */
+	memset(ghash_acc, 0, 16);
+	scatterwalk_start(&walk, sg_src);
 
-	tempCipherLen = (unsigned long)(req->cryptlen - auth_tag_len);
-	/* IV below built */
-	for (i = 0; i < 4; i++)
-		*(iv+i) = ctx->nonce[i];
-	for (i = 0; i < 8; i++)
-		*(iv+4+i) = req->iv[i];
-	*((__be32 *)(iv+12)) = counter;
+	while (assoclen) {
+		unsigned int orig_len_this_step = scatterwalk_next(
+			&walk, assoclen);
+		unsigned int len_this_step = orig_len_this_step;
+		unsigned int len;
+		const u8 *src = walk.addr;
 
-	if ((sg_is_last(req->src)) && (sg_is_last(req->assoc))) {
-		one_entry_in_sg = 1;
-		scatterwalk_start(&src_sg_walk, req->src);
-		scatterwalk_start(&assoc_sg_walk, req->assoc);
-		src = scatterwalk_map(&src_sg_walk);
-		assoc = scatterwalk_map(&assoc_sg_walk);
-		dst = src;
-		if (unlikely(req->src != req->dst)) {
-			scatterwalk_start(&dst_sg_walk, req->dst);
-			dst = scatterwalk_map(&dst_sg_walk);
+		assoclen -= orig_len_this_step;
+		if (unlikely(pos)) {
+			len = min(len_this_step, 16 - pos);
+			memcpy(&buf[pos], src, len);
+			pos += len;
+			src += len;
+			len_this_step -= len;
+			if (pos < 16)
+				goto next;
+			aes_gcm_aad_update(key, ghash_acc, buf, 16, flags);
+			pos = 0;
 		}
-
-	} else {
-		/* Allocate memory for src, dst, assoc */
-		src = kmalloc(req->cryptlen + req->assoclen, GFP_ATOMIC);
-		if (!src)
-			return -ENOMEM;
-		assoc = (src + req->cryptlen + auth_tag_len);
-		scatterwalk_map_and_copy(src, req->src, 0, req->cryptlen, 0);
-		scatterwalk_map_and_copy(assoc, req->assoc, 0,
-			req->assoclen, 0);
-		dst = src;
-	}
-
-	aesni_gcm_dec(aes_ctx, dst, src, tempCipherLen, iv,
-		ctx->hash_subkey, assoc, (unsigned long)req->assoclen,
-		authTag, auth_tag_len);
-
-	/* Compare generated tag with passed in tag. */
-	retval = memcmp(src + tempCipherLen, authTag, auth_tag_len) ?
-		-EBADMSG : 0;
-
-	if (one_entry_in_sg) {
-		if (unlikely(req->src != req->dst)) {
-			scatterwalk_unmap(dst);
-			scatterwalk_done(&dst_sg_walk, 0, 0);
+		len = len_this_step;
+		if (unlikely(assoclen)) /* Not the last segment yet? */
+			len = round_down(len, 16);
+		aes_gcm_aad_update(key, ghash_acc, src, len, flags);
+		src += len;
+		len_this_step -= len;
+		if (unlikely(len_this_step)) {
+			memcpy(buf, src, len_this_step);
+			pos = len_this_step;
 		}
-		scatterwalk_unmap(src);
-		scatterwalk_unmap(assoc);
-		scatterwalk_done(&src_sg_walk, 0, 0);
-		scatterwalk_done(&assoc_sg_walk, 0, 0);
-	} else {
-		scatterwalk_map_and_copy(dst, req->dst, 0, req->cryptlen, 1);
-		kfree(src);
+next:
+		scatterwalk_done_src(&walk, orig_len_this_step);
+		if (need_resched()) {
+			kernel_fpu_end();
+			kernel_fpu_begin();
+		}
 	}
-	return retval;
+	if (unlikely(pos))
+		aes_gcm_aad_update(key, ghash_acc, buf, pos, flags);
 }
-#endif
 
-static struct crypto_alg aesni_algs[] = { {
-	.cra_name		= "aes",
-	.cra_driver_name	= "aes-aesni",
-	.cra_priority		= 300,
-	.cra_flags		= CRYPTO_ALG_TYPE_CIPHER,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct crypto_aes_ctx) +
-				  AESNI_ALIGN - 1,
-	.cra_alignmask		= 0,
-	.cra_module		= THIS_MODULE,
-	.cra_u	= {
-		.cipher	= {
-			.cia_min_keysize	= AES_MIN_KEY_SIZE,
-			.cia_max_keysize	= AES_MAX_KEY_SIZE,
-			.cia_setkey		= aes_set_key,
-			.cia_encrypt		= aes_encrypt,
-			.cia_decrypt		= aes_decrypt
-		}
-	}
-}, {
-	.cra_name		= "__aes-aesni",
-	.cra_driver_name	= "__driver-aes-aesni",
-	.cra_priority		= 0,
-	.cra_flags		= CRYPTO_ALG_TYPE_CIPHER,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct crypto_aes_ctx) +
-				  AESNI_ALIGN - 1,
-	.cra_alignmask		= 0,
-	.cra_module		= THIS_MODULE,
-	.cra_u	= {
-		.cipher	= {
-			.cia_min_keysize	= AES_MIN_KEY_SIZE,
-			.cia_max_keysize	= AES_MAX_KEY_SIZE,
-			.cia_setkey		= aes_set_key,
-			.cia_encrypt		= __aes_encrypt,
-			.cia_decrypt		= __aes_decrypt
-		}
-	}
-}, {
-	.cra_name		= "__ecb-aes-aesni",
-	.cra_driver_name	= "__driver-ecb-aes-aesni",
-	.cra_priority		= 0,
-	.cra_flags		= CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct crypto_aes_ctx) +
-				  AESNI_ALIGN - 1,
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_blkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_u = {
-		.blkcipher = {
-			.min_keysize	= AES_MIN_KEY_SIZE,
-			.max_keysize	= AES_MAX_KEY_SIZE,
-			.setkey		= aes_set_key,
-			.encrypt	= ecb_encrypt,
-			.decrypt	= ecb_decrypt,
-		},
-	},
-}, {
-	.cra_name		= "__cbc-aes-aesni",
-	.cra_driver_name	= "__driver-cbc-aes-aesni",
-	.cra_priority		= 0,
-	.cra_flags		= CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct crypto_aes_ctx) +
-				  AESNI_ALIGN - 1,
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_blkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_u = {
-		.blkcipher = {
-			.min_keysize	= AES_MIN_KEY_SIZE,
-			.max_keysize	= AES_MAX_KEY_SIZE,
-			.setkey		= aes_set_key,
-			.encrypt	= cbc_encrypt,
-			.decrypt	= cbc_decrypt,
-		},
-	},
-}, {
-	.cra_name		= "ecb(aes)",
-	.cra_driver_name	= "ecb-aes-aesni",
-	.cra_priority		= 400,
-	.cra_flags		= CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct async_helper_ctx),
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_ablkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_init		= ablk_ecb_init,
-	.cra_exit		= ablk_exit,
-	.cra_u = {
-		.ablkcipher = {
-			.min_keysize	= AES_MIN_KEY_SIZE,
-			.max_keysize	= AES_MAX_KEY_SIZE,
-			.setkey		= ablk_set_key,
-			.encrypt	= ablk_encrypt,
-			.decrypt	= ablk_decrypt,
-		},
-	},
-}, {
-	.cra_name		= "cbc(aes)",
-	.cra_driver_name	= "cbc-aes-aesni",
-	.cra_priority		= 400,
-	.cra_flags		= CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct async_helper_ctx),
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_ablkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_init		= ablk_cbc_init,
-	.cra_exit		= ablk_exit,
-	.cra_u = {
-		.ablkcipher = {
-			.min_keysize	= AES_MIN_KEY_SIZE,
-			.max_keysize	= AES_MAX_KEY_SIZE,
-			.ivsize		= AES_BLOCK_SIZE,
-			.setkey		= ablk_set_key,
-			.encrypt	= ablk_encrypt,
-			.decrypt	= ablk_decrypt,
-		},
-	},
-#ifdef CONFIG_X86_64
-}, {
-	.cra_name		= "__ctr-aes-aesni",
-	.cra_driver_name	= "__driver-ctr-aes-aesni",
-	.cra_priority		= 0,
-	.cra_flags		= CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		= 1,
-	.cra_ctxsize		= sizeof(struct crypto_aes_ctx) +
-				  AESNI_ALIGN - 1,
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_blkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_u = {
-		.blkcipher = {
-			.min_keysize	= AES_MIN_KEY_SIZE,
-			.max_keysize	= AES_MAX_KEY_SIZE,
-			.ivsize		= AES_BLOCK_SIZE,
-			.setkey		= aes_set_key,
-			.encrypt	= ctr_crypt,
-			.decrypt	= ctr_crypt,
-		},
-	},
-}, {
-	.cra_name		= "ctr(aes)",
-	.cra_driver_name	= "ctr-aes-aesni",
-	.cra_priority		= 400,
-	.cra_flags		= CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
-	.cra_blocksize		= 1,
-	.cra_ctxsize		= sizeof(struct async_helper_ctx),
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_ablkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_init		= ablk_ctr_init,
-	.cra_exit		= ablk_exit,
-	.cra_u = {
-		.ablkcipher = {
-			.min_keysize	= AES_MIN_KEY_SIZE,
-			.max_keysize	= AES_MAX_KEY_SIZE,
-			.ivsize		= AES_BLOCK_SIZE,
-			.setkey		= ablk_set_key,
-			.encrypt	= ablk_encrypt,
-			.decrypt	= ablk_encrypt,
-			.geniv		= "chainiv",
-		},
-	},
-}, {
-	.cra_name		= "__gcm-aes-aesni",
-	.cra_driver_name	= "__driver-gcm-aes-aesni",
-	.cra_priority		= 0,
-	.cra_flags		= CRYPTO_ALG_TYPE_AEAD,
-	.cra_blocksize		= 1,
-	.cra_ctxsize		= sizeof(struct aesni_rfc4106_gcm_ctx) +
-				  AESNI_ALIGN,
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_aead_type,
-	.cra_module		= THIS_MODULE,
-	.cra_u = {
-		.aead = {
-			.encrypt	= __driver_rfc4106_encrypt,
-			.decrypt	= __driver_rfc4106_decrypt,
-		},
-	},
-}, {
-	.cra_name		= "rfc4106(gcm(aes))",
-	.cra_driver_name	= "rfc4106-gcm-aesni",
-	.cra_priority		= 400,
-	.cra_flags		= CRYPTO_ALG_TYPE_AEAD | CRYPTO_ALG_ASYNC,
-	.cra_blocksize		= 1,
-	.cra_ctxsize		= sizeof(struct aesni_rfc4106_gcm_ctx) +
-				  AESNI_ALIGN,
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_nivaead_type,
-	.cra_module		= THIS_MODULE,
-	.cra_init		= rfc4106_init,
-	.cra_exit		= rfc4106_exit,
-	.cra_u = {
-		.aead = {
-			.setkey		= rfc4106_set_key,
-			.setauthsize	= rfc4106_set_authsize,
-			.encrypt	= rfc4106_encrypt,
-			.decrypt	= rfc4106_decrypt,
-			.geniv		= "seqiv",
-			.ivsize		= 8,
-			.maxauthsize	= 16,
-		},
-	},
-#endif
-#ifdef HAS_PCBC
-}, {
-	.cra_name		= "pcbc(aes)",
-	.cra_driver_name	= "pcbc-aes-aesni",
-	.cra_priority		= 400,
-	.cra_flags		= CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct async_helper_ctx),
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_ablkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_init		= ablk_pcbc_init,
-	.cra_exit		= ablk_exit,
-	.cra_u = {
-		.ablkcipher = {
-			.min_keysize	= AES_MIN_KEY_SIZE,
-			.max_keysize	= AES_MAX_KEY_SIZE,
-			.ivsize		= AES_BLOCK_SIZE,
-			.setkey		= ablk_set_key,
-			.encrypt	= ablk_encrypt,
-			.decrypt	= ablk_decrypt,
-		},
-	},
-#endif
-}, {
-	.cra_name		= "__lrw-aes-aesni",
-	.cra_driver_name	= "__driver-lrw-aes-aesni",
-	.cra_priority		= 0,
-	.cra_flags		= CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct aesni_lrw_ctx),
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_blkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_exit		= lrw_aesni_exit_tfm,
-	.cra_u = {
-		.blkcipher = {
-			.min_keysize	= AES_MIN_KEY_SIZE + AES_BLOCK_SIZE,
-			.max_keysize	= AES_MAX_KEY_SIZE + AES_BLOCK_SIZE,
-			.ivsize		= AES_BLOCK_SIZE,
-			.setkey		= lrw_aesni_setkey,
-			.encrypt	= lrw_encrypt,
-			.decrypt	= lrw_decrypt,
-		},
-	},
-}, {
-	.cra_name		= "__xts-aes-aesni",
-	.cra_driver_name	= "__driver-xts-aes-aesni",
-	.cra_priority		= 0,
-	.cra_flags		= CRYPTO_ALG_TYPE_BLKCIPHER,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct aesni_xts_ctx),
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_blkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_u = {
-		.blkcipher = {
-			.min_keysize	= 2 * AES_MIN_KEY_SIZE,
-			.max_keysize	= 2 * AES_MAX_KEY_SIZE,
-			.ivsize		= AES_BLOCK_SIZE,
-			.setkey		= xts_aesni_setkey,
-			.encrypt	= xts_encrypt,
-			.decrypt	= xts_decrypt,
-		},
-	},
-}, {
-	.cra_name		= "lrw(aes)",
-	.cra_driver_name	= "lrw-aes-aesni",
-	.cra_priority		= 400,
-	.cra_flags		= CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct async_helper_ctx),
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_ablkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_init		= ablk_init,
-	.cra_exit		= ablk_exit,
-	.cra_u = {
-		.ablkcipher = {
-			.min_keysize	= AES_MIN_KEY_SIZE + AES_BLOCK_SIZE,
-			.max_keysize	= AES_MAX_KEY_SIZE + AES_BLOCK_SIZE,
-			.ivsize		= AES_BLOCK_SIZE,
-			.setkey		= ablk_set_key,
-			.encrypt	= ablk_encrypt,
-			.decrypt	= ablk_decrypt,
-		},
-	},
-}, {
-	.cra_name		= "xts(aes)",
-	.cra_driver_name	= "xts-aes-aesni",
-	.cra_priority		= 400,
-	.cra_flags		= CRYPTO_ALG_TYPE_ABLKCIPHER | CRYPTO_ALG_ASYNC,
-	.cra_blocksize		= AES_BLOCK_SIZE,
-	.cra_ctxsize		= sizeof(struct async_helper_ctx),
-	.cra_alignmask		= 0,
-	.cra_type		= &crypto_ablkcipher_type,
-	.cra_module		= THIS_MODULE,
-	.cra_init		= ablk_init,
-	.cra_exit		= ablk_exit,
-	.cra_u = {
-		.ablkcipher = {
-			.min_keysize	= 2 * AES_MIN_KEY_SIZE,
-			.max_keysize	= 2 * AES_MAX_KEY_SIZE,
-			.ivsize		= AES_BLOCK_SIZE,
-			.setkey		= ablk_set_key,
-			.encrypt	= ablk_encrypt,
-			.decrypt	= ablk_decrypt,
-		},
-	},
-} };
 
+/* __always_inline to optimize out the branches based on @flags */
+static __always_inline int
+gcm_crypt(struct aead_request *req, int flags)
+{
+	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
+	const struct aes_gcm_key *key = aes_gcm_key_get(tfm, flags);
+	unsigned int assoclen = req->assoclen;
+	struct skcipher_walk walk;
+	unsigned int nbytes;
+	u8 ghash_acc[16]; /* GHASH accumulator */
+	u32 le_ctr[4]; /* Counter in little-endian format */
+	int taglen;
+	int err;
+
+	/* Initialize the counter and determine the associated data length. */
+	le_ctr[0] = 2;
+	if (flags & FLAG_RFC4106) {
+		if (unlikely(assoclen != 16 && assoclen != 20))
+			return -EINVAL;
+		assoclen -= 8;
+		le_ctr[1] = get_unaligned_be32(req->iv + 4);
+		le_ctr[2] = get_unaligned_be32(req->iv + 0);
+		le_ctr[3] = key->rfc4106_nonce; /* already byte-swapped */
+	} else {
+		le_ctr[1] = get_unaligned_be32(req->iv + 8);
+		le_ctr[2] = get_unaligned_be32(req->iv + 4);
+		le_ctr[3] = get_unaligned_be32(req->iv + 0);
+	}
+
+	/* Begin walking through the plaintext or ciphertext. */
+	if (flags & FLAG_ENC)
+		err = skcipher_walk_aead_encrypt(&walk, req, false);
+	else
+		err = skcipher_walk_aead_decrypt(&walk, req, false);
+	if (err)
+		return err;
+
+	/*
+	 * Since the AES-GCM assembly code requires that at least three assembly
+	 * functions be called to process any message (this is needed to support
+	 * incremental updates cleanly), to reduce overhead we try to do all
+	 * three calls in the same kernel FPU section if possible.  We close the
+	 * section and start a new one if there are multiple data segments or if
+	 * rescheduling is needed while processing the associated data.
+	 */
+	kernel_fpu_begin();
+
+	/* Pass the associated data through GHASH. */
+	gcm_process_assoc(key, ghash_acc, req->src, assoclen, flags);
+
+	/* En/decrypt the data and pass the ciphertext through GHASH. */
+	while (unlikely((nbytes = walk.nbytes) < walk.total)) {
+		/*
+		 * Non-last segment.  In this case, the assembly function
+		 * requires that the length be a multiple of 16 (AES_BLOCK_SIZE)
+		 * bytes.  The needed buffering of up to 16 bytes is handled by
+		 * the skcipher_walk.  Here we just need to round down to a
+		 * multiple of 16.
+		 */
+		nbytes = round_down(nbytes, AES_BLOCK_SIZE);
+		aes_gcm_update(key, le_ctr, ghash_acc, walk.src.virt.addr,
+			       walk.dst.virt.addr, nbytes, flags);
+		le_ctr[0] += nbytes / AES_BLOCK_SIZE;
+		kernel_fpu_end();
+		err = skcipher_walk_done(&walk, walk.nbytes - nbytes);
+		if (err)
+			return err;
+		kernel_fpu_begin();
+	}
+	/* Last segment: process all remaining data. */
+	aes_gcm_update(key, le_ctr, ghash_acc, walk.src.virt.addr,
+		       walk.dst.virt.addr, nbytes, flags);
+	/*
+	 * The low word of the counter isn't used by the finalize, so there's no
+	 * need to increment it here.
+	 */
+
+	/* Finalize */
+	taglen = crypto_aead_authsize(tfm);
+	if (flags & FLAG_ENC) {
+		/* Finish computing the auth tag. */
+		aes_gcm_enc_final(key, le_ctr, ghash_acc, assoclen,
+				  req->cryptlen, flags);
+
+		/* Store the computed auth tag in the dst scatterlist. */
+		scatterwalk_map_and_copy(ghash_acc, req->dst, req->assoclen +
+					 req->cryptlen, taglen, 1);
+	} else {
+		unsigned int datalen = req->cryptlen - taglen;
+		u8 tag[16];
+
+		/* Get the transmitted auth tag from the src scatterlist. */
+		scatterwalk_map_and_copy(tag, req->src, req->assoclen + datalen,
+					 taglen, 0);
+		/*
+		 * Finish computing the auth tag and compare it to the
+		 * transmitted one.  The assembly function does the actual tag
+		 * comparison.  Here, just check the boolean result.
+		 */
+		if (!aes_gcm_dec_final(key, le_ctr, ghash_acc, assoclen,
+				       datalen, tag, taglen, flags))
+			err = -EBADMSG;
+	}
+	kernel_fpu_end();
+	if (nbytes)
+		skcipher_walk_done(&walk, 0);
+	return err;
+}
+
+#define DEFINE_GCM_ALGS(suffix, flags, generic_driver_name, rfc_driver_name,   \
+			ctxsize, priority)				       \
+									       \
+static int gcm_setkey_##suffix(struct crypto_aead *tfm, const u8 *raw_key,     \
+			       unsigned int keylen)			       \
+{									       \
+	return gcm_setkey(tfm, raw_key, keylen, (flags));		       \
+}									       \
+									       \
+static int gcm_encrypt_##suffix(struct aead_request *req)		       \
+{									       \
+	return gcm_crypt(req, (flags) | FLAG_ENC);			       \
+}									       \
+									       \
+static int gcm_decrypt_##suffix(struct aead_request *req)		       \
+{									       \
+	return gcm_crypt(req, (flags));					       \
+}									       \
+									       \
+static int rfc4106_setkey_##suffix(struct crypto_aead *tfm, const u8 *raw_key, \
+				   unsigned int keylen)			       \
+{									       \
+	return gcm_setkey(tfm, raw_key, keylen, (flags) | FLAG_RFC4106);       \
+}									       \
+									       \
+static int rfc4106_encrypt_##suffix(struct aead_request *req)		       \
+{									       \
+	return gcm_crypt(req, (flags) | FLAG_RFC4106 | FLAG_ENC);	       \
+}									       \
+									       \
+static int rfc4106_decrypt_##suffix(struct aead_request *req)		       \
+{									       \
+	return gcm_crypt(req, (flags) | FLAG_RFC4106);			       \
+}									       \
+									       \
+static struct aead_alg aes_gcm_algs_##suffix[] = { {			       \
+	.setkey			= gcm_setkey_##suffix,			       \
+	.setauthsize		= generic_gcmaes_set_authsize,		       \
+	.encrypt		= gcm_encrypt_##suffix,			       \
+	.decrypt		= gcm_decrypt_##suffix,			       \
+	.ivsize			= GCM_AES_IV_SIZE,			       \
+	.chunksize		= AES_BLOCK_SIZE,			       \
+	.maxauthsize		= 16,					       \
+	.base = {							       \
+		.cra_name		= "gcm(aes)",			       \
+		.cra_driver_name	= generic_driver_name,		       \
+		.cra_priority		= (priority),			       \
+		.cra_blocksize		= 1,				       \
+		.cra_ctxsize		= (ctxsize),			       \
+		.cra_module		= THIS_MODULE,			       \
+	},								       \
+}, {									       \
+	.setkey			= rfc4106_setkey_##suffix,		       \
+	.setauthsize		= common_rfc4106_set_authsize,		       \
+	.encrypt		= rfc4106_encrypt_##suffix,		       \
+	.decrypt		= rfc4106_decrypt_##suffix,		       \
+	.ivsize			= GCM_RFC4106_IV_SIZE,			       \
+	.chunksize		= AES_BLOCK_SIZE,			       \
+	.maxauthsize		= 16,					       \
+	.base = {							       \
+		.cra_name		= "rfc4106(gcm(aes))",		       \
+		.cra_driver_name	= rfc_driver_name,		       \
+		.cra_priority		= (priority),			       \
+		.cra_blocksize		= 1,				       \
+		.cra_ctxsize		= (ctxsize),			       \
+		.cra_module		= THIS_MODULE,			       \
+	},								       \
+} }
+
+/* aes_gcm_algs_aesni */
+DEFINE_GCM_ALGS(aesni, /* no flags */ 0,
+		"generic-gcm-aesni", "rfc4106-gcm-aesni",
+		AES_GCM_KEY_AESNI_SIZE, 400);
+
+/* aes_gcm_algs_aesni_avx */
+DEFINE_GCM_ALGS(aesni_avx, FLAG_AVX,
+		"generic-gcm-aesni-avx", "rfc4106-gcm-aesni-avx",
+		AES_GCM_KEY_AESNI_SIZE, 500);
+
+/* aes_gcm_algs_vaes_avx2 */
+DEFINE_GCM_ALGS(vaes_avx2, FLAG_VAES_AVX2,
+		"generic-gcm-vaes-avx2", "rfc4106-gcm-vaes-avx2",
+		AES_GCM_KEY_VAES_AVX2_SIZE, 600);
+
+/* aes_gcm_algs_vaes_avx512 */
+DEFINE_GCM_ALGS(vaes_avx512, FLAG_VAES_AVX512,
+		"generic-gcm-vaes-avx512", "rfc4106-gcm-vaes-avx512",
+		AES_GCM_KEY_VAES_AVX512_SIZE, 800);
+
+static int __init register_avx_algs(void)
+{
+	int err;
+
+	if (!boot_cpu_has(X86_FEATURE_AVX))
+		return 0;
+	err = crypto_register_aeads(aes_gcm_algs_aesni_avx,
+				    ARRAY_SIZE(aes_gcm_algs_aesni_avx));
+	if (err)
+		return err;
+	/*
+	 * Note: not all the algorithms registered below actually require
+	 * VPCLMULQDQ.  But in practice every CPU with VAES also has VPCLMULQDQ.
+	 * Similarly, the assembler support was added at about the same time.
+	 * For simplicity, just always check for VAES and VPCLMULQDQ together.
+	 */
+	if (!boot_cpu_has(X86_FEATURE_AVX2) ||
+	    !boot_cpu_has(X86_FEATURE_VAES) ||
+	    !boot_cpu_has(X86_FEATURE_VPCLMULQDQ) ||
+	    !boot_cpu_has(X86_FEATURE_PCLMULQDQ))
+		return 0;
+	err = crypto_register_aeads(aes_gcm_algs_vaes_avx2,
+				    ARRAY_SIZE(aes_gcm_algs_vaes_avx2));
+	if (err)
+		return err;
+
+	if (!boot_cpu_has(X86_FEATURE_AVX512BW) ||
+	    !boot_cpu_has(X86_FEATURE_AVX512VL) ||
+	    !boot_cpu_has(X86_FEATURE_BMI2))
+		return 0;
+
+	if (boot_cpu_has(X86_FEATURE_PREFER_YMM)) {
+		int i;
+
+		for (i = 0; i < ARRAY_SIZE(aes_gcm_algs_vaes_avx512); i++)
+			aes_gcm_algs_vaes_avx512[i].base.cra_priority = 1;
+	}
+
+	err = crypto_register_aeads(aes_gcm_algs_vaes_avx512,
+				    ARRAY_SIZE(aes_gcm_algs_vaes_avx512));
+	if (err)
+		return err;
+
+	return 0;
+}
+
+#define unregister_aeads(A) \
+	if (refcount_read(&(A)[0].base.cra_refcnt) != 0) \
+		crypto_unregister_aeads((A), ARRAY_SIZE(A))
+
+static void unregister_avx_algs(void)
+{
+	unregister_aeads(aes_gcm_algs_aesni_avx);
+	unregister_aeads(aes_gcm_algs_vaes_avx2);
+	unregister_aeads(aes_gcm_algs_vaes_avx512);
+}
 
 static const struct x86_cpu_id aesni_cpu_id[] = {
-	X86_FEATURE_MATCH(X86_FEATURE_AES),
+	X86_MATCH_FEATURE(X86_FEATURE_AES, NULL),
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, aesni_cpu_id);
@@ -1354,23 +854,35 @@ static int __init aesni_init(void)
 	if (!x86_match_cpu(aesni_cpu_id))
 		return -ENODEV;
 
-	err = crypto_fpu_init();
+	err = crypto_register_aeads(aes_gcm_algs_aesni,
+				    ARRAY_SIZE(aes_gcm_algs_aesni));
 	if (err)
 		return err;
 
-	return crypto_register_algs(aesni_algs, ARRAY_SIZE(aesni_algs));
+	err = register_avx_algs();
+	if (err)
+		goto unregister_avx;
+
+	return 0;
+
+unregister_avx:
+	unregister_avx_algs();
+	crypto_unregister_aeads(aes_gcm_algs_aesni,
+				ARRAY_SIZE(aes_gcm_algs_aesni));
+	return err;
 }
 
 static void __exit aesni_exit(void)
 {
-	crypto_unregister_algs(aesni_algs, ARRAY_SIZE(aesni_algs));
-
-	crypto_fpu_exit();
+	crypto_unregister_aeads(aes_gcm_algs_aesni,
+				ARRAY_SIZE(aes_gcm_algs_aesni));
+	unregister_avx_algs();
 }
 
 module_init(aesni_init);
 module_exit(aesni_exit);
 
-MODULE_DESCRIPTION("Rijndael (AES) Cipher Algorithm, Intel AES-NI instructions optimized");
+MODULE_DESCRIPTION("AES-GCM, optimized with AES-NI or VAES instructions");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("aes");
+MODULE_ALIAS_CRYPTO("gcm(aes)");
+MODULE_ALIAS_CRYPTO("rfc4106(gcm(aes))");

@@ -1,0 +1,52 @@
+#
+# Microsoft Azure network device configuration
+#
+
+config NET_VENDOR_MICROSOFT
+	bool "Microsoft Network Devices"
+	default y
+	help
+	  If you have a network (Ethernet) device belonging to this class, say Y.
+
+	  Note that the answer to this question doesn't directly affect the
+	  kernel: saying N will just cause the configurator to skip the
+	  question about Microsoft network devices. If you say Y, you will be
+	  asked for your specific device in the following question.
+
+if NET_VENDOR_MICROSOFT
+
+config MICROSOFT_GDMA_CORE
+	tristate
+	select AUXILIARY_BUS
+	select DIMLIB
+	select PAGE_POOL
+	select NET_SHAPER
+
+config MICROSOFT_MANA
+	tristate "Microsoft Azure Network Adapter (MANA) support"
+	depends on PCI_MSI
+	depends on X86_64 || ARM64
+	depends on PCI_HYPERV
+	select MICROSOFT_GDMA_CORE
+	help
+	  This driver supports Microsoft Azure Network Adapter (MANA).
+	  So far, the driver is only supported on X86_64.
+
+	  To compile this driver as a module, choose M here.
+	  The module will be called mana.
+
+config MICROSOFT_MANA_CDX
+	tristate "Microsoft Azure Network Adapter (MANA) support for the CDX bus"
+	depends on CDX_BUS
+	depends on GENERIC_MSI_IRQ
+	depends on 64BIT && !CPU_BIG_ENDIAN
+	select MICROSOFT_GDMA_CORE
+	help
+	  This driver supports the Microsoft Azure Network Adapter (MANA) on
+	  systems where it is integrated into the SoC and presented on the CDX
+	  bus rather than discovered over PCI.
+
+	  To compile this driver as a module, choose M here.
+	  The module will be called mana_cdx.
+
+endif #NET_VENDOR_MICROSOFT

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Force feedback support for various HID compliant devices by ThrustMaster:
  *    ThrustMaster FireStorm Dual Power 2
@@ -12,27 +13,17 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/hid.h>
 #include <linux/input.h>
+#include <linux/math64.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 
 #include "hid-ids.h"
+
+#define THRUSTMASTER_DEVICE_ID_2_IN_1_DT	0xb320
 
 static const signed short ff_rumble[] = {
 	FF_RUMBLE,
@@ -57,9 +48,9 @@ struct tmff_device {
 /* Changes values from 0 to 0xffff into values from minimum to maximum */
 static inline int tmff_scale_u16(unsigned int in, int minimum, int maximum)
 {
-	int ret;
+	s64 ret;
 
-	ret = (in * (maximum - minimum) / 0xffff) + minimum;
+	ret = div_s64((s64)in * ((s64)maximum - minimum), 0xffff) + minimum;
 	if (ret < minimum)
 		return minimum;
 	if (ret > maximum)
@@ -70,9 +61,9 @@ static inline int tmff_scale_u16(unsigned int in, int minimum, int maximum)
 /* Changes values from -0x80 to 0x7f into values from minimum to maximum */
 static inline int tmff_scale_s8(int in, int minimum, int maximum)
 {
-	int ret;
+	s64 ret;
 
-	ret = (((in + 0x80) * (maximum - minimum)) / 0xff) + minimum;
+	ret = div_s64((s64)(in + 0x80) * ((s64)maximum - minimum), 0xff) + minimum;
 	if (ret < minimum)
 		return minimum;
 	if (ret > maximum)
@@ -112,6 +103,10 @@ static int tmff_play(struct input_dev *dev, void *data,
 					ff_field->logical_minimum,
 					ff_field->logical_maximum);
 
+		/* 2-in-1 strong motor is left */
+		if (hid->product == THRUSTMASTER_DEVICE_ID_2_IN_1_DT)
+			swap(left, right);
+
 		dbg_hid("(left,right)=(%08x, %08x)\n", left, right);
 		ff_field->value[0] = left;
 		ff_field->value[1] = right;
@@ -121,18 +116,27 @@ static int tmff_play(struct input_dev *dev, void *data,
 	return 0;
 }
 
-static int tmff_init(struct hid_device *hid, const signed short *ff_bits)
+static int tm_input_configured(struct hid_device *hid, struct hid_input *hidinput)
 {
 	struct tmff_device *tmff;
 	struct hid_report *report;
 	struct list_head *report_list;
-	struct hid_input *hidinput = list_entry(hid->inputs.next,
-							struct hid_input, list);
 	struct input_dev *input_dev = hidinput->input;
+	const struct hid_device_id *id;
+	const signed short *ff_bits;
 	int error;
 	int i;
 
-	tmff = kzalloc(sizeof(struct tmff_device), GFP_KERNEL);
+	if (!list_is_first(&hidinput->list, &hid->inputs))
+		return 0;
+
+	id = hid_match_device(hid, hid->driver);
+	if (!id)
+		return -ENODEV;
+
+	ff_bits = (void *)id->driver_data;
+
+	tmff = kzalloc_obj(struct tmff_device);
 	if (!tmff)
 		return -ENOMEM;
 
@@ -204,44 +208,26 @@ fail:
 	return error;
 }
 #else
-static inline int tmff_init(struct hid_device *hid, const signed short *ff_bits)
+static inline int tm_input_configured(struct hid_device *hid,
+				      struct hid_input *hidinput)
 {
 	return 0;
 }
 #endif
-
-static int tm_probe(struct hid_device *hdev, const struct hid_device_id *id)
-{
-	int ret;
-
-	ret = hid_parse(hdev);
-	if (ret) {
-		hid_err(hdev, "parse failed\n");
-		goto err;
-	}
-
-	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT & ~HID_CONNECT_FF);
-	if (ret) {
-		hid_err(hdev, "hw start failed\n");
-		goto err;
-	}
-
-	tmff_init(hdev, (void *)id->driver_data);
-
-	return 0;
-err:
-	return ret;
-}
 
 static const struct hid_device_id tm_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_THRUSTMASTER, 0xb300),
 		.driver_data = (unsigned long)ff_rumble },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_THRUSTMASTER, 0xb304),   /* FireStorm Dual Power 2 (and 3) */
 		.driver_data = (unsigned long)ff_rumble },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_THRUSTMASTER, THRUSTMASTER_DEVICE_ID_2_IN_1_DT),   /* Dual Trigger 2-in-1 */
+		.driver_data = (unsigned long)ff_rumble },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_THRUSTMASTER, 0xb323),   /* Dual Trigger 3-in-1 (PC Mode) */
 		.driver_data = (unsigned long)ff_rumble },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_THRUSTMASTER, 0xb324),   /* Dual Trigger 3-in-1 (PS3 Mode) */
 		.driver_data = (unsigned long)ff_rumble },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_THRUSTMASTER, 0xb605),   /* NASCAR PRO FF2 Wheel */
+		.driver_data = (unsigned long)ff_joystick },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_THRUSTMASTER, 0xb651),	/* FGT Rumble Force Wheel */
 		.driver_data = (unsigned long)ff_rumble },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_THRUSTMASTER, 0xb653),	/* RGT Force Feedback CLUTCH Raging Wheel */
@@ -257,8 +243,9 @@ MODULE_DEVICE_TABLE(hid, tm_devices);
 static struct hid_driver tm_driver = {
 	.name = "thrustmaster",
 	.id_table = tm_devices,
-	.probe = tm_probe,
+	.input_configured = tm_input_configured,
 };
 module_hid_driver(tm_driver);
 
+MODULE_DESCRIPTION("Force feedback support for various HID compliant devices by ThrustMaster");
 MODULE_LICENSE("GPL");

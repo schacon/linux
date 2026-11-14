@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * em_canid.c  Ematch rule to match CAN frames according to their CAN IDs
- *
- *              This program is free software; you can distribute it and/or
- *              modify it under the terms of the GNU General Public License
- *              as published by the Free Software Foundation; either version
- *              2 of the License, or (at your option) any later version.
  *
  * Idea:       Oliver Hartkopp <oliver.hartkopp@volkswagen.de>
  * Copyright:  (c) 2011 Czech Technical University in Prague
@@ -44,6 +40,7 @@ struct canid_match {
 
 /**
  * em_canid_get_id() - Extracts Can ID out of the sk_buff structure.
+ * @skb: buffer to extract Can ID from
  */
 static canid_t em_canid_get_id(struct sk_buff *skb)
 {
@@ -102,6 +99,9 @@ static int em_canid_match(struct sk_buff *skb, struct tcf_ematch *m,
 	int i;
 	const struct can_filter *lp;
 
+	if (!pskb_may_pull(skb, CAN_MTU))
+		return 0;
+
 	can_id = em_canid_get_id(skb);
 
 	if (can_id & CAN_EFF_FLAG) {
@@ -120,12 +120,11 @@ static int em_canid_match(struct sk_buff *skb, struct tcf_ematch *m,
 	return match;
 }
 
-static int em_canid_change(struct tcf_proto *tp, void *data, int len,
+static int em_canid_change(struct net *net, void *data, int len,
 			  struct tcf_ematch *m)
 {
 	struct can_filter *conf = data; /* Array with rules */
 	struct canid_match *cm;
-	struct canid_match *cm_old = (struct canid_match *)m->data;
 	int i;
 
 	if (!len)
@@ -181,16 +180,10 @@ static int em_canid_change(struct tcf_proto *tp, void *data, int len,
 
 	m->datalen = sizeof(struct canid_match) + len;
 	m->data = (unsigned long)cm;
-
-	if (cm_old != NULL) {
-		pr_err("canid: Configuring an existing ematch!\n");
-		kfree(cm_old);
-	}
-
 	return 0;
 }
 
-static void em_canid_destroy(struct tcf_proto *tp, struct tcf_ematch *m)
+static void em_canid_destroy(struct tcf_ematch *m)
 {
 	struct canid_match *cm = em_canid_priv(m);
 
@@ -232,6 +225,7 @@ static void __exit exit_em_canid(void)
 	tcf_em_unregister(&em_canid_ops);
 }
 
+MODULE_DESCRIPTION("ematch classifier to match CAN IDs embedded in skb CAN frames");
 MODULE_LICENSE("GPL");
 
 module_init(init_em_canid);

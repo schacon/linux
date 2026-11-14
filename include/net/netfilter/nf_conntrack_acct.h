@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * (C) 2008 Krzysztof Piotr Oledzki <ole@ans.pl>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef _NF_CONNTRACK_ACCT_H
@@ -19,17 +16,22 @@ struct nf_conn_counter {
 	atomic64_t bytes;
 };
 
+struct nf_conn_acct {
+	struct nf_conn_counter counter[IP_CT_DIR_MAX];
+};
+
 static inline
-struct nf_conn_counter *nf_conn_acct_find(const struct nf_conn *ct)
+struct nf_conn_acct *nf_conn_acct_find(const struct nf_conn *ct)
 {
 	return nf_ct_ext_find(ct, NF_CT_EXT_ACCT);
 }
 
 static inline
-struct nf_conn_counter *nf_ct_acct_ext_add(struct nf_conn *ct, gfp_t gfp)
+struct nf_conn_acct *nf_ct_acct_ext_add(struct nf_conn *ct, gfp_t gfp)
 {
+#if IS_ENABLED(CONFIG_NF_CONNTRACK)
 	struct net *net = nf_ct_net(ct);
-	struct nf_conn_counter *acct;
+	struct nf_conn_acct *acct;
 
 	if (!net->ct.sysctl_acct)
 		return NULL;
@@ -40,26 +42,40 @@ struct nf_conn_counter *nf_ct_acct_ext_add(struct nf_conn *ct, gfp_t gfp)
 
 
 	return acct;
-};
-
-extern unsigned int
-seq_print_acct(struct seq_file *s, const struct nf_conn *ct, int dir);
+#else
+	return NULL;
+#endif
+}
 
 /* Check if connection tracking accounting is enabled */
 static inline bool nf_ct_acct_enabled(struct net *net)
 {
+#if IS_ENABLED(CONFIG_NF_CONNTRACK)
 	return net->ct.sysctl_acct != 0;
+#else
+	return false;
+#endif
 }
 
 /* Enable/disable connection tracking accounting */
 static inline void nf_ct_set_acct(struct net *net, bool enable)
 {
+#if IS_ENABLED(CONFIG_NF_CONNTRACK)
 	net->ct.sysctl_acct = enable;
+#endif
 }
 
-extern int nf_conntrack_acct_pernet_init(struct net *net);
-extern void nf_conntrack_acct_pernet_fini(struct net *net);
+void nf_ct_acct_add(struct nf_conn *ct, u32 dir, unsigned int packets,
+		    unsigned int bytes);
 
-extern int nf_conntrack_acct_init(void);
-extern void nf_conntrack_acct_fini(void);
+static inline void nf_ct_acct_update(struct nf_conn *ct, u32 dir,
+				     unsigned int bytes)
+{
+#if IS_ENABLED(CONFIG_NF_CONNTRACK)
+	nf_ct_acct_add(ct, dir, 1, bytes);
+#endif
+}
+
+void nf_conntrack_acct_pernet_init(struct net *net);
+
 #endif /* _NF_CONNTRACK_ACCT_H */

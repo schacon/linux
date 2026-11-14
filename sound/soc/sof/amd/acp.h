@@ -1,0 +1,517 @@
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
+/*
+ * This file is provided under a dual BSD/GPLv2 license. When using or
+ * redistributing this file, you may do so under either license.
+ *
+ * Copyright(c) 2021, 2023 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * Author: Ajit Kumar Pandey <AjitKumar.Pandey@amd.com>
+ */
+
+#ifndef __SOF_AMD_ACP_H
+#define __SOF_AMD_ACP_H
+
+#include <linux/dmi.h>
+#include <linux/soundwire/sdw_amd.h>
+#include "../sof-priv.h"
+#include "../sof-audio.h"
+
+#define ACP_MAX_STREAM	8
+
+#define ACP_DSP_BAR	0
+
+#define ACP_HW_SEM_RETRY_COUNT			10000
+#define ACP_REG_POLL_INTERVAL                   500
+#define ACP_REG_POLL_TIMEOUT_US                 2000
+#define ACP_DMA_COMPLETE_TIMEOUT_US		5000
+
+#define ACP3X_PGFSM_CNTL_POWER_ON_MASK		0x01
+#define ACP3X_PGFSM_STATUS_MASK			0x03
+#define ACP6X_PGFSM_CNTL_POWER_ON_MASK		0x07
+#define ACP6X_PGFSM_STATUS_MASK			0x0F
+#define ACP70_PGFSM_CNTL_POWER_ON_MASK		0x1F
+#define ACP70_PGFSM_STATUS_MASK			0xFF
+
+#define ACP_POWERED_ON				0x00
+#define ACP_ASSERT_RESET			0x01
+#define ACP_RELEASE_RESET			0x00
+#define ACP_SOFT_RESET_DONE_MASK		0x00010001
+#define ACP_DSP_ASSERT_RESET			0x04
+#define ACP_DSP_RELEASE_RESET			0x00
+#define ACP_DSP_SOFT_RESET_DONE_MASK		0x00050004
+
+#define ACP_DSP_INTR_EN_MASK			0x00000001
+#define ACP3X_SRAM_PTE_OFFSET			0x02050000
+#define ACP5X_SRAM_PTE_OFFSET			0x02050000
+#define ACP6X_SRAM_PTE_OFFSET			0x03800000
+#define ACP70_SRAM_PTE_OFFSET			ACP6X_SRAM_PTE_OFFSET
+#define PAGE_SIZE_4K_ENABLE			0x2
+#define ACP_PAGE_SIZE				0x1000
+#define ACP_DMA_CH_RUN				0x02
+#define ACP_MAX_DESC_CNT			0x02
+#define ACP_DSP_RUN				0x00
+#define DSP_FW_RUN_ENABLE			0x01
+#define ACP_SHA_RUN				0x01
+#define ACP_SHA_RESET				0x02
+#define ACP_SHA_HEADER				0x01
+/* SHA_IOC_En (bit 2): interrupt-on-completion to ASP; must be set alongside sha_run */
+#define ACP_SHA_IOC_EN				0x04
+#define ACP_SHA_RUN_WITH_IOC			(ACP_SHA_RUN | ACP_SHA_IOC_EN)
+#define ACP_DMA_CH_RST				0x01
+#define ACP_DMA_CH_GRACEFUL_RST_EN		0x10
+#define ACP_ATU_CACHE_INVALID			0x01
+#define ACP_MAX_DESC				128
+#define ACPBUS_REG_BASE_OFFSET			ACP_DMA_CNTL_0
+
+#define ACP_DEFAULT_DRAM_LENGTH			0x00080000
+#define ACP3X_SCRATCH_MEMORY_ADDRESS		0x02050000
+#define ACP_SYSTEM_MEMORY_WINDOW		0x4000000
+#define ACP_IRAM_BASE_ADDRESS			0x000000
+#define ACP_DRAM_BASE_ADDRESS			0x01000000
+#define ACP_DRAM_PAGE_COUNT			128
+#define ACP_SRAM_BASE_ADDRESS			0x3806000
+#define ACP7X_SRAM_BASE_ADDRESS			0x380C000
+#define ACP_DSP_TO_HOST_IRQ			0x04
+
+#define ACP_RN_PCI_ID				0x01
+#define ACP_VANGOGH_PCI_ID			0x50
+#define ACP_RMB_PCI_ID				0x6F
+#define ACP63_PCI_ID				0x63
+#define ACP70_PCI_ID				0x70
+#define ACP71_PCI_ID				0x71
+#define ACP72_PCI_ID				0x72
+#define ACP7B_PCI_ID				0x7B
+#define ACP7F_PCI_ID				0x7F
+
+#define ACP7X_PGFSM_CNTL_POWER_ON_MASK		0x7F
+#define ACP7X_PGFSM_STATUS_MASK			0xFFF
+#define ACP7X_SRAM_PTE_OFFSET			ACP6X_SRAM_PTE_OFFSET
+
+#define HOST_BRIDGE_CZN				0x1630
+#define HOST_BRIDGE_VGH				0x1645
+#define HOST_BRIDGE_RMB				0x14B5
+#define HOST_BRIDGE_ACP63			0x14E8
+#define HOST_BRIDGE_ACP70			0x1507
+#define ACP_SHA_STAT				0x8000
+#define ACP_PSP_TIMEOUT_US			1000000
+#define ACP_EXT_INTR_ERROR_STAT			0x20000000
+#define MP0_C2PMSG_114_REG			0x3810AC8
+#define MP0_C2PMSG_73_REG			0x3810A24
+#define MP0_C2PMSG_63_REG			0x38109FC
+#define MP0_C2PMSG_63_FW_SIGN_ALT		BIT(6)
+#define MBOX_ACP_SHA_DMA_COMMAND		0x70000
+#define MBOX_ACP_IRAM_DRAM_FENCE_COMMAND	0x80000
+#define MBOX_DELAY_US				1000
+#define MBOX_READY_MASK				0x80000000
+#define MBOX_STATUS_MASK			0xFFFF
+#define MBOX_ISREADY_FLAG			0x40000000
+#define IRAM_DRAM_FENCE_0			0X0
+#define IRAM_DRAM_FENCE_1			0X01
+#define IRAM_DRAM_FENCE_2			0X02
+
+#define BOX_SIZE_512				0x200
+#define BOX_SIZE_1024				0x400
+
+#define EXCEPT_MAX_HDR_SIZE			0x400
+#define AMD_STACK_DUMP_SIZE			32
+
+#define SRAM1_SIZE				0x280000
+#define PROBE_STATUS_BIT			BIT(31)
+
+#define ACP_FIRMWARE_SIGNATURE			0x100
+#define ACP_IMAGE_HEADER_SIZE			ACP_FIRMWARE_SIGNATURE
+#define ACP_IMAGE_HDR_SIZE_FW_SIGNED_OFF	0x14
+#define ACP_ASP_SIGNATURE_LENGTH		512
+
+/*
+ * ACP7.B/7.F carveout: 32 MB region mapped at 2 MB page granularity.
+ * Use AXI2AXIATU_PAGE_SIZE_Mask2MB (value 0x0) for carveout ATU
+ * groups giving 32MB / 2MB = 16 PTEs. 4KB pages would require 8192 PTEs and
+ * is not how the hardware carveout path is configured.
+ */
+#define ACP7X_CARVEOUT_MAX_SIZE			(32 * SZ_1M)
+#define ACP7X_CARVEOUT_PAGE_SIZE		(2 * SZ_1M)
+#define ACP7X_CARVEOUT_PAGE_COUNT		(ACP7X_CARVEOUT_MAX_SIZE / ACP7X_CARVEOUT_PAGE_SIZE)
+/*
+ * PTE high-word flags for ATU entries:
+ *   bit[31]: PAGE_Enable  - entry is valid
+ *   bit[30]: MALL_Enable  - route accesses through carveout (MALL) memory,
+ *            not standard DRAM. Required for ASP to recognise the SHA DMA
+ *            source as within the carveout and grant ACP_SHA_DSP_FW_QUALIFIER.
+ *            (PAGE_Enable | MALL_Enable ATU entry flags)
+ */
+#define ACP_ATU_PTE_PAGE_ENABLE			BIT(31)
+#define ACP_ATU_PTE_MALL_ENABLE			BIT(30)
+#define ACP_ATU_PTE_CARVEOUT_FLAGS		(ACP_ATU_PTE_PAGE_ENABLE | ACP_ATU_PTE_MALL_ENABLE)
+
+#define ACP_ERROR_IRQ_MASK			BIT(29)
+#define ACP_SDW0_IRQ_MASK			BIT(21)
+#define ACP_SDW1_IRQ_MASK			BIT(2)
+#define SDW_ACPI_ADDR_ACP63			5
+#define SDW_ACPI_ADDR_ACP70			SDW_ACPI_ADDR_ACP63
+#define ACP_DEFAULT_SRAM_LENGTH			0x00080000
+#define ACP_SRAM_PAGE_COUNT			128
+#define ACP6X_SDW_MAX_MANAGER_COUNT		2
+#define ACP70_SDW_MAX_MANAGER_COUNT		ACP6X_SDW_MAX_MANAGER_COUNT
+/* ACPI _DSD acp-audio-ep-port values for PDM controller selection */
+#define ACP_DEV_PORT_PDM			4
+#define ACP_DEV_PORT_PDM2			5
+#define SDW_ACPI_ADDR_ACP7X			SDW_ACPI_ADDR_ACP63
+#define ACP7X_SDW_MAX_MANAGER_COUNT		4
+
+/* ACPI child device address for the ACP7x PDM/DMIC device */
+#define ACP7X_DMIC_ADDR				2
+#define ACP_DSP_MSG_SET				1
+#define ACP_DSP_ACK_SET				1
+
+/*
+ * ATU PTE group ACP logical address offsets.
+ * Each group covers 8 MB (0x00800000).  Groups 1-8 are used for PCM
+ * streams; groups 9-16 are extended groups.
+ *
+ *   GRP_N_OFFSET = (N - 1) * 8 MB
+ */
+#define PTE_GRP1_OFFSET		0x00000000
+#define PTE_GRP2_OFFSET		0x00800000
+#define PTE_GRP3_OFFSET		0x01000000
+#define PTE_GRP4_OFFSET		0x01800000
+#define PTE_GRP5_OFFSET		0x02000000
+#define PTE_GRP6_OFFSET		0x02800000
+#define PTE_GRP7_OFFSET		0x03000000
+#define PTE_GRP8_OFFSET		0x03800000
+#define PTE_GRP9_OFFSET		0x04000000
+#define PTE_GRP10_OFFSET	0x04800000
+#define PTE_GRP11_OFFSET	0x05000000
+#define PTE_GRP12_OFFSET	0x05800000
+#define PTE_GRP13_OFFSET	0x06000000
+#define PTE_GRP14_OFFSET	0x06800000
+#define PTE_GRP15_OFFSET	0x07000000
+#define PTE_GRP16_OFFSET	0x07800000
+
+enum clock_source {
+	ACP_CLOCK_96M = 0,
+	ACP_CLOCK_48M,
+	ACP_CLOCK_24M,
+	ACP_CLOCK_ACLK,
+	ACP_CLOCK_MCLK,
+};
+
+struct  acp_atu_grp_pte {
+	u32 low;
+	u32 high;
+};
+
+/* ASP mailbox payload for GET_CARVEOUT_ADDR command (0x04) */
+struct asp_get_carveout_payload {
+	u32 cookie;		/* [0x00] Driver: ASP_MBOX_COOKIE */
+	u32 status;		/* [0x04] ASP:    0 = success */
+	u64 carveout_addr;	/* [0x08] ASP:    carveout physical base address */
+	u32 carveout_size;	/* [0x10] ASP:    ACP_MALL_SIZE register value */
+	u32 mall_addr_valid;	/* [0x14] ASP:    ACP_MALL_ADDR_VALID register value */
+	u32 mall_valid;		/* [0x18] ASP:    ACP_MALL_VALID register value */
+};
+
+/*
+ * ASP mailbox payload for VALIDATE_IMAGE command (0x01).
+ * Driver fills src/dest fields; ASP fills carveout_dest_addr and status.
+ */
+struct asp_validate_image_payload {
+	u32 cookie;		/* [0x00] Driver: ASP_MBOX_COOKIE */
+	u32 status;		/* [0x04] ASP:    0 = success */
+	u64 carveout_dest_addr;	/* [0x08] ASP:    physical addr of raw binary in carveout */
+	u64 dest_offset;	/* [0x10] Driver: destination offset within carveout */
+	u64 src_phys_addr;	/* [0x18] Driver: signed FW source physical addr in DDR */
+	u32 fw_image_size;	/* [0x20] Driver: total signed image size in bytes */
+};
+
+union dma_tx_cnt {
+	struct {
+		unsigned int count : 19;
+		unsigned int reserved : 12;
+		unsigned ioc : 1;
+	} bitfields, bits;
+	unsigned int u32_all;
+	signed int i32_all;
+};
+
+struct dma_descriptor {
+	unsigned int src_addr;
+	unsigned int dest_addr;
+	union dma_tx_cnt tx_cnt;
+	unsigned int reserved;
+};
+
+/* Scratch memory structure for communication b/w host and dsp */
+struct  scratch_ipc_conf {
+	/* Debug memory */
+	u8 sof_debug_box[1024];
+	/* Exception memory*/
+	u8 sof_except_box[1024];
+	/* Stream buffer */
+	u8 sof_stream_box[1024];
+	/* Trace buffer */
+	u8 sof_trace_box[1024];
+	/* Host msg flag */
+	u32 sof_host_msg_write;
+	/* Host ack flag*/
+	u32 sof_host_ack_write;
+	/* DSP msg flag */
+	u32 sof_dsp_msg_write;
+	/* Dsp ack flag */
+	u32 sof_dsp_ack_write;
+};
+
+struct  scratch_reg_conf {
+	struct scratch_ipc_conf info;
+	struct acp_atu_grp_pte grp1_pte[16];
+	struct acp_atu_grp_pte grp2_pte[16];
+	struct acp_atu_grp_pte grp3_pte[16];
+	struct acp_atu_grp_pte grp4_pte[16];
+	struct acp_atu_grp_pte grp5_pte[16];
+	struct acp_atu_grp_pte grp6_pte[16];
+	struct acp_atu_grp_pte grp7_pte[16];
+	struct acp_atu_grp_pte grp8_pte[16];
+	struct dma_descriptor dma_desc[64];
+	unsigned int reg_offset[8];
+	unsigned int buf_size[8];
+	u8 acp_tx_fifo_buf[256];
+	u8 acp_rx_fifo_buf[256];
+	unsigned int    reserve[];
+};
+
+struct acp_dsp_stream {
+	struct list_head list;
+	struct snd_sof_dev *sdev;
+	struct snd_pcm_substream *substream;
+	struct snd_dma_buffer *dmab;
+	int num_pages;
+	int stream_tag;
+	int active;
+	unsigned int reg_offset;
+	size_t posn_offset;
+	struct snd_compr_stream *cstream;
+	u64 cstream_posn;
+};
+
+struct sof_amd_acp_desc {
+	const char *name;
+	u32 pgfsm_base;
+	u32 ext_intr_enb;
+	u32 ext_intr_cntl;
+	u32 ext_intr_stat;
+	u32 ext_intr_stat1;
+	u32 dsp_intr_base;
+	u32 sram_pte_offset;
+	u32 hw_semaphore_offset;
+	u32 acp_clkmux_sel;
+	u32 fusion_dsp_offset;
+	u32 probe_reg_offset;
+	u32 reg_start_addr;
+	u32 reg_end_addr;
+	u32 acp_error_stat;
+	u32 acp_sw0_i2s_err_reason;
+	u32 sdw_max_link_count;
+	u64 sdw_acpi_dev_addr;
+};
+
+struct acp_quirk_entry {
+	bool signed_fw_image;
+	bool skip_iram_dram_size_mod;
+	bool post_fw_run_delay;
+};
+
+/* Common device data struct for ACP devices */
+struct acp_dev_data {
+	struct snd_sof_dev  *dev;
+	const struct firmware *fw_dbin;
+	/* DMIC device */
+	struct platform_device *dmic_dev;
+	/* mutex lock to protect ACP common registers access */
+	struct mutex acp_lock;
+	/* ACPI information stored between scan and probe steps */
+	struct sdw_amd_acpi_info info;
+	/* sdw context allocated by SoundWire driver */
+	struct sdw_amd_ctx *sdw;
+	unsigned int fw_bin_size;
+	unsigned int fw_data_bin_size;
+	unsigned int fw_sram_data_bin_size;
+	const char *fw_code_bin;
+	const char *fw_data_bin;
+	const char *fw_sram_data_bin;
+	u32 fw_bin_page_count;
+	u32 fw_data_bin_page_count;
+	u32 addr;
+	u32 reg_range;
+	u32 blk_type;
+	dma_addr_t sha_dma_addr;
+	u8 *bin_buf;
+	dma_addr_t dma_addr;
+	u8 *data_buf;
+	dma_addr_t sram_dma_addr;
+	u8 *sram_data_buf;
+	struct acp_quirk_entry *quirks;
+	struct dma_descriptor dscr_info[ACP_MAX_DESC];
+	struct acp_dsp_stream stream_buf[ACP_MAX_STREAM];
+	struct acp_dsp_stream *dtrace_stream;
+	struct acp_dsp_stream *probe_stream;
+	bool enable_fw_debug;
+	bool is_dram_in_use;
+	bool is_sram_in_use;
+	bool sdw_en_stat;
+	/* acp70_sdw0_wake_event flag set to true when wake irq asserted for SW0 instance */
+	bool acp70_sdw0_wake_event;
+	/* acp70_sdw1_wake_event flag set to true when wake irq asserted for SW1 instance */
+	bool acp70_sdw1_wake_event;
+	/* per-manager wake event flags; indexed by SoundWire manager instance (0-3) */
+	bool acp7x_sdw_wake_event[ACP7X_SDW_MAX_MANAGER_COUNT];
+	/* PDM controller index selected from ACPI acp-audio-ep-port; passed to machine driver */
+	unsigned int pdm_sel;
+	bool is_sdw_dev;
+	unsigned int pci_rev;
+	u32 subsystem_vendor;
+	u32 subsystem_device;
+	int acp_sof_signed_firmware_image;
+	/* ACP7.F ASP carveout firmware load state */
+	u64  asp_carveout_base;
+	u32  asp_carveout_size;
+	u32  asp_carveout_group_start;  /* first ATU group index for carveout (from ASP) */
+	u32  asp_carveout_group_count;  /* number of consecutive ATU groups for carveout */
+	/*
+	 * Physical address and raw size of each validated DSP code binary
+	 * within the carveout region (returned by ASP VALIDATE_IMAGE).
+	 * Preserved across suspend/resume so that SHA DMA can reload DSP IRAM
+	 * from the carveout without re-authenticating from disk.
+	 */
+	u64  fw_code_carveout_addr;
+	u32  fw_code_raw_size;
+	/* Real CPU physical address of the ASP MPASP mailbox payload page */
+	phys_addr_t asp_mbox_buf_phys;
+	void       *asp_mbox_buf;
+	/*
+	 * SHA DMA completion for the carveout path.
+	 * ACP_SHA_STAT (bit 15 of ACP_EXTERNAL_INTR_STAT) has no dedicated
+	 * mask bit in ACP_EXTERNAL_INTR_CNTL - it is always enabled by default.
+	 * SHA DMA is triggered exclusively during firmware loading, so no
+	 * spurious ACP_SHA_STAT interrupts are expected outside that window.
+	 * acp7x_irq_handler signals sha_dma_complete when ACP_SHA_STAT fires;
+	 * configure_and_run_sha_dma() waits on it before polling
+	 * ACP_SHA_DSP_FW_QUALIFIER to ensure ASP has validated the source.
+	 */
+	struct completion sha_dma_complete;
+};
+
+void memcpy_to_scratch(struct snd_sof_dev *sdev, u32 offset, unsigned int *src, size_t bytes);
+void memcpy_from_scratch(struct snd_sof_dev *sdev, u32 offset, unsigned int *dst, size_t bytes);
+
+int acp_dma_status(struct acp_dev_data *adata, unsigned char ch);
+int configure_and_run_dma(struct acp_dev_data *adata, unsigned int src_addr,
+			  unsigned int dest_addr, int dsp_data_size);
+int configure_and_run_sha_dma(struct acp_dev_data *adata, void *image_addr,
+			      unsigned int start_addr, unsigned int dest_addr,
+			      unsigned int image_length);
+
+/* ACP device probe/remove */
+int amd_sof_acp_probe(struct snd_sof_dev *sdev);
+void amd_sof_acp_remove(struct snd_sof_dev *sdev);
+
+/* DSP Loader callbacks */
+int acp_sof_dsp_run(struct snd_sof_dev *sdev);
+int acp_dsp_pre_fw_run(struct snd_sof_dev *sdev);
+int acp_sof_load_signed_firmware(struct snd_sof_dev *sdev);
+int acp_get_bar_index(struct snd_sof_dev *sdev, u32 type);
+
+/* ACP7.B/7.F ASP carveout firmware load helper functions */
+int acp7x_query_asp_carveout(struct snd_sof_dev *sdev);
+int acp7x_load_firmware_carveout(struct snd_sof_dev *sdev);
+int acp7x_configure_carveout_pte(struct snd_sof_dev *sdev);
+
+/* Block IO callbacks */
+int acp_dsp_block_write(struct snd_sof_dev *sdev, enum snd_sof_fw_blk_type blk_type,
+			u32 offset, void *src, size_t size);
+int acp_dsp_block_read(struct snd_sof_dev *sdev, enum snd_sof_fw_blk_type blk_type,
+		       u32 offset, void *dest, size_t size);
+
+/* IPC callbacks */
+irqreturn_t acp_sof_ipc_irq_thread(int irq, void *context);
+int acp_sof_ipc_msg_data(struct snd_sof_dev *sdev, struct snd_sof_pcm_stream *sps,
+			 void *p, size_t sz);
+int acp_set_stream_data_offset(struct snd_sof_dev *sdev,
+			       struct snd_sof_pcm_stream *sps,
+			       size_t posn_offset);
+int acp_sof_ipc_send_msg(struct snd_sof_dev *sdev,
+			 struct snd_sof_ipc_msg *msg);
+int acp_sof_ipc_get_mailbox_offset(struct snd_sof_dev *sdev);
+int acp_sof_ipc_get_window_offset(struct snd_sof_dev *sdev, u32 id);
+void acp_mailbox_write(struct snd_sof_dev *sdev, u32 offset, void *message, size_t bytes);
+void acp_mailbox_read(struct snd_sof_dev *sdev, u32 offset, void *message, size_t bytes);
+
+/* ACP - DSP  stream callbacks */
+int acp_dsp_stream_config(struct snd_sof_dev *sdev, struct acp_dsp_stream *stream);
+int acp_dsp_stream_init(struct snd_sof_dev *sdev);
+struct acp_dsp_stream *acp_dsp_stream_get(struct snd_sof_dev *sdev, int tag);
+int acp_dsp_stream_put(struct snd_sof_dev *sdev, struct acp_dsp_stream *acp_stream);
+
+/*
+ * DSP PCM Operations.
+ */
+int acp_pcm_open(struct snd_sof_dev *sdev, struct snd_pcm_substream *substream);
+int acp_pcm_close(struct snd_sof_dev *sdev, struct snd_pcm_substream *substream);
+int acp_pcm_hw_params(struct snd_sof_dev *sdev, struct snd_pcm_substream *substream,
+		      struct snd_pcm_hw_params *params,
+		      struct snd_sof_platform_stream_params *platform_params);
+snd_pcm_uframes_t acp_pcm_pointer(struct snd_sof_dev *sdev,
+				  struct snd_pcm_substream *substream);
+
+extern const struct snd_sof_dsp_ops sof_acp_common_ops;
+
+extern struct snd_sof_dsp_ops sof_renoir_ops;
+int sof_renoir_ops_init(struct snd_sof_dev *sdev);
+extern struct snd_sof_dsp_ops sof_vangogh_ops;
+int sof_vangogh_ops_init(struct snd_sof_dev *sdev);
+extern struct snd_sof_dsp_ops sof_rembrandt_ops;
+int sof_rembrandt_ops_init(struct snd_sof_dev *sdev);
+extern struct snd_sof_dsp_ops sof_acp63_ops;
+int sof_acp63_ops_init(struct snd_sof_dev *sdev);
+
+extern struct snd_sof_dsp_ops sof_acp70_ops;
+int sof_acp70_ops_init(struct snd_sof_dev *sdev);
+
+extern struct snd_sof_dsp_ops sof_acp7x_ops;
+int sof_acp7x_ops_init(struct snd_sof_dev *sdev);
+
+int amd_sof_acp7x_probe(struct snd_sof_dev *sdev);
+void amd_sof_acp7x_remove(struct snd_sof_dev *sdev);
+int amd_sof_acp7x_suspend(struct snd_sof_dev *sdev, u32 target_state);
+int amd_sof_acp7x_resume(struct snd_sof_dev *sdev);
+int amd_sof_acp7x_suspend_runtime(struct snd_sof_dev *sdev);
+int amd_sof_acp7x_resume_runtime(struct snd_sof_dev *sdev);
+
+struct snd_soc_acpi_mach *amd_sof_machine_select(struct snd_sof_dev *sdev);
+/* Machine configuration */
+int snd_amd_acp_find_config(struct pci_dev *pci);
+
+/* Trace */
+int acp_sof_trace_init(struct snd_sof_dev *sdev, struct snd_dma_buffer *dmab,
+		       struct sof_ipc_dma_trace_params_ext *dtrace_params);
+int acp_sof_trace_release(struct snd_sof_dev *sdev);
+
+/* PM Callbacks */
+int amd_sof_acp_suspend(struct snd_sof_dev *sdev, u32 target_state);
+int amd_sof_acp_resume(struct snd_sof_dev *sdev);
+
+void amd_sof_ipc_dump(struct snd_sof_dev *sdev);
+void amd_sof_dump(struct snd_sof_dev *sdev, u32 flags);
+
+static inline const struct sof_amd_acp_desc *get_chip_info(struct snd_sof_pdata *pdata)
+{
+	const struct sof_dev_desc *desc = pdata->desc;
+
+	return desc->chip_info;
+}
+
+int acp_probes_register(struct snd_sof_dev *sdev);
+void acp_probes_unregister(struct snd_sof_dev *sdev);
+
+extern struct snd_soc_acpi_mach snd_soc_acpi_amd_vangogh_sof_machines[];
+extern const struct dmi_system_id acp_sof_quirk_table[];
+#endif

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Penmount serial touchscreen driver
  *
@@ -8,11 +9,6 @@
  * Copyright (c) 2004 Vojtech Pavlik
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
- */
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -21,7 +17,6 @@
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/serio.h>
-#include <linux/init.h>
 
 #define DRIVER_DESC	"PenMount serial touchscreen driver"
 
@@ -204,7 +199,7 @@ static int pm_connect(struct serio *serio, struct serio_driver *drv)
 	int max_x, max_y;
 	int err;
 
-	pm = kzalloc(sizeof(struct pm), GFP_KERNEL);
+	pm = kzalloc_obj(*pm);
 	input_dev = input_allocate_device();
 	if (!pm || !input_dev) {
 		err = -ENOMEM;
@@ -213,7 +208,7 @@ static int pm_connect(struct serio *serio, struct serio_driver *drv)
 
 	pm->serio = serio;
 	pm->dev = input_dev;
-	snprintf(pm->phys, sizeof(pm->phys), "%s/input0", serio->phys);
+	scnprintf(pm->phys, sizeof(pm->phys), "%s/input0", serio->phys);
 	pm->maxcontacts = 1;
 
 	input_dev->name = "PenMount Serial TouchScreen";
@@ -294,7 +289,7 @@ static int pm_connect(struct serio *serio, struct serio_driver *drv)
  * The serio driver structure.
  */
 
-static struct serio_device_id pm_serio_ids[] = {
+static const struct serio_device_id pm_serio_ids[] = {
 	{
 		.type	= SERIO_RS232,
 		.proto	= SERIO_PENMOUNT,

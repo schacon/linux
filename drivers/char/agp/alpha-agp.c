@@ -11,16 +11,14 @@
 
 #include "agp.h"
 
-static int alpha_core_agp_vm_fault(struct vm_area_struct *vma,
-					struct vm_fault *vmf)
+static vm_fault_t alpha_core_agp_vm_fault(struct vm_fault *vmf)
 {
 	alpha_agp_info *agp = agp_bridge->dev_private_data;
 	dma_addr_t dma_addr;
 	unsigned long pa;
 	struct page *page;
 
-	dma_addr = (unsigned long)vmf->virtual_address - vma->vm_start
-						+ agp->aperture.bus_base;
+	dma_addr = vmf->address - vmf->vma->vm_start + agp->aperture.bus_base;
 	pa = agp->ops->translate(agp, dma_addr);
 
 	if (pa == (unsigned long)-EINVAL)
@@ -151,7 +149,7 @@ struct agp_bridge_driver alpha_core_agp_driver = {
 
 struct agp_bridge_data *alpha_bridge;
 
-int __init
+static int __init
 alpha_core_agp_setup(void)
 {
 	alpha_agp_info *agp = alpha_mv.agp_info();
@@ -174,7 +172,7 @@ alpha_core_agp_setup(void)
 	/*
 	 * Build a fake pci_dev struct
 	 */
-	pdev = alloc_pci_dev();
+	pdev = pci_alloc_dev(NULL);
 	if (!pdev)
 		return -ENOMEM;
 	pdev->vendor = 0xffff;
@@ -219,4 +217,5 @@ module_init(agp_alpha_core_init);
 module_exit(agp_alpha_core_cleanup);
 
 MODULE_AUTHOR("Jeff Wiedemeier <Jeff.Wiedemeier@hp.com>");
+MODULE_DESCRIPTION("Alpha AGP support");
 MODULE_LICENSE("GPL and additional rights");

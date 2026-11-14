@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Copyright (C) 2006 Atmark Techno, Inc.
  *
@@ -9,7 +10,7 @@
 #ifndef _UAPI_ASM_MICROBLAZE_PTRACE_H
 #define _UAPI_ASM_MICROBLAZE_PTRACE_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 typedef unsigned long microblaze_reg_t;
 
@@ -67,6 +68,6 @@ struct pt_regs {
 
 #endif /* __KERNEL */
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 #endif /* _UAPI_ASM_MICROBLAZE_PTRACE_H */

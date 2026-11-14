@@ -1,55 +1,77 @@
-#ifndef _SCHED_RT_H
-#define _SCHED_RT_H
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef _LINUX_SCHED_RT_H
+#define _LINUX_SCHED_RT_H
 
-/*
- * Priority of a process goes from 0..MAX_PRIO-1, valid RT
- * priority is 0..MAX_RT_PRIO-1, and SCHED_NORMAL/SCHED_BATCH
- * tasks are in the range MAX_RT_PRIO..MAX_PRIO-1. Priority
- * values are inverted: lower p->prio value means higher priority.
- *
- * The MAX_USER_RT_PRIO value allows the actual maximum
- * RT priority to be separate from the value exported to
- * user-space.  This allows kernel threads to set their
- * priority to a value higher than any user task. Note:
- * MAX_RT_PRIO must not be smaller than MAX_USER_RT_PRIO.
- */
+#include <linux/sched.h>
 
-#define MAX_USER_RT_PRIO	100
-#define MAX_RT_PRIO		MAX_USER_RT_PRIO
+struct task_struct;
 
-#define MAX_PRIO		(MAX_RT_PRIO + 40)
-#define DEFAULT_PRIO		(MAX_RT_PRIO + 20)
-
-static inline int rt_prio(int prio)
+static inline bool rt_prio(int prio)
 {
-	if (unlikely(prio < MAX_RT_PRIO))
-		return 1;
-	return 0;
+	return unlikely(prio < MAX_RT_PRIO && prio >= MAX_DL_PRIO);
 }
 
-static inline int rt_task(struct task_struct *p)
+static inline bool rt_or_dl_prio(int prio)
+{
+	return unlikely(prio < MAX_RT_PRIO);
+}
+
+/*
+ * Returns true if a task has a priority that belongs to RT class. PI-boosted
+ * tasks will return true. Use rt_policy() to ignore PI-boosted tasks.
+ */
+static inline bool rt_task(struct task_struct *p)
 {
 	return rt_prio(p->prio);
 }
 
-#ifdef CONFIG_RT_MUTEXES
-extern int rt_mutex_getprio(struct task_struct *p);
-extern void rt_mutex_setprio(struct task_struct *p, int prio);
-extern void rt_mutex_adjust_pi(struct task_struct *p);
-static inline bool tsk_is_pi_blocked(struct task_struct *tsk)
+/*
+ * Returns true if a task has a priority that belongs to RT or DL classes.
+ * PI-boosted tasks will return true. Use rt_or_dl_task_policy() to ignore
+ * PI-boosted tasks.
+ */
+static inline bool rt_or_dl_task(struct task_struct *p)
 {
-	return tsk->pi_blocked_on != NULL;
+	return rt_or_dl_prio(p->prio);
 }
-#else
-static inline int rt_mutex_getprio(struct task_struct *p)
+
+/*
+ * Returns true if a task has a policy that belongs to RT or DL classes.
+ * PI-boosted tasks will return false.
+ */
+static inline bool rt_or_dl_task_policy(struct task_struct *tsk)
 {
-	return p->normal_prio;
-}
-# define rt_mutex_adjust_pi(p)		do { } while (0)
-static inline bool tsk_is_pi_blocked(struct task_struct *tsk)
-{
+	int policy = tsk->policy;
+
+	if (policy == SCHED_FIFO || policy == SCHED_RR)
+		return true;
+	if (policy == SCHED_DEADLINE)
+		return true;
 	return false;
 }
+
+#ifdef CONFIG_RT_MUTEXES
+extern void rt_mutex_pre_schedule(void);
+extern void rt_mutex_futex_pre_schedule(void);
+extern void rt_mutex_schedule(void);
+extern void rt_mutex_post_schedule(void);
+extern void rt_mutex_futex_post_schedule(void);
+
+/*
+ * Must hold either p->pi_lock or task_rq(p)->lock.
+ */
+static inline struct task_struct *rt_mutex_get_top_task(struct task_struct *p)
+{
+	return p->pi_top_task;
+}
+extern void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task);
+extern void rt_mutex_adjust_pi(struct task_struct *p);
+#else
+static inline struct task_struct *rt_mutex_get_top_task(struct task_struct *task)
+{
+	return NULL;
+}
+# define rt_mutex_adjust_pi(p)		do { } while (0)
 #endif
 
 extern void normalize_rt_tasks(void);
@@ -61,4 +83,4 @@ extern void normalize_rt_tasks(void);
  */
 #define RR_TIMESLICE		(100 * HZ / 1000)
 
-#endif /* _SCHED_RT_H */
+#endif /* _LINUX_SCHED_RT_H */

@@ -1,25 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Symbol USB barcode to serial driver
  *
  * Copyright (C) 2013 Johan Hovold <jhovold@gmail.com>
  * Copyright (C) 2009 Greg Kroah-Hartman <gregkh@suse.de>
  * Copyright (C) 2009 Novell Inc.
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License version
- *	2 as published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <linux/tty.h>
 #include <linux/slab.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
-#include <linux/uaccess.h>
 
 static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x05e0, 0x0600) },
@@ -39,6 +33,7 @@ static void symbol_int_callback(struct urb *urb)
 	struct symbol_private *priv = usb_get_serial_port_data(port);
 	unsigned char *data = urb->transfer_buffer;
 	int status = urb->status;
+	unsigned long flags;
 	int result;
 	int data_length;
 
@@ -61,27 +56,23 @@ static void symbol_int_callback(struct urb *urb)
 
 	usb_serial_debug_data(&port->dev, __func__, urb->actual_length, data);
 
+	/*
+	 * Data from the device comes with a 1 byte header:
+	 *
+	 * <size of data> <data>...
+	 */
 	if (urb->actual_length > 1) {
-		data_length = urb->actual_length - 1;
-
-		/*
-		 * Data from the device comes with a 1 byte header:
-		 *
-		 * <size of data>data...
-		 * 	This is real data to be sent to the tty layer
-		 * we pretty much just ignore the size and send everything
-		 * else to the tty layer.
-		 */
+		data_length = data[0];
+		if (data_length > (urb->actual_length - 1))
+			data_length = urb->actual_length - 1;
 		tty_insert_flip_string(&port->port, &data[1], data_length);
 		tty_flip_buffer_push(&port->port);
 	} else {
-		dev_dbg(&port->dev,
-			"Improper amount of data received from the device, "
-			"%d bytes", urb->actual_length);
+		dev_dbg(&port->dev, "%s - short packet\n", __func__);
 	}
 
 exit:
-	spin_lock(&priv->lock);
+	spin_lock_irqsave(&priv->lock, flags);
 
 	/* Continue trying to always read if we should */
 	if (!priv->throttled) {
@@ -92,12 +83,12 @@ exit:
 							__func__, result);
 	} else
 		priv->actually_throttled = true;
-	spin_unlock(&priv->lock);
+	spin_unlock_irqrestore(&priv->lock, flags);
 }
 
 static int symbol_open(struct tty_struct *tty, struct usb_serial_port *port)
 {
-	struct symbol_private *priv = usb_get_serial_data(port->serial);
+	struct symbol_private *priv = usb_get_serial_port_data(port);
 	unsigned long flags;
 	int result = 0;
 
@@ -123,7 +114,7 @@ static void symbol_close(struct usb_serial_port *port)
 static void symbol_throttle(struct tty_struct *tty)
 {
 	struct usb_serial_port *port = tty->driver_data;
-	struct symbol_private *priv = usb_get_serial_data(port->serial);
+	struct symbol_private *priv = usb_get_serial_port_data(port);
 
 	spin_lock_irq(&priv->lock);
 	priv->throttled = true;
@@ -133,7 +124,7 @@ static void symbol_throttle(struct tty_struct *tty)
 static void symbol_unthrottle(struct tty_struct *tty)
 {
 	struct usb_serial_port *port = tty->driver_data;
-	struct symbol_private *priv = usb_get_serial_data(port->serial);
+	struct symbol_private *priv = usb_get_serial_port_data(port);
 	int result;
 	bool was_throttled;
 
@@ -152,21 +143,11 @@ static void symbol_unthrottle(struct tty_struct *tty)
 	}
 }
 
-static int symbol_startup(struct usb_serial *serial)
-{
-	if (!serial->num_interrupt_in) {
-		dev_err(&serial->dev->dev, "no interrupt-in endpoint\n");
-		return -ENODEV;
-	}
-
-	return 0;
-}
-
 static int symbol_port_probe(struct usb_serial_port *port)
 {
 	struct symbol_private *priv;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -177,23 +158,20 @@ static int symbol_port_probe(struct usb_serial_port *port)
 	return 0;
 }
 
-static int symbol_port_remove(struct usb_serial_port *port)
+static void symbol_port_remove(struct usb_serial_port *port)
 {
 	struct symbol_private *priv = usb_get_serial_port_data(port);
 
 	kfree(priv);
-
-	return 0;
 }
 
 static struct usb_serial_driver symbol_device = {
 	.driver = {
-		.owner =	THIS_MODULE,
 		.name =		"symbol",
 	},
 	.id_table =		id_table,
 	.num_ports =		1,
-	.attach =		symbol_startup,
+	.num_interrupt_in =	1,
 	.port_probe =		symbol_port_probe,
 	.port_remove =		symbol_port_remove,
 	.open =			symbol_open,
@@ -209,4 +187,5 @@ static struct usb_serial_driver * const serial_drivers[] = {
 
 module_usb_serial_driver(serial_drivers, id_table);
 
-MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Symbol USB barcode to serial driver");
+MODULE_LICENSE("GPL v2");

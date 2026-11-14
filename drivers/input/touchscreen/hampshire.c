@@ -1,16 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Hampshire serial touchscreen driver
  *
  * Copyright (c) 2010 Adam Bennett
  * Based on the dynapro driver (c) Tias Guns
- *
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- */
 
 /*
  * 2010/04/08 Adam Bennett <abennett72@gmail.com>
@@ -23,7 +18,6 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/serio.h>
-#include <linux/init.h>
 
 #define DRIVER_DESC	"Hampshire serial touchscreen driver"
 
@@ -115,7 +109,7 @@ static int hampshire_connect(struct serio *serio, struct serio_driver *drv)
 	struct input_dev *input_dev;
 	int err;
 
-	phampshire = kzalloc(sizeof(struct hampshire), GFP_KERNEL);
+	phampshire = kzalloc_obj(*phampshire);
 	input_dev = input_allocate_device();
 	if (!phampshire || !input_dev) {
 		err = -ENOMEM;
@@ -124,8 +118,8 @@ static int hampshire_connect(struct serio *serio, struct serio_driver *drv)
 
 	phampshire->serio = serio;
 	phampshire->dev = input_dev;
-	snprintf(phampshire->phys, sizeof(phampshire->phys),
-		 "%s/input0", serio->phys);
+	scnprintf(phampshire->phys, sizeof(phampshire->phys),
+		  "%s/input0", serio->phys);
 
 	input_dev->name = "Hampshire Serial TouchScreen";
 	input_dev->phys = phampshire->phys;
@@ -164,7 +158,7 @@ static int hampshire_connect(struct serio *serio, struct serio_driver *drv)
  * The serio driver structure.
  */
 
-static struct serio_device_id hampshire_serio_ids[] = {
+static const struct serio_device_id hampshire_serio_ids[] = {
 	{
 		.type	= SERIO_RS232,
 		.proto	= SERIO_HAMPSHIRE,

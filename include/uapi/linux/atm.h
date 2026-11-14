@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /* atm.h - general ATM declarations */
  
 /* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA */
@@ -38,7 +39,7 @@
 #define ATM_MAX_VCI		 65535	/* maximum VCI */
 
 
-/* "protcol" values for the socket system call */
+/* "protocol" values for the socket system call */
 #define ATM_NO_AAL	0		/* AAL not specified */
 #define ATM_AAL0	13		/* "raw" ATM cells */
 #define ATM_AAL1	1		/* AAL1 (CBR) */

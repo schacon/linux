@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * mxcc.h:  Definitions of the Viking MXCC registers
  *
@@ -83,7 +84,7 @@
  * MID: The moduleID of the cpu your read this from.
  */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 static inline void mxcc_set_stream_src(unsigned long *paddr)
 {
@@ -132,6 +133,6 @@ static inline void mxcc_set_creg(unsigned long mxcc_control)
 			     "i" (ASI_M_MXCC));
 }
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* !(_SPARC_MXCC_H) */

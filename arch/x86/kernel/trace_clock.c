@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * X86 trace clocks
  */
 #include <asm/trace_clock.h>
 #include <asm/barrier.h>
-#include <asm/msr.h>
+#include <asm/tsc.h>
 
 /*
  * trace_clock_x86_tsc(): A clock that is just the cycle counter.
@@ -12,10 +13,5 @@
  */
 u64 notrace trace_clock_x86_tsc(void)
 {
-	u64 ret;
-
-	rdtsc_barrier();
-	rdtscll(ret);
-
-	return ret;
+	return rdtsc_ordered();
 }

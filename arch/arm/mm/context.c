@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mm/context.c
  *
@@ -5,10 +6,6 @@
  *  Copyright (C) 2012 ARM Limited
  *
  *  Author: Will Deacon <will.deacon@arm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/init.h>
 #include <linux/sched.h>
@@ -20,6 +17,7 @@
 #include <asm/smp_plat.h>
 #include <asm/thread_notify.h>
 #include <asm/tlbflush.h>
+#include <asm/proc-fns.h>
 
 /*
  * On ARMv6, we have the following structure in the Context ID:
@@ -35,44 +33,63 @@
  * The context ID is used by debuggers and trace logic, and
  * should be unique within all running processes.
  *
- * In big endian operation, the two 32 bit words are swapped if accesed by
- * non 64-bit operations.
+ * In big endian operation, the two 32 bit words are swapped if accessed
+ * by non-64-bit operations.
  */
 #define ASID_FIRST_VERSION	(1ULL << ASID_BITS)
-#define NUM_USER_ASIDS		(ASID_FIRST_VERSION - 1)
-
-#define ASID_TO_IDX(asid)	((asid & ~ASID_MASK) - 1)
-#define IDX_TO_ASID(idx)	((idx + 1) & ~ASID_MASK)
+#define NUM_USER_ASIDS		ASID_FIRST_VERSION
 
 static DEFINE_RAW_SPINLOCK(cpu_asid_lock);
 static atomic64_t asid_generation = ATOMIC64_INIT(ASID_FIRST_VERSION);
 static DECLARE_BITMAP(asid_map, NUM_USER_ASIDS);
 
-DEFINE_PER_CPU(atomic64_t, active_asids);
+static DEFINE_PER_CPU(atomic64_t, active_asids);
 static DEFINE_PER_CPU(u64, reserved_asids);
 static cpumask_t tlb_flush_pending;
 
-#ifdef CONFIG_ARM_LPAE
-static void cpu_set_reserved_ttbr0(void)
+#ifdef CONFIG_ARM_ERRATA_798181
+void a15_erratum_get_cpumask(int this_cpu, struct mm_struct *mm,
+			     cpumask_t *mask)
 {
-	unsigned long ttbl = __pa(swapper_pg_dir);
-	unsigned long ttbh = 0;
+	int cpu;
+	unsigned long flags;
+	u64 context_id, asid;
 
-	/*
-	 * Set TTBR0 to swapper_pg_dir which contains only global entries. The
-	 * ASID is set to 0.
-	 */
-	asm volatile(
-	"	mcrr	p15, 0, %0, %1, c2		@ set TTBR0\n"
-	:
-	: "r" (ttbl), "r" (ttbh));
-	isb();
+	raw_spin_lock_irqsave(&cpu_asid_lock, flags);
+	context_id = mm->context.id.counter;
+	for_each_online_cpu(cpu) {
+		if (cpu == this_cpu)
+			continue;
+		/*
+		 * We only need to send an IPI if the other CPUs are
+		 * running the same ASID as the one being invalidated.
+		 */
+		asid = per_cpu(active_asids, cpu).counter;
+		if (asid == 0)
+			asid = per_cpu(reserved_asids, cpu);
+		if (context_id == asid)
+			cpumask_set_cpu(cpu, mask);
+	}
+	raw_spin_unlock_irqrestore(&cpu_asid_lock, flags);
 }
+#endif
+
+#ifdef CONFIG_ARM_LPAE
+/*
+ * With LPAE, the ASID and page tables are updated atomicly, so there is
+ * no need for a reserved set of tables (the active ASID tracking prevents
+ * any issues across a rollover).
+ */
+#define cpu_set_reserved_ttbr0()
 #else
 static void cpu_set_reserved_ttbr0(void)
 {
 	u32 ttb;
-	/* Copy TTBR1 into TTBR0 */
+	/*
+	 * Copy TTBR1 into TTBR0.
+	 * This points at swapper_pg_dir, which contains only global
+	 * entries so any speculative walks are perfectly safe.
+	 */
 	asm volatile(
 	"	mrc	p15, 0, %0, c2, c0, 1		@ read TTBR1\n"
 	"	mcr	p15, 0, %0, c2, c0, 0		@ set TTBR0\n"
@@ -92,7 +109,7 @@ static int contextidr_notifier(struct notifier_block *unused, unsigned long cmd,
 	if (cmd != THREAD_NOTIFY_SWITCH)
 		return NOTIFY_DONE;
 
-	pid = task_pid_nr(thread->task) << ASID_BITS;
+	pid = task_pid_nr(thread_task(thread)) << ASID_BITS;
 	asm volatile(
 	"	mrc	p15, 0, %0, c13, c0, 1\n"
 	"	and	%0, %0, %2\n"
@@ -124,84 +141,126 @@ static void flush_context(unsigned int cpu)
 	/* Update the list of reserved ASIDs and the ASID bitmap. */
 	bitmap_clear(asid_map, 0, NUM_USER_ASIDS);
 	for_each_possible_cpu(i) {
-		if (i == cpu) {
-			asid = 0;
-		} else {
-			asid = atomic64_xchg(&per_cpu(active_asids, i), 0);
-			__set_bit(ASID_TO_IDX(asid), asid_map);
-		}
+		asid = atomic64_xchg(&per_cpu(active_asids, i), 0);
+		/*
+		 * If this CPU has already been through a
+		 * rollover, but hasn't run another task in
+		 * the meantime, we must preserve its reserved
+		 * ASID, as this is the only trace we have of
+		 * the process it is still running.
+		 */
+		if (asid == 0)
+			asid = per_cpu(reserved_asids, i);
+		__set_bit(asid & ~ASID_MASK, asid_map);
 		per_cpu(reserved_asids, i) = asid;
 	}
 
 	/* Queue a TLB invalidate and flush the I-cache if necessary. */
-	if (!tlb_ops_need_broadcast())
-		cpumask_set_cpu(cpu, &tlb_flush_pending);
-	else
-		cpumask_setall(&tlb_flush_pending);
+	cpumask_setall(&tlb_flush_pending);
 
 	if (icache_is_vivt_asid_tagged())
 		__flush_icache_all();
 }
 
-static int is_reserved_asid(u64 asid)
+static bool check_update_reserved_asid(u64 asid, u64 newasid)
 {
 	int cpu;
-	for_each_possible_cpu(cpu)
-		if (per_cpu(reserved_asids, cpu) == asid)
-			return 1;
-	return 0;
+	bool hit = false;
+
+	/*
+	 * Iterate over the set of reserved ASIDs looking for a match.
+	 * If we find one, then we can update our mm to use newasid
+	 * (i.e. the same ASID in the current generation) but we can't
+	 * exit the loop early, since we need to ensure that all copies
+	 * of the old ASID are updated to reflect the mm. Failure to do
+	 * so could result in us missing the reserved ASID in a future
+	 * generation.
+	 */
+	for_each_possible_cpu(cpu) {
+		if (per_cpu(reserved_asids, cpu) == asid) {
+			hit = true;
+			per_cpu(reserved_asids, cpu) = newasid;
+		}
+	}
+
+	return hit;
 }
 
 static u64 new_context(struct mm_struct *mm, unsigned int cpu)
 {
+	static u32 cur_idx = 1;
 	u64 asid = atomic64_read(&mm->context.id);
 	u64 generation = atomic64_read(&asid_generation);
 
-	if (asid != 0 && is_reserved_asid(asid)) {
+	if (asid != 0) {
+		u64 newasid = generation | (asid & ~ASID_MASK);
+
 		/*
-		 * Our current ASID was active during a rollover, we can
-		 * continue to use it and this was just a false alarm.
+		 * If our current ASID was active during a rollover, we
+		 * can continue to use it and this was just a false alarm.
 		 */
-		asid = generation | (asid & ~ASID_MASK);
-	} else {
+		if (check_update_reserved_asid(asid, newasid))
+			return newasid;
+
 		/*
-		 * Allocate a free ASID. If we can't find one, take a
-		 * note of the currently active ASIDs and mark the TLBs
-		 * as requiring flushes.
+		 * We had a valid ASID in a previous life, so try to re-use
+		 * it if possible.,
 		 */
-		asid = find_first_zero_bit(asid_map, NUM_USER_ASIDS);
-		if (asid == NUM_USER_ASIDS) {
-			generation = atomic64_add_return(ASID_FIRST_VERSION,
-							 &asid_generation);
-			flush_context(cpu);
-			asid = find_first_zero_bit(asid_map, NUM_USER_ASIDS);
-		}
-		__set_bit(asid, asid_map);
-		asid = generation | IDX_TO_ASID(asid);
-		cpumask_clear(mm_cpumask(mm));
+		asid &= ~ASID_MASK;
+		if (!__test_and_set_bit(asid, asid_map))
+			return newasid;
 	}
 
-	return asid;
+	/*
+	 * Allocate a free ASID. If we can't find one, take a note of the
+	 * currently active ASIDs and mark the TLBs as requiring flushes.
+	 * We always count from ASID #1, as we reserve ASID #0 to switch
+	 * via TTBR0 and to avoid speculative page table walks from hitting
+	 * in any partial walk caches, which could be populated from
+	 * overlapping level-1 descriptors used to map both the module
+	 * area and the userspace stack.
+	 */
+	asid = find_next_zero_bit(asid_map, NUM_USER_ASIDS, cur_idx);
+	if (asid == NUM_USER_ASIDS) {
+		generation = atomic64_add_return(ASID_FIRST_VERSION,
+						 &asid_generation);
+		flush_context(cpu);
+		asid = find_next_zero_bit(asid_map, NUM_USER_ASIDS, 1);
+	}
+
+	__set_bit(asid, asid_map);
+	cur_idx = asid;
+	cpumask_clear(mm_cpumask(mm));
+	return asid | generation;
 }
 
 void check_and_switch_context(struct mm_struct *mm, struct task_struct *tsk)
 {
 	unsigned long flags;
 	unsigned int cpu = smp_processor_id();
-	u64 asid;
+	u64 asid, old_active_asid;
 
-	if (unlikely(mm->context.vmalloc_seq != init_mm.context.vmalloc_seq))
-		__check_vmalloc_seq(mm);
+	check_vmalloc_seq(mm);
 
 	/*
-	 * Required during context switch to avoid speculative page table
-	 * walking with the wrong TTBR.
+	 * We cannot update the pgd and the ASID atomicly with classic
+	 * MMU, so switch exclusively to global mappings to avoid
+	 * speculative page table walking with the wrong TTBR.
 	 */
 	cpu_set_reserved_ttbr0();
 
 	asid = atomic64_read(&mm->context.id);
-	if (!((asid ^ atomic64_read(&asid_generation)) >> ASID_BITS)
-	    && atomic64_xchg(&per_cpu(active_asids, cpu), asid))
+
+	/*
+	 * If our active_asids is zero, we are racing with an ASID roll-over
+	 * on a different CPU, so skip the update (using cmpxchg if non-zero)
+	 * and take the slow path.
+	 */
+	old_active_asid = atomic64_read(&per_cpu(active_asids, cpu));
+	if (old_active_asid &&
+	    !((asid ^ atomic64_read(&asid_generation)) >> ASID_BITS) &&
+	    atomic64_cmpxchg(&per_cpu(active_asids, cpu),
+			     old_active_asid, asid))
 		goto switch_mm_fastpath;
 
 	raw_spin_lock_irqsave(&cpu_asid_lock, flags);
@@ -215,7 +274,6 @@ void check_and_switch_context(struct mm_struct *mm, struct task_struct *tsk)
 	if (cpumask_test_and_clear_cpu(cpu, &tlb_flush_pending)) {
 		local_flush_bp_all();
 		local_flush_tlb_all();
-		dummy_flush_tlb_a15_erratum();
 	}
 
 	atomic64_set(&per_cpu(active_asids, cpu), asid);

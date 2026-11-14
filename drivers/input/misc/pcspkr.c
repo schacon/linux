@@ -1,43 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  PC Speaker beeper driver for Linux
  *
  *  Copyright (c) 2002 Vojtech Pavlik
  *  Copyright (c) 1992 Orest Zborowski
- *
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation
- */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/i8253.h>
-#include <linux/init.h>
 #include <linux/input.h>
 #include <linux/platform_device.h>
 #include <linux/timex.h>
-#include <asm/io.h>
+#include <linux/io.h>
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
 MODULE_DESCRIPTION("PC Speaker beeper driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:pcspkr");
 
-static int pcspkr_event(struct input_dev *dev, unsigned int type, unsigned int code, int value)
+static int pcspkr_event(struct input_dev *dev, unsigned int type,
+			unsigned int code, int value)
 {
 	unsigned int count = 0;
 	unsigned long flags;
 
 	if (type != EV_SND)
-		return -1;
+		return -EINVAL;
 
 	switch (code) {
-		case SND_BELL: if (value) value = 1000;
-		case SND_TONE: break;
-		default: return -1;
+	case SND_BELL:
+		if (value)
+			value = 1000;
+		break;
+	case SND_TONE:
+		break;
+	default:
+		return -EINVAL;
 	}
 
 	if (value > 20 && value < 32767)
@@ -95,16 +95,13 @@ static int pcspkr_probe(struct platform_device *dev)
 	return 0;
 }
 
-static int pcspkr_remove(struct platform_device *dev)
+static void pcspkr_remove(struct platform_device *dev)
 {
 	struct input_dev *pcspkr_dev = platform_get_drvdata(dev);
 
 	input_unregister_device(pcspkr_dev);
-	platform_set_drvdata(dev, NULL);
 	/* turn off the speaker */
 	pcspkr_event(NULL, EV_SND, SND_BELL, 0);
-
-	return 0;
 }
 
 static int pcspkr_suspend(struct device *dev)
@@ -127,7 +124,6 @@ static const struct dev_pm_ops pcspkr_pm_ops = {
 static struct platform_driver pcspkr_platform_driver = {
 	.driver		= {
 		.name	= "pcspkr",
-		.owner	= THIS_MODULE,
 		.pm	= &pcspkr_pm_ops,
 	},
 	.probe		= pcspkr_probe,

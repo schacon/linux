@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/firewire-constants.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -159,7 +160,7 @@ decode_avc(struct link_transaction *t)
 		name = info->name;
 	}
 
-	printf("av/c %s, subunit_type=%s, subunit_id=%d, opcode=%s",
+	printf("av/c %s, subunit_type=%s, subunit_id=%u, opcode=%s",
 	    ctype_names[frame->ctype], subunit_type_names[frame->subunit_type],
 	    frame->subunit_id, name);
 

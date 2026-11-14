@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * xHCI host controller driver
  *
@@ -5,22 +6,10 @@
  *
  * Author: Sarah Sharp
  * Some code borrowed from the Linux EHCI driver.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
-/* Up to 16 ms to halt an HC */
-#define XHCI_MAX_HALT_USEC	(16*1000)
+
+/* HC should halt within 16 ms, but use 32 ms as some hosts take longer */
+#define XHCI_MAX_HALT_USEC	(32 * 1000)
 /* HC not running - set to 1 when run/stop bit is cleared. */
 #define XHCI_STS_HALT		(1<<0)
 
@@ -51,6 +40,9 @@
 #define XHCI_EXT_CAPS_ROUTE	5
 /* IDs 6-9 reserved */
 #define XHCI_EXT_CAPS_DEBUG	10
+/* Vendor caps */
+#define XHCI_EXT_CAPS_VENDOR_INTEL	192
+#define XHCI_EXT_CAPS_INTEL_SPR_SHADOW	206
 /* USB Legacy Support Capability - section 7.1.1 */
 #define XHCI_HC_BIOS_OWNED	(1 << 16)
 #define XHCI_HC_OS_OWNED	(1 << 24)
@@ -71,6 +63,11 @@
 
 /* USB 2.0 xHCI 1.0 hardware LMP capability - section 7.2.2.1.3.2 */
 #define XHCI_HLC               (1 << 19)
+#define XHCI_BLC               (1 << 20)
+
+/* Intel SPR shadow capability */
+#define XHCI_INTEL_SPR_ESS_PORT_OFFSET  0x8ac4	/* SuperSpeed port control */
+#define XHCI_INTEL_SPR_TUNEN	BIT(4)		/* Tunnel mode enabled */
 
 /* command register values to disable interrupts and halt the HC */
 /* start/stop HC execution - do not write unless HC is halted*/
@@ -87,69 +84,74 @@
 /* true: Controller Not Ready to accept doorbell or op reg writes after reset */
 #define XHCI_STS_CNR		(1 << 11)
 
-#include <linux/io.h>
-
 /**
- * Return the next extended capability pointer register.
- *
- * @base	PCI register base address.
- *
- * @ext_offset	Offset of the 32-bit register that contains the extended
- * capabilites pointer.  If searching for the first extended capability, pass
- * in XHCI_HCC_PARAMS_OFFSET.  If searching for the next extended capability,
- * pass in the offset of the current extended capability register.
- *
- * Returns 0 if there is no next extended capability register or returns the register offset
- * from the PCI registers base address.
+ * struct xhci_protocol_caps
+ * @revision:		major revision, minor revision, capability ID,
+ *			and next capability pointer.
+ * @name_string:	Four ASCII characters to say which spec this xHC
+ *			follows, typically "USB ".
+ * @port_info:		Port offset, count, and protocol-defined information.
  */
-static inline int xhci_find_next_cap_offset(void __iomem *base, int ext_offset)
-{
-	u32 next;
+struct xhci_protocol_caps {
+	u32	revision;
+	u32	name_string;
+	u32	port_info;
+};
 
-	next = readl(base + ext_offset);
+#define	XHCI_EXT_PORT_MAJOR(x)	(((x) >> 24) & 0xff)
+#define	XHCI_EXT_PORT_MINOR(x)	(((x) >> 16) & 0xff)
+#define	XHCI_EXT_PORT_PSIC(x)	(((x) >> 28) & 0x0f)
+#define	XHCI_EXT_PORT_OFF(x)	((x) & 0xff)
+#define	XHCI_EXT_PORT_COUNT(x)	(((x) >> 8) & 0xff)
 
-	if (ext_offset == XHCI_HCC_PARAMS_OFFSET) {
-		/* Find the first extended capability */
-		next = XHCI_HCC_EXT_CAPS(next);
-		ext_offset = 0;
-	} else {
-		/* Find the next extended capability */
-		next = XHCI_EXT_CAPS_NEXT(next);
-	}
+#define	XHCI_EXT_PORT_PSIV(x)	(((x) >> 0) & 0x0f)
+#define	XHCI_EXT_PORT_PSIE(x)	(((x) >> 4) & 0x03)
+#define	XHCI_EXT_PORT_PLT(x)	(((x) >> 6) & 0x03)
+#define	XHCI_EXT_PORT_PFD(x)	(((x) >> 8) & 0x01)
+#define	XHCI_EXT_PORT_LP(x)	(((x) >> 14) & 0x03)
+#define	XHCI_EXT_PORT_PSIM(x)	(((x) >> 16) & 0xffff)
 
-	if (!next)
-		return 0;
-	/*
-	 * Address calculation from offset of extended capabilities
-	 * (or HCCPARAMS) register - see section 5.3.6 and section 7.
-	 */
-	return ext_offset + (next << 2);
-}
+#include <linux/io.h>
 
 /**
  * Find the offset of the extended capabilities with capability ID id.
  *
- * @base PCI MMIO registers base address.
- * @ext_offset Offset from base of the first extended capability to look at,
- * 		or the address of HCCPARAMS.
- * @id Extended capability ID to search for.
+ * @base	PCI MMIO registers base address.
+ * @start	address at which to start looking, (0 or HCC_PARAMS to start at
+ *		beginning of list)
+ * @id		Extended capability ID to search for, or 0 for the next
+ *		capability
  *
- * This uses an arbitrary limit of XHCI_MAX_EXT_CAPS extended capabilities
- * to make sure that the list doesn't contain a loop.
+ * Returns the offset of the next matching extended capability structure.
+ * Some capabilities can occur several times, e.g., the XHCI_EXT_CAPS_PROTOCOL,
+ * and this provides a way to find them all.
  */
-static inline int xhci_find_ext_cap_by_id(void __iomem *base, int ext_offset, int id)
+
+static inline int xhci_find_next_ext_cap(void __iomem *base, u32 start, int id)
 {
 	u32 val;
-	int limit = XHCI_MAX_EXT_CAPS;
+	u32 next;
+	u32 offset;
 
-	while (ext_offset && limit > 0) {
-		val = readl(base + ext_offset);
-		if (XHCI_EXT_CAPS_ID(val) == id)
-			break;
-		ext_offset = xhci_find_next_cap_offset(base, ext_offset);
-		limit--;
+	offset = start;
+	if (!start || start == XHCI_HCC_PARAMS_OFFSET) {
+		val = readl(base + XHCI_HCC_PARAMS_OFFSET);
+		if (val == ~0)
+			return 0;
+		offset = XHCI_HCC_EXT_CAPS(val) << 2;
+		if (!offset)
+			return 0;
 	}
-	if (limit > 0)
-		return ext_offset;
+	do {
+		val = readl(base + offset);
+		if (val == ~0)
+			return 0;
+		if (offset != start && (id == 0 || XHCI_EXT_CAPS_ID(val) == id))
+			return offset;
+
+		next = XHCI_EXT_CAPS_NEXT(val);
+		offset += next << 2;
+	} while (next);
+
 	return 0;
 }

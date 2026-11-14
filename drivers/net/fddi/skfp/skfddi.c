@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * File Name:
  *   skfddi.c
  *
  * Copyright Information:
  *   Copyright SysKonnect 1998,1999.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * The information in this file is provided "AS IS" without warranty.
  *
@@ -74,6 +70,7 @@ static const char * const boot_msg =
 /* Include files */
 
 #include <linux/capability.h>
+#include <linux/compat.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -81,6 +78,7 @@ static const char * const boot_msg =
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 #include <linux/fddidevice.h>
 #include <linux/skbuff.h>
 #include <linux/bitops.h>
@@ -88,7 +86,7 @@ static const char * const boot_msg =
 
 #include <asm/byteorder.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include	"h/types.h"
 #undef ADDR			// undo Linux definition
@@ -107,7 +105,8 @@ static struct net_device_stats *skfp_ctl_get_stats(struct net_device *dev);
 static void skfp_ctl_set_multicast_list(struct net_device *dev);
 static void skfp_ctl_set_multicast_list_wo_lock(struct net_device *dev);
 static int skfp_ctl_set_mac_address(struct net_device *dev, void *addr);
-static int skfp_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
+static int skfp_siocdevprivate(struct net_device *dev, struct ifreq *rq,
+			       void __user *data, int cmd);
 static netdev_tx_t skfp_send_pkt(struct sk_buff *skb,
 				       struct net_device *dev);
 static void send_queued_packets(struct s_smc *smc);
@@ -149,11 +148,12 @@ extern void mac_drv_rx_mode(struct s_smc *smc, int mode);
 extern void mac_drv_clear_rx_queue(struct s_smc *smc);
 extern void enable_tx_irq(struct s_smc *smc, u_short queue);
 
-static DEFINE_PCI_DEVICE_TABLE(skfddi_pci_tbl) = {
+static const struct pci_device_id skfddi_pci_tbl[] = {
 	{ PCI_VENDOR_ID_SK, PCI_DEVICE_ID_SK_FP, PCI_ANY_ID, PCI_ANY_ID, },
 	{ }			/* Terminating entry */
 };
 MODULE_DEVICE_TABLE(pci, skfddi_pci_tbl);
+MODULE_DESCRIPTION("SysKonnect FDDI PCI driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mirko Lindner <mlindner@syskonnect.de>");
 
@@ -166,10 +166,9 @@ static const struct net_device_ops skfp_netdev_ops = {
 	.ndo_stop		= skfp_close,
 	.ndo_start_xmit		= skfp_send_pkt,
 	.ndo_get_stats		= skfp_ctl_get_stats,
-	.ndo_change_mtu		= fddi_change_mtu,
 	.ndo_set_rx_mode	= skfp_ctl_set_multicast_list,
 	.ndo_set_mac_address	= skfp_ctl_set_mac_address,
-	.ndo_do_ioctl		= skfp_ioctl,
+	.ndo_siocdevprivate	= skfp_siocdevprivate,
 };
 
 /*
@@ -298,11 +297,11 @@ static int skfp_init_one(struct pci_dev *pdev,
 	return 0;
 err_out5:
 	if (smc->os.SharedMemAddr) 
-		pci_free_consistent(pdev, smc->os.SharedMemSize,
-				    smc->os.SharedMemAddr, 
-				    smc->os.SharedMemDMA);
-	pci_free_consistent(pdev, MAX_FRAME_SIZE,
-			    smc->os.LocalRxBuffer, smc->os.LocalRxBufferDMA);
+		dma_free_coherent(&pdev->dev, smc->os.SharedMemSize,
+				  smc->os.SharedMemAddr,
+				  smc->os.SharedMemDMA);
+	dma_free_coherent(&pdev->dev, MAX_FRAME_SIZE,
+			  smc->os.LocalRxBuffer, smc->os.LocalRxBufferDMA);
 err_out4:
 	free_netdev(dev);
 err_out3:
@@ -329,17 +328,17 @@ static void skfp_remove_one(struct pci_dev *pdev)
 	unregister_netdev(p);
 
 	if (lp->os.SharedMemAddr) {
-		pci_free_consistent(&lp->os.pdev,
-				    lp->os.SharedMemSize,
-				    lp->os.SharedMemAddr,
-				    lp->os.SharedMemDMA);
+		dma_free_coherent(&pdev->dev,
+				  lp->os.SharedMemSize,
+				  lp->os.SharedMemAddr,
+				  lp->os.SharedMemDMA);
 		lp->os.SharedMemAddr = NULL;
 	}
 	if (lp->os.LocalRxBuffer) {
-		pci_free_consistent(&lp->os.pdev,
-				    MAX_FRAME_SIZE,
-				    lp->os.LocalRxBuffer,
-				    lp->os.LocalRxBufferDMA);
+		dma_free_coherent(&pdev->dev,
+				  MAX_FRAME_SIZE,
+				  lp->os.LocalRxBuffer,
+				  lp->os.LocalRxBufferDMA);
 		lp->os.LocalRxBuffer = NULL;
 	}
 #ifdef MEM_MAPPED_IO
@@ -351,7 +350,6 @@ static void skfp_remove_one(struct pci_dev *pdev)
 	free_netdev(p);
 
 	pci_disable_device(pdev);
-	pci_set_drvdata(pdev, NULL);
 }
 
 /*
@@ -396,7 +394,9 @@ static  int skfp_driver_init(struct net_device *dev)
 	spin_lock_init(&bp->DriverLock);
 	
 	// Allocate invalid frame
-	bp->LocalRxBuffer = pci_alloc_consistent(&bp->pdev, MAX_FRAME_SIZE, &bp->LocalRxBufferDMA);
+	bp->LocalRxBuffer = dma_alloc_coherent(&bp->pdev.dev, MAX_FRAME_SIZE,
+					       &bp->LocalRxBufferDMA,
+					       GFP_ATOMIC);
 	if (!bp->LocalRxBuffer) {
 		printk("could not allocate mem for ");
 		printk("LocalRxBuffer: %d byte\n", MAX_FRAME_SIZE);
@@ -409,23 +409,22 @@ static  int skfp_driver_init(struct net_device *dev)
 	if (bp->SharedMemSize > 0) {
 		bp->SharedMemSize += 16;	// for descriptor alignment
 
-		bp->SharedMemAddr = pci_alloc_consistent(&bp->pdev,
-							 bp->SharedMemSize,
-							 &bp->SharedMemDMA);
+		bp->SharedMemAddr = dma_alloc_coherent(&bp->pdev.dev,
+						       bp->SharedMemSize,
+						       &bp->SharedMemDMA,
+						       GFP_ATOMIC);
 		if (!bp->SharedMemAddr) {
 			printk("could not allocate mem for ");
 			printk("hardware module: %ld byte\n",
 			       bp->SharedMemSize);
 			goto fail;
 		}
-		bp->SharedMemHeap = 0;	// Nothing used yet.
 
 	} else {
 		bp->SharedMemAddr = NULL;
-		bp->SharedMemHeap = 0;
-	}			// SharedMemSize > 0
+	}
 
-	memset(bp->SharedMemAddr, 0, bp->SharedMemSize);
+	bp->SharedMemHeap = 0;
 
 	card_stop(smc);		// Reset adapter.
 
@@ -436,7 +435,7 @@ static  int skfp_driver_init(struct net_device *dev)
 	}
 	read_address(smc, NULL);
 	pr_debug("HW-Addr: %pMF\n", smc->hw.fddi_canon_addr.a);
-	memcpy(dev->dev_addr, smc->hw.fddi_canon_addr.a, 6);
+	eth_hw_addr_set(dev, smc->hw.fddi_canon_addr.a);
 
 	smt_reset_defaults(smc, 0);
 
@@ -444,15 +443,15 @@ static  int skfp_driver_init(struct net_device *dev)
 
 fail:
 	if (bp->SharedMemAddr) {
-		pci_free_consistent(&bp->pdev,
-				    bp->SharedMemSize,
-				    bp->SharedMemAddr,
-				    bp->SharedMemDMA);
+		dma_free_coherent(&bp->pdev.dev,
+				  bp->SharedMemSize,
+				  bp->SharedMemAddr,
+				  bp->SharedMemDMA);
 		bp->SharedMemAddr = NULL;
 	}
 	if (bp->LocalRxBuffer) {
-		pci_free_consistent(&bp->pdev, MAX_FRAME_SIZE,
-				    bp->LocalRxBuffer, bp->LocalRxBufferDMA);
+		dma_free_coherent(&bp->pdev.dev, MAX_FRAME_SIZE,
+				  bp->LocalRxBuffer, bp->LocalRxBufferDMA);
 		bp->LocalRxBuffer = NULL;
 	}
 	return err;
@@ -503,7 +502,7 @@ static int skfp_open(struct net_device *dev)
 	 *               address.
 	 */
 	read_address(smc, NULL);
-	memcpy(dev->dev_addr, smc->hw.fddi_canon_addr.a, 6);
+	eth_hw_addr_set(dev, smc->hw.fddi_canon_addr.a);
 
 	init_smt(smc, NULL);
 	smt_online(smc, 1);
@@ -927,9 +926,10 @@ static int skfp_ctl_set_mac_address(struct net_device *dev, void *addr)
 	unsigned long Flags;
 
 
-	memcpy(dev->dev_addr, p_sockaddr->sa_data, FDDI_K_ALEN);
+	dev_addr_set(dev, p_sockaddr->sa_data);
 	spin_lock_irqsave(&bp->DriverLock, Flags);
-	ResetAdapter(smc);
+	if (netif_running(dev))
+		ResetAdapter(smc);
 	spin_unlock_irqrestore(&bp->DriverLock, Flags);
 
 	return 0;		/* always return zero */
@@ -937,9 +937,9 @@ static int skfp_ctl_set_mac_address(struct net_device *dev, void *addr)
 
 
 /*
- * ==============
- * = skfp_ioctl =
- * ==============
+ * =======================
+ * = skfp_siocdevprivate =
+ * =======================
  *   
  * Overview:
  *
@@ -959,15 +959,18 @@ static int skfp_ctl_set_mac_address(struct net_device *dev, void *addr)
  */
 
 
-static int skfp_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+static int skfp_siocdevprivate(struct net_device *dev, struct ifreq *rq, void __user *data, int cmd)
 {
 	struct s_smc *smc = netdev_priv(dev);
 	skfddi_priv *lp = &smc->os;
 	struct s_skfp_ioctl ioc;
 	int status = 0;
 
-	if (copy_from_user(&ioc, rq->ifr_data, sizeof(struct s_skfp_ioctl)))
+	if (copy_from_user(&ioc, data, sizeof(struct s_skfp_ioctl)))
 		return -EFAULT;
+
+	if (in_compat_syscall())
+		return -EOPNOTSUPP;
 
 	switch (ioc.cmd) {
 	case SKFP_GET_STATS:	/* Get the driver statistics */
@@ -1012,7 +1015,7 @@ static int skfp_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
  *   is contained in a single physically contiguous buffer
  *   in which the virtual address of the start of packet
  *   (skb->data) can be converted to a physical address
- *   by using pci_map_single().
+ *   by using dma_map_single().
  *
  *   We have an internal queue for packets we can not send 
  *   immediately. Packets in this queue can be given to the 
@@ -1174,8 +1177,8 @@ static void send_queued_packets(struct s_smc *smc)
 
 		txd = (struct s_smt_fp_txd *) HWM_GET_CURR_TXD(smc, queue);
 
-		dma_address = pci_map_single(&bp->pdev, skb->data,
-					     skb->len, PCI_DMA_TODEVICE);
+		dma_address = dma_map_single(&(&bp->pdev)->dev, skb->data,
+					     skb->len, DMA_TO_DEVICE);
 		if (frame_status & LAN_TX) {
 			txd->txd_os.skb = skb;			// save skb
 			txd->txd_os.dma_addr = dma_address;	// save dma mapping
@@ -1184,8 +1187,8 @@ static void send_queued_packets(struct s_smc *smc)
                       frame_status | FIRST_FRAG | LAST_FRAG | EN_IRQ_EOF);
 
 		if (!(frame_status & LAN_TX)) {		// local only frame
-			pci_unmap_single(&bp->pdev, dma_address,
-					 skb->len, PCI_DMA_TODEVICE);
+			dma_unmap_single(&(&bp->pdev)->dev, dma_address,
+					 skb->len, DMA_TO_DEVICE);
 			dev_kfree_skb_irq(skb);
 		}
 		spin_unlock_irqrestore(&bp->DriverLock, Flags);
@@ -1213,7 +1216,7 @@ static void CheckSourceAddress(unsigned char *frame, unsigned char *hw_addr)
 	if ((unsigned short) frame[1 + 10] != 0)
 		return;
 	SRBit = frame[1 + 6] & 0x01;
-	memcpy(&frame[1 + 6], hw_addr, 6);
+	memcpy(&frame[1 + 6], hw_addr, ETH_ALEN);
 	frame[8] |= SRBit;
 }				// CheckSourceAddress
 
@@ -1467,8 +1470,9 @@ void dma_complete(struct s_smc *smc, volatile union s_fp_descr *descr, int flag)
 		if (r->rxd_os.skb && r->rxd_os.dma_addr) {
 			int MaxFrameSize = bp->MaxFrameSize;
 
-			pci_unmap_single(&bp->pdev, r->rxd_os.dma_addr,
-					 MaxFrameSize, PCI_DMA_FROMDEVICE);
+			dma_unmap_single(&(&bp->pdev)->dev,
+					 r->rxd_os.dma_addr, MaxFrameSize,
+					 DMA_FROM_DEVICE);
 			r->rxd_os.dma_addr = 0;
 		}
 	}
@@ -1503,8 +1507,8 @@ void mac_drv_tx_complete(struct s_smc *smc, volatile struct s_smt_fp_txd *txd)
 	txd->txd_os.skb = NULL;
 
 	// release the DMA mapping
-	pci_unmap_single(&smc->os.pdev, txd->txd_os.dma_addr,
-			 skb->len, PCI_DMA_TODEVICE);
+	dma_unmap_single(&(&smc->os.pdev)->dev, txd->txd_os.dma_addr,
+			 skb->len, DMA_TO_DEVICE);
 	txd->txd_os.dma_addr = 0;
 
 	smc->os.MacStat.gen.tx_packets++;	// Count transmitted packets.
@@ -1525,22 +1529,8 @@ void mac_drv_tx_complete(struct s_smc *smc, volatile struct s_smt_fp_txd *txd)
 #ifdef DUMPPACKETS
 void dump_data(unsigned char *Data, int length)
 {
-	int i, j;
-	unsigned char s[255], sh[10];
-	if (length > 64) {
-		length = 64;
-	}
 	printk(KERN_INFO "---Packet start---\n");
-	for (i = 0, j = 0; i < length / 8; i++, j += 8)
-		printk(KERN_INFO "%02x %02x %02x %02x %02x %02x %02x %02x\n",
-		       Data[j + 0], Data[j + 1], Data[j + 2], Data[j + 3],
-		       Data[j + 4], Data[j + 5], Data[j + 6], Data[j + 7]);
-	strcpy(s, "");
-	for (i = 0; i < length % 8; i++) {
-		sprintf(sh, "%02x ", Data[j + i]);
-		strcat(s, sh);
-	}
-	printk(KERN_INFO "%s\n", s);
+	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_NONE, 16, 1, Data, min_t(size_t, length, 64), false);
 	printk(KERN_INFO "------------------\n");
 }				// dump_data
 #else
@@ -1721,10 +1711,9 @@ void mac_drv_requeue_rxd(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
 				skb_reserve(skb, 3);
 				skb_put(skb, MaxFrameSize);
 				v_addr = skb->data;
-				b_addr = pci_map_single(&smc->os.pdev,
-							v_addr,
-							MaxFrameSize,
-							PCI_DMA_FROMDEVICE);
+				b_addr = dma_map_single(&(&smc->os.pdev)->dev,
+							v_addr, MaxFrameSize,
+							DMA_FROM_DEVICE);
 				rxd->rxd_os.dma_addr = b_addr;
 			} else {
 				// no skb available, use local buffer
@@ -1737,10 +1726,8 @@ void mac_drv_requeue_rxd(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
 			// we use skb from old rxd
 			rxd->rxd_os.skb = skb;
 			v_addr = skb->data;
-			b_addr = pci_map_single(&smc->os.pdev,
-						v_addr,
-						MaxFrameSize,
-						PCI_DMA_FROMDEVICE);
+			b_addr = dma_map_single(&(&smc->os.pdev)->dev, v_addr,
+						MaxFrameSize, DMA_FROM_DEVICE);
 			rxd->rxd_os.dma_addr = b_addr;
 		}
 		hwm_rx_frag(smc, v_addr, b_addr, MaxFrameSize,
@@ -1792,10 +1779,8 @@ void mac_drv_fill_rxd(struct s_smc *smc)
 			skb_reserve(skb, 3);
 			skb_put(skb, MaxFrameSize);
 			v_addr = skb->data;
-			b_addr = pci_map_single(&smc->os.pdev,
-						v_addr,
-						MaxFrameSize,
-						PCI_DMA_FROMDEVICE);
+			b_addr = dma_map_single(&(&smc->os.pdev)->dev, v_addr,
+						MaxFrameSize, DMA_FROM_DEVICE);
 			rxd->rxd_os.dma_addr = b_addr;
 		} else {
 			// no skb available, use local buffer
@@ -1852,8 +1837,9 @@ void mac_drv_clear_rxd(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
 			skfddi_priv *bp = &smc->os;
 			int MaxFrameSize = bp->MaxFrameSize;
 
-			pci_unmap_single(&bp->pdev, rxd->rxd_os.dma_addr,
-					 MaxFrameSize, PCI_DMA_FROMDEVICE);
+			dma_unmap_single(&(&bp->pdev)->dev,
+					 rxd->rxd_os.dma_addr, MaxFrameSize,
+					 DMA_FROM_DEVICE);
 
 			dev_kfree_skb(skb);
 			rxd->rxd_os.skb = NULL;
@@ -2246,15 +2232,4 @@ static struct pci_driver skfddi_pci_driver = {
 	.remove		= skfp_remove_one,
 };
 
-static int __init skfd_init(void)
-{
-	return pci_register_driver(&skfddi_pci_driver);
-}
-
-static void __exit skfd_exit(void)
-{
-	pci_unregister_driver(&skfddi_pci_driver);
-}
-
-module_init(skfd_init);
-module_exit(skfd_exit);
+module_pci_driver(skfddi_pci_driver);

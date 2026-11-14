@@ -1,9 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <asm-generic/vmlinux.lds.h>
@@ -12,7 +9,7 @@
 #include <asm/thread_info.h>
 
 OUTPUT_ARCH(arc)
-ENTRY(_stext)
+ENTRY(res_service)
 
 #ifdef CONFIG_CPU_BIG_ENDIAN
 jiffies = jiffies_64 + 4;
@@ -44,8 +41,8 @@ SECTIONS
 #endif
 
 	/*
-	 * The reason for having a seperate subsection .init.ramfs is to
-	 * prevent objump from including it in kernel dumps
+	 * The reason for having a separate subsection .init.ramfs is to
+	 * prevent objdump from including it in kernel dumps
 	 *
 	 * Reason for having .init.ramfs above .init is to make sure that the
 	 * binary blob is tucked away to one side, reducing the displacement
@@ -60,7 +57,6 @@ SECTIONS
 	.init.ramfs : { INIT_RAM_FS }
 
 	. = ALIGN(PAGE_SIZE);
-	_stext = .;
 
 	HEAD_TEXT_SECTION
 	INIT_TEXT_SECTION(L1_CACHE_BYTES)
@@ -71,7 +67,6 @@ SECTIONS
 		INIT_SETUP(L1_CACHE_BYTES)
 		INIT_CALLS
 		CON_INITCALL
-		SECURITY_INITCALL
 	}
 
 	.init.arch.info : {
@@ -82,23 +77,18 @@ SECTIONS
 
 	PERCPU_SECTION(L1_CACHE_BYTES)
 
-	/*
-	 * .exit.text is discard at runtime, not link time, to deal with
-	 * references from .debug_frame
-	 * It will be init freed, being inside [__init_start : __init_end]
-	 */
-	.exit.text : { EXIT_TEXT }
-	.exit.data : { EXIT_DATA }
-
 	. = ALIGN(PAGE_SIZE);
 	__init_end = .;
 
 	.text : {
 		_text = .;
+		_stext = .;
 		TEXT_TEXT
 		SCHED_TEXT
 		LOCK_TEXT
 		KPROBES_TEXT
+		IRQENTRY_TEXT
+		SOFTIRQENTRY_TEXT
 		*(.fixup)
 		*(.gnu.warning)
 	}
@@ -106,35 +96,35 @@ SECTIONS
 	_etext = .;
 
 	_sdata = .;
-	RO_DATA_SECTION(PAGE_SIZE)
+	RO_DATA(PAGE_SIZE)
 
 	/*
 	 * 1. this is .data essentially
 	 * 2. THREAD_SIZE for init.task, must be kernel-stk sz aligned
 	 */
-	RW_DATA_SECTION(L1_CACHE_BYTES, PAGE_SIZE, THREAD_SIZE)
+	RW_DATA(L1_CACHE_BYTES, PAGE_SIZE, THREAD_SIZE)
 
 	_edata = .;
 
-	BSS_SECTION(0, 0, 0)
+	BSS_SECTION(4, 4, 4)
 
 #ifdef CONFIG_ARC_DW2_UNWIND
 	. = ALIGN(PAGE_SIZE);
-	.debug_frame  : {
+	.eh_frame  : {
 		__start_unwind = .;
-		*(.debug_frame)
+		*(.eh_frame)
 		__end_unwind = .;
 	}
 #else
-	/DISCARD/ : {	*(.debug_frame) }
+	/DISCARD/ : {	*(.eh_frame) }
 #endif
-
-	NOTES
 
 	. = ALIGN(PAGE_SIZE);
 	_end = . ;
 
 	STABS_DEBUG
+	MODINFO
+	ELF_DETAILS
 	DISCARDS
 
 	.arcextmap 0 : {
@@ -142,15 +132,18 @@ SECTIONS
 		*(.arcextmap.*)
 	}
 
-	/* open-coded because we need .debug_frame seperately for unwinding */
-	.debug_aranges 0 : { *(.debug_aranges) }
-	.debug_pubnames 0 : { *(.debug_pubnames) }
-	.debug_info 0 : { *(.debug_info) }
-	.debug_abbrev 0 : { *(.debug_abbrev) }
-	.debug_line 0 : { *(.debug_line) }
-	.debug_str 0 : { *(.debug_str) }
-	.debug_loc 0 : { *(.debug_loc) }
-	.debug_macinfo 0 : { *(.debug_macinfo) }
+#ifndef CONFIG_DEBUG_INFO
+	/DISCARD/ : { *(.debug_frame) }
+	/DISCARD/ : { *(.debug_aranges) }
+	/DISCARD/ : { *(.debug_pubnames) }
+	/DISCARD/ : { *(.debug_info) }
+	/DISCARD/ : { *(.debug_abbrev) }
+	/DISCARD/ : { *(.debug_line) }
+	/DISCARD/ : { *(.debug_str) }
+	/DISCARD/ : { *(.debug_loc) }
+	/DISCARD/ : { *(.debug_macinfo) }
+	/DISCARD/ : { *(.debug_ranges) }
+#endif
 
 #ifdef CONFIG_ARC_HAS_DCCM
 	. = CONFIG_ARC_DCCM_BASE;

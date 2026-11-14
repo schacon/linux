@@ -1,18 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  Copyright 2007 Sony Corporation
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.
- *  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef _ASM_POWERPC_EMULATED_OPS_H
@@ -43,11 +31,10 @@ extern struct ppc_emulated {
 	struct ppc_emulated_entry popcntb;
 	struct ppc_emulated_entry spe;
 	struct ppc_emulated_entry string;
+	struct ppc_emulated_entry sync;
 	struct ppc_emulated_entry unaligned;
 #ifdef CONFIG_MATH_EMULATION
 	struct ppc_emulated_entry math;
-#elif defined(CONFIG_8XX_MINIMAL_FPEMU)
-	struct ppc_emulated_entry 8xx;
 #endif
 #ifdef CONFIG_VSX
 	struct ppc_emulated_entry vsx;
@@ -55,6 +42,11 @@ extern struct ppc_emulated {
 #ifdef CONFIG_PPC64
 	struct ppc_emulated_entry mfdscr;
 	struct ppc_emulated_entry mtdscr;
+	struct ppc_emulated_entry lq_stq;
+	struct ppc_emulated_entry lxvw4x;
+	struct ppc_emulated_entry lxvh8x;
+	struct ppc_emulated_entry lxvd2x;
+	struct ppc_emulated_entry lxvb16x;
 #endif
 } ppc_emulated;
 

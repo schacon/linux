@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * ioctl interface for /dev/chsc
  *
@@ -22,19 +23,29 @@ struct chsc_async_header {
 	__u32 key : 4;
 	__u32 : 28;
 	struct subchannel_id sid;
-} __attribute__ ((packed));
+};
 
 struct chsc_async_area {
 	struct chsc_async_header header;
 	__u8 data[CHSC_SIZE - sizeof(struct chsc_async_header)];
-} __attribute__ ((packed));
+};
+
+struct chsc_header {
+	__u16 length;
+	__u16 code;
+};
+
+struct chsc_sync_area {
+	struct chsc_header header;
+	__u8 data[CHSC_SIZE - sizeof(struct chsc_header)];
+};
 
 struct chsc_response_struct {
 	__u16 length;
 	__u16 code;
 	__u32 parms;
 	__u8 data[CHSC_SIZE - 2 * sizeof(__u16) - sizeof(__u32)];
-} __attribute__ ((packed));
+};
 
 struct chsc_chp_cd {
 	struct chp_id chpid;
@@ -126,5 +137,8 @@ struct chsc_cpd_info {
 #define CHSC_INFO_CCL _IOWR(CHSC_IOCTL_MAGIC, 0x86, struct chsc_comp_list)
 #define CHSC_INFO_CPD _IOWR(CHSC_IOCTL_MAGIC, 0x87, struct chsc_cpd_info)
 #define CHSC_INFO_DCAL _IOWR(CHSC_IOCTL_MAGIC, 0x88, struct chsc_dcal)
+#define CHSC_START_SYNC _IOWR(CHSC_IOCTL_MAGIC, 0x89, struct chsc_sync_area)
+#define CHSC_ON_CLOSE_SET _IOWR(CHSC_IOCTL_MAGIC, 0x8a, struct chsc_async_area)
+#define CHSC_ON_CLOSE_REMOVE _IO(CHSC_IOCTL_MAGIC, 0x8b)
 
 #endif

@@ -188,6 +188,16 @@ struct csio_scsi_level_data {
 	uint64_t		oslun;
 };
 
+struct csio_cmd_priv {
+	uint8_t fc_tm_flags;	/* task management flags */
+	uint16_t wr_status;
+};
+
+static inline struct csio_cmd_priv *csio_priv(struct scsi_cmnd *cmd)
+{
+	return scsi_cmd_priv(cmd);
+}
+
 static inline struct csio_ioreq *
 csio_get_scsi_ioreq(struct csio_scsim *scm)
 {
@@ -328,10 +338,9 @@ csio_scsi_close(struct csio_ioreq *ioreq)
 	return ioreq->drv_status;
 }
 
-void csio_scsi_cleanup_io_q(struct csio_scsim *, struct list_head *);
-int csio_scsim_cleanup_io(struct csio_scsim *, bool abort);
-int csio_scsim_cleanup_io_lnode(struct csio_scsim *,
-					  struct csio_lnode *);
+void csio_scsi_cleanup_io_q(struct csio_hw *, struct list_head *);
+int csio_scsim_cleanup_io(struct csio_hw *, bool abort);
+int csio_scsim_cleanup_io_lnode(struct csio_hw *, struct csio_lnode *);
 struct csio_ioreq *csio_scsi_cmpl_handler(struct csio_hw *, void *, uint32_t,
 					  struct csio_fl_dma_buf *,
 					  void *, uint8_t **);

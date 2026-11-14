@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_ARM_WORD_AT_A_TIME_H
 #define __ASM_ARM_WORD_AT_A_TIME_H
 
@@ -7,7 +8,8 @@
  * Little-endian word-at-a-time zero byte handling.
  * Heavily based on the x86 algorithm.
  */
-#include <linux/kernel.h>
+#include <linux/bitops.h>
+#include <linux/wordpart.h>
 
 struct word_at_a_time {
 	const unsigned long one_bits, high_bits;
@@ -48,9 +50,13 @@ static inline unsigned long find_zero(unsigned long mask)
 	return ret;
 }
 
-#ifdef CONFIG_DCACHE_WORD_ACCESS
-
 #define zero_bytemask(mask) (mask)
+
+#else	/* __ARMEB__ */
+#include <asm-generic/word-at-a-time.h>
+#endif
+
+#ifdef CONFIG_DCACHE_WORD_ACCESS
 
 /*
  * Load an unaligned word from kernel space.
@@ -61,36 +67,34 @@ static inline unsigned long find_zero(unsigned long mask)
  */
 static inline unsigned long load_unaligned_zeropad(const void *addr)
 {
-	unsigned long ret, offset;
+	unsigned long ret, tmp;
 
 	/* Load word from unaligned pointer addr */
 	asm(
 	"1:	ldr	%0, [%2]\n"
 	"2:\n"
-	"	.pushsection .fixup,\"ax\"\n"
+	"	.pushsection .text.fixup,\"ax\"\n"
 	"	.align 2\n"
-	"3:	and	%1, %2, #0x3\n"
-	"	bic	%2, %2, #0x3\n"
-	"	ldr	%0, [%2]\n"
+	"3:	bic	%1, %2, #0x3\n"
+	"	ldr	%0, [%1]\n"
+	"	and	%1, %2, #0x3\n"
 	"	lsl	%1, %1, #0x3\n"
+#ifndef __ARMEB__
 	"	lsr	%0, %0, %1\n"
+#else
+	"	lsl	%0, %0, %1\n"
+#endif
 	"	b	2b\n"
 	"	.popsection\n"
 	"	.pushsection __ex_table,\"a\"\n"
 	"	.align	3\n"
 	"	.long	1b, 3b\n"
 	"	.popsection"
-	: "=&r" (ret), "=&r" (offset)
+	: "=&r" (ret), "=&r" (tmp)
 	: "r" (addr), "Qo" (*(unsigned long *)addr));
 
 	return ret;
 }
 
-
 #endif	/* DCACHE_WORD_ACCESS */
-
-#else	/* __ARMEB__ */
-#include <asm-generic/word-at-a-time.h>
-#endif
-
 #endif /* __ASM_ARM_WORD_AT_A_TIME_H */

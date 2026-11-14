@@ -1,91 +1,96 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/kernel.h>
 #include <linux/errno.h>
-#include <linux/platform_device.h>
 #include <linux/input.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/regmap.h>
 #include <linux/slab.h>
-#include <linux/mfd/pm8xxx/core.h>
 
-#define VIB_DRV			0x4A
-
-#define VIB_DRV_SEL_MASK	0xf8
-#define VIB_DRV_SEL_SHIFT	0x03
-#define VIB_DRV_EN_MANUAL_MASK	0xfc
-
-#define VIB_MAX_LEVEL_mV	(3100)
-#define VIB_MIN_LEVEL_mV	(1200)
-#define VIB_MAX_LEVELS		(VIB_MAX_LEVEL_mV - VIB_MIN_LEVEL_mV)
+#define VIB_MAX_LEVEL_mV(vib)	(vib->drv2_addr ? 3544 : 3100)
+#define VIB_MIN_LEVEL_mV(vib)	(vib->drv2_addr ? 1504 : 1200)
+#define VIB_PER_STEP_mV(vib)	(vib->drv2_addr ? 8 : 100)
+#define VIB_MAX_LEVELS(vib) \
+	(VIB_MAX_LEVEL_mV(vib) - VIB_MIN_LEVEL_mV(vib) + VIB_PER_STEP_mV(vib))
 
 #define MAX_FF_SPEED		0xff
+
+struct pm8xxx_regs {
+	unsigned int enable_offset;
+	unsigned int enable_mask;
+
+	unsigned int drv_offset;
+	unsigned int drv_mask;
+	unsigned int drv_shift;
+	unsigned int drv2_offset;
+	unsigned int drv2_mask;
+	unsigned int drv2_shift;
+	unsigned int drv_en_manual_mask;
+	bool	     drv_in_step;
+};
+
+static const struct pm8xxx_regs pm8058_regs = {
+	.drv_offset = 0,
+	.drv_mask = GENMASK(7, 3),
+	.drv_shift = 3,
+	.drv_en_manual_mask = 0xfc,
+	.drv_in_step = true,
+};
+
+static struct pm8xxx_regs pm8916_regs = {
+	.enable_offset = 0x46,
+	.enable_mask = BIT(7),
+	.drv_offset = 0x41,
+	.drv_mask = GENMASK(4, 0),
+	.drv_shift = 0,
+	.drv_en_manual_mask = 0,
+	.drv_in_step = true,
+};
+
+static struct pm8xxx_regs pmi632_regs = {
+	.enable_offset = 0x46,
+	.enable_mask = BIT(7),
+	.drv_offset = 0x40,
+	.drv_mask = GENMASK(7, 0),
+	.drv_shift = 0,
+	.drv2_offset = 0x41,
+	.drv2_mask = GENMASK(3, 0),
+	.drv2_shift = 8,
+	.drv_en_manual_mask = 0,
+	.drv_in_step = false,
+};
 
 /**
  * struct pm8xxx_vib - structure to hold vibrator data
  * @vib_input_dev: input device supporting force feedback
  * @work: work structure to set the vibration parameters
- * @dev: device supporting force feedback
+ * @regmap: regmap for register read/write
+ * @regs: registers' info
+ * @enable_addr: vibrator enable register
+ * @drv_addr: vibrator drive strength register
+ * @drv2_addr: vibrator drive strength upper byte register
  * @speed: speed of vibration set from userland
  * @active: state of vibrator
  * @level: level of vibration to set in the chip
- * @reg_vib_drv: VIB_DRV register value
+ * @reg_vib_drv: regs->drv_addr register value
  */
 struct pm8xxx_vib {
 	struct input_dev *vib_input_dev;
 	struct work_struct work;
-	struct device *dev;
+	struct regmap *regmap;
+	const struct pm8xxx_regs *regs;
+	unsigned int enable_addr;
+	unsigned int drv_addr;
+	unsigned int drv2_addr;
 	int speed;
 	int level;
 	bool active;
 	u8  reg_vib_drv;
 };
-
-/**
- * pm8xxx_vib_read_u8 - helper to read a byte from pmic chip
- * @vib: pointer to vibrator structure
- * @data: placeholder for data to be read
- * @reg: register address
- */
-static int pm8xxx_vib_read_u8(struct pm8xxx_vib *vib,
-				 u8 *data, u16 reg)
-{
-	int rc;
-
-	rc = pm8xxx_readb(vib->dev->parent, reg, data);
-	if (rc < 0)
-		dev_warn(vib->dev, "Error reading pm8xxx reg 0x%x(0x%x)\n",
-				reg, rc);
-	return rc;
-}
-
-/**
- * pm8xxx_vib_write_u8 - helper to write a byte to pmic chip
- * @vib: pointer to vibrator structure
- * @data: data to write
- * @reg: register address
- */
-static int pm8xxx_vib_write_u8(struct pm8xxx_vib *vib,
-				 u8 data, u16 reg)
-{
-	int rc;
-
-	rc = pm8xxx_writeb(vib->dev->parent, reg, data);
-	if (rc < 0)
-		dev_warn(vib->dev, "Error writing pm8xxx reg 0x%x(0x%x)\n",
-				reg, rc);
-	return rc;
-}
 
 /**
  * pm8xxx_vib_set - handler to start/stop vibration
@@ -95,19 +100,36 @@ static int pm8xxx_vib_write_u8(struct pm8xxx_vib *vib,
 static int pm8xxx_vib_set(struct pm8xxx_vib *vib, bool on)
 {
 	int rc;
-	u8 val = vib->reg_vib_drv;
+	unsigned int val = vib->reg_vib_drv;
+	const struct pm8xxx_regs *regs = vib->regs;
+
+	if (regs->drv_in_step)
+		vib->level /= VIB_PER_STEP_mV(vib);
 
 	if (on)
-		val |= ((vib->level << VIB_DRV_SEL_SHIFT) & VIB_DRV_SEL_MASK);
+		val |= (vib->level << regs->drv_shift) & regs->drv_mask;
 	else
-		val &= ~VIB_DRV_SEL_MASK;
+		val &= ~regs->drv_mask;
 
-	rc = pm8xxx_vib_write_u8(vib, val, VIB_DRV);
+	rc = regmap_write(vib->regmap, vib->drv_addr, val);
 	if (rc < 0)
 		return rc;
 
 	vib->reg_vib_drv = val;
-	return 0;
+
+	if (regs->drv2_mask) {
+		val = vib->level << regs->drv2_shift;
+		rc = regmap_write_bits(vib->regmap, vib->drv2_addr,
+				regs->drv2_mask, on ? val : 0);
+		if (rc < 0)
+			return rc;
+	}
+
+	if (regs->enable_mask)
+		rc = regmap_update_bits(vib->regmap, vib->enable_addr,
+					regs->enable_mask, on ? regs->enable_mask : 0);
+
+	return rc;
 }
 
 /**
@@ -117,25 +139,24 @@ static int pm8xxx_vib_set(struct pm8xxx_vib *vib, bool on)
 static void pm8xxx_work_handler(struct work_struct *work)
 {
 	struct pm8xxx_vib *vib = container_of(work, struct pm8xxx_vib, work);
+	unsigned int val;
 	int rc;
-	u8 val;
 
-	rc = pm8xxx_vib_read_u8(vib, &val, VIB_DRV);
+	rc = regmap_read(vib->regmap, vib->drv_addr, &val);
 	if (rc < 0)
 		return;
 
 	/*
-	 * pmic vibrator supports voltage ranges from 1.2 to 3.1V, so
+	 * pmic vibrator supports voltage ranges from MIN_LEVEL to MAX_LEVEL, so
 	 * scale the level to fit into these ranges.
 	 */
 	if (vib->speed) {
 		vib->active = true;
-		vib->level = ((VIB_MAX_LEVELS * vib->speed) / MAX_FF_SPEED) +
-						VIB_MIN_LEVEL_mV;
-		vib->level /= 100;
+		vib->level = VIB_MIN_LEVEL_mV(vib);
+		vib->level += mult_frac(VIB_MAX_LEVELS(vib), vib->speed, MAX_FF_SPEED);
 	} else {
 		vib->active = false;
-		vib->level = VIB_MIN_LEVEL_mV / 100;
+		vib->level = VIB_MIN_LEVEL_mV(vib);
 	}
 
 	pm8xxx_vib_set(vib, vib->active);
@@ -179,39 +200,52 @@ static int pm8xxx_vib_play_effect(struct input_dev *dev, void *data,
 }
 
 static int pm8xxx_vib_probe(struct platform_device *pdev)
-
 {
 	struct pm8xxx_vib *vib;
 	struct input_dev *input_dev;
 	int error;
-	u8 val;
+	unsigned int val, reg_base = 0;
+	const struct pm8xxx_regs *regs;
 
-	vib = kzalloc(sizeof(*vib), GFP_KERNEL);
-	input_dev = input_allocate_device();
-	if (!vib || !input_dev) {
-		dev_err(&pdev->dev, "couldn't allocate memory\n");
-		error = -ENOMEM;
-		goto err_free_mem;
-	}
+	vib = devm_kzalloc_obj(&pdev->dev, *vib);
+	if (!vib)
+		return -ENOMEM;
+
+	vib->regmap = dev_get_regmap(pdev->dev.parent, NULL);
+	if (!vib->regmap)
+		return -ENODEV;
+
+	input_dev = devm_input_allocate_device(&pdev->dev);
+	if (!input_dev)
+		return -ENOMEM;
 
 	INIT_WORK(&vib->work, pm8xxx_work_handler);
-	vib->dev = &pdev->dev;
 	vib->vib_input_dev = input_dev;
 
-	/* operate in manual mode */
-	error = pm8xxx_vib_read_u8(vib, &val, VIB_DRV);
+	error = fwnode_property_read_u32(pdev->dev.fwnode, "reg", &reg_base);
 	if (error < 0)
-		goto err_free_mem;
-	val &= ~VIB_DRV_EN_MANUAL_MASK;
-	error = pm8xxx_vib_write_u8(vib, val, VIB_DRV);
-	if (error < 0)
-		goto err_free_mem;
+		return dev_err_probe(&pdev->dev, error, "Failed to read reg address\n");
 
+	regs = of_device_get_match_data(&pdev->dev);
+	vib->enable_addr = reg_base + regs->enable_offset;
+	vib->drv_addr = reg_base + regs->drv_offset;
+	vib->drv2_addr = reg_base + regs->drv2_offset;
+
+	/* operate in manual mode */
+	error = regmap_read(vib->regmap, vib->drv_addr, &val);
+	if (error < 0)
+		return error;
+
+	val &= regs->drv_en_manual_mask;
+	error = regmap_write(vib->regmap, vib->drv_addr, val);
+	if (error < 0)
+		return error;
+
+	vib->regs = regs;
 	vib->reg_vib_drv = val;
 
 	input_dev->name = "pm8xxx_vib_ffmemless";
 	input_dev->id.version = 1;
-	input_dev->dev.parent = &pdev->dev;
 	input_dev->close = pm8xxx_vib_close;
 	input_set_drvdata(input_dev, vib);
 	input_set_capability(vib->vib_input_dev, EV_FF, FF_RUMBLE);
@@ -221,40 +255,19 @@ static int pm8xxx_vib_probe(struct platform_device *pdev)
 	if (error) {
 		dev_err(&pdev->dev,
 			"couldn't register vibrator as FF device\n");
-		goto err_free_mem;
+		return error;
 	}
 
 	error = input_register_device(input_dev);
 	if (error) {
 		dev_err(&pdev->dev, "couldn't register input device\n");
-		goto err_destroy_memless;
+		return error;
 	}
 
 	platform_set_drvdata(pdev, vib);
 	return 0;
-
-err_destroy_memless:
-	input_ff_destroy(input_dev);
-err_free_mem:
-	input_free_device(input_dev);
-	kfree(vib);
-
-	return error;
 }
 
-static int pm8xxx_vib_remove(struct platform_device *pdev)
-{
-	struct pm8xxx_vib *vib = platform_get_drvdata(pdev);
-
-	input_unregister_device(vib->vib_input_dev);
-	kfree(vib);
-
-	platform_set_drvdata(pdev, NULL);
-
-	return 0;
-}
-
-#ifdef CONFIG_PM_SLEEP
 static int pm8xxx_vib_suspend(struct device *dev)
 {
 	struct pm8xxx_vib *vib = dev_get_drvdata(dev);
@@ -264,17 +277,24 @@ static int pm8xxx_vib_suspend(struct device *dev)
 
 	return 0;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(pm8xxx_vib_pm_ops, pm8xxx_vib_suspend, NULL);
+static DEFINE_SIMPLE_DEV_PM_OPS(pm8xxx_vib_pm_ops, pm8xxx_vib_suspend, NULL);
+
+static const struct of_device_id pm8xxx_vib_id_table[] = {
+	{ .compatible = "qcom,pm8058-vib", .data = &pm8058_regs },
+	{ .compatible = "qcom,pm8921-vib", .data = &pm8058_regs },
+	{ .compatible = "qcom,pm8916-vib", .data = &pm8916_regs },
+	{ .compatible = "qcom,pmi632-vib", .data = &pmi632_regs },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, pm8xxx_vib_id_table);
 
 static struct platform_driver pm8xxx_vib_driver = {
 	.probe		= pm8xxx_vib_probe,
-	.remove		= pm8xxx_vib_remove,
 	.driver		= {
 		.name	= "pm8xxx-vib",
-		.owner	= THIS_MODULE,
-		.pm	= &pm8xxx_vib_pm_ops,
+		.pm	= pm_sleep_ptr(&pm8xxx_vib_pm_ops),
+		.of_match_table = pm8xxx_vib_id_table,
 	},
 };
 module_platform_driver(pm8xxx_vib_driver);

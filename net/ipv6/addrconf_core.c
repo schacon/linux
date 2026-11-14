@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * IPv6 library code, needed by static components when full IPv6 support is
  * not configured or static.
@@ -5,6 +6,15 @@
 
 #include <linux/export.h>
 #include <net/ipv6.h>
+#include <net/addrconf.h>
+#include <net/ip.h>
+
+/* if ipv6 module registers this function is used by xfrm to force all
+ * sockets to relookup their nodes - this is fairly expensive, be
+ * careful
+ */
+void (*__fib6_flush_trees)(struct net *);
+EXPORT_SYMBOL(__fib6_flush_trees);
 
 #define IPV6_ADDR_SCOPE_TYPE(scope)	((scope) << 16)
 
@@ -79,6 +89,7 @@ int __ipv6_addr_type(const struct in6_addr *addr)
 EXPORT_SYMBOL(__ipv6_addr_type);
 
 static ATOMIC_NOTIFIER_HEAD(inet6addr_chain);
+static BLOCKING_NOTIFIER_HEAD(inet6addr_validator_chain);
 
 int register_inet6addr_notifier(struct notifier_block *nb)
 {
@@ -96,4 +107,77 @@ int inet6addr_notifier_call_chain(unsigned long val, void *v)
 {
 	return atomic_notifier_call_chain(&inet6addr_chain, val, v);
 }
-EXPORT_SYMBOL(inet6addr_notifier_call_chain);
+
+int register_inet6addr_validator_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&inet6addr_validator_chain, nb);
+}
+EXPORT_SYMBOL(register_inet6addr_validator_notifier);
+
+int unregister_inet6addr_validator_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&inet6addr_validator_chain,
+						  nb);
+}
+EXPORT_SYMBOL(unregister_inet6addr_validator_notifier);
+
+int inet6addr_validator_notifier_call_chain(unsigned long val, void *v)
+{
+	return blocking_notifier_call_chain(&inet6addr_validator_chain, val, v);
+}
+
+/* IPv6 Wildcard Address and Loopback Address defined by RFC2553 */
+const struct in6_addr in6addr_loopback __aligned(BITS_PER_LONG/8)
+	= IN6ADDR_LOOPBACK_INIT;
+EXPORT_SYMBOL(in6addr_loopback);
+const struct in6_addr in6addr_any __aligned(BITS_PER_LONG/8)
+	= IN6ADDR_ANY_INIT;
+EXPORT_SYMBOL(in6addr_any);
+const struct in6_addr in6addr_linklocal_allnodes __aligned(BITS_PER_LONG/8)
+	= IN6ADDR_LINKLOCAL_ALLNODES_INIT;
+EXPORT_SYMBOL(in6addr_linklocal_allnodes);
+const struct in6_addr in6addr_linklocal_allrouters __aligned(BITS_PER_LONG/8)
+	= IN6ADDR_LINKLOCAL_ALLROUTERS_INIT;
+const struct in6_addr in6addr_interfacelocal_allnodes __aligned(BITS_PER_LONG/8)
+	= IN6ADDR_INTERFACELOCAL_ALLNODES_INIT;
+const struct in6_addr in6addr_interfacelocal_allrouters __aligned(BITS_PER_LONG/8)
+	= IN6ADDR_INTERFACELOCAL_ALLROUTERS_INIT;
+const struct in6_addr in6addr_sitelocal_allrouters __aligned(BITS_PER_LONG/8)
+	= IN6ADDR_SITELOCAL_ALLROUTERS_INIT;
+
+static void snmp6_free_dev(struct inet6_dev *idev)
+{
+	kfree(idev->stats.icmpv6msgdev);
+	kfree(idev->stats.icmpv6dev);
+	free_percpu(idev->stats.ipv6);
+}
+
+static void in6_dev_finish_destroy_rcu(struct rcu_head *head)
+{
+	struct inet6_dev *idev = container_of(head, struct inet6_dev, rcu);
+
+	snmp6_free_dev(idev);
+	kfree(idev);
+}
+
+/* Nobody refers to this device, we may destroy it. */
+
+void in6_dev_finish_destroy(struct inet6_dev *idev)
+{
+	struct net_device *dev = idev->dev;
+
+	WARN_ON(!list_empty(&idev->addr_list));
+	WARN_ON(rcu_access_pointer(idev->mc_list));
+	WARN_ON(timer_pending(&idev->rs_timer));
+
+#ifdef NET_REFCNT_DEBUG
+	pr_debug("%s: %s\n", __func__, dev ? dev->name : "NIL");
+#endif
+	netdev_put(dev, &idev->dev_tracker);
+	if (!idev->dead) {
+		pr_warn("Freeing alive inet6 device %p\n", idev);
+		return;
+	}
+	call_rcu(&idev->rcu, in6_dev_finish_destroy_rcu);
+}
+EXPORT_SYMBOL(in6_dev_finish_destroy);

@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Fujitsu serial touchscreen driver
  *
  * Copyright (c) Dmitry Torokhov <dtor@mail.ru>
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
- */
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -16,7 +12,6 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/serio.h>
-#include <linux/init.h>
 
 #define DRIVER_DESC	"Fujitsu serial touchscreen driver"
 
@@ -104,7 +99,7 @@ static int fujitsu_connect(struct serio *serio, struct serio_driver *drv)
 	struct input_dev *input_dev;
 	int err;
 
-	fujitsu = kzalloc(sizeof(struct fujitsu), GFP_KERNEL);
+	fujitsu = kzalloc_obj(*fujitsu);
 	input_dev = input_allocate_device();
 	if (!fujitsu || !input_dev) {
 		err = -ENOMEM;
@@ -113,8 +108,7 @@ static int fujitsu_connect(struct serio *serio, struct serio_driver *drv)
 
 	fujitsu->serio = serio;
 	fujitsu->dev = input_dev;
-	snprintf(fujitsu->phys, sizeof(fujitsu->phys),
-		 "%s/input0", serio->phys);
+	scnprintf(fujitsu->phys, sizeof(fujitsu->phys), "%s/input0", serio->phys);
 
 	input_dev->name = "Fujitsu Serial Touchscreen";
 	input_dev->phys = fujitsu->phys;
@@ -152,7 +146,7 @@ static int fujitsu_connect(struct serio *serio, struct serio_driver *drv)
 /*
  * The serio driver structure.
  */
-static struct serio_device_id fujitsu_serio_ids[] = {
+static const struct serio_device_id fujitsu_serio_ids[] = {
 	{
 		.type	= SERIO_RS232,
 		.proto	= SERIO_FUJITSU,

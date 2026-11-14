@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for Linear Technology LTC4261 I2C Negative Voltage Hot Swap Controller
  *
@@ -9,20 +10,6 @@
  *  Copyright (C) 2008 Ira W. Snyder <iws@ovro.caltech.edu>
  *
  * Datasheet: http://cds.linear.com/docs/Datasheet/42612fb.pdf
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/kernel.h>
@@ -55,7 +42,7 @@
 #define FAULT_OC	(1<<2)
 
 struct ltc4261_data {
-	struct device *hwmon_dev;
+	struct i2c_client *client;
 
 	struct mutex update_lock;
 	bool valid;
@@ -67,8 +54,8 @@ struct ltc4261_data {
 
 static struct ltc4261_data *ltc4261_update_device(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct ltc4261_data *data = i2c_get_clientdata(client);
+	struct ltc4261_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 	struct ltc4261_data *ret = data;
 
 	mutex_lock(&data->update_lock);
@@ -86,13 +73,13 @@ static struct ltc4261_data *ltc4261_update_device(struct device *dev)
 					"Failed to read ADC value: error %d\n",
 					val);
 				ret = ERR_PTR(val);
-				data->valid = 0;
+				data->valid = false;
 				goto abort;
 			}
 			data->regs[i] = val;
 		}
 		data->last_updated = jiffies;
-		data->valid = 1;
+		data->valid = true;
 	}
 abort:
 	mutex_unlock(&data->update_lock);
@@ -132,7 +119,7 @@ static int ltc4261_get_value(struct ltc4261_data *data, u8 reg)
 	return val;
 }
 
-static ssize_t ltc4261_show_value(struct device *dev,
+static ssize_t ltc4261_value_show(struct device *dev,
 				  struct device_attribute *da, char *buf)
 {
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
@@ -143,14 +130,13 @@ static ssize_t ltc4261_show_value(struct device *dev,
 		return PTR_ERR(data);
 
 	value = ltc4261_get_value(data, attr->index);
-	return snprintf(buf, PAGE_SIZE, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);
 }
 
-static ssize_t ltc4261_show_bool(struct device *dev,
+static ssize_t ltc4261_bool_show(struct device *dev,
 				 struct device_attribute *da, char *buf)
 {
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
-	struct i2c_client *client = to_i2c_client(dev);
 	struct ltc4261_data *data = ltc4261_update_device(dev);
 	u8 fault;
 
@@ -159,18 +145,16 @@ static ssize_t ltc4261_show_bool(struct device *dev,
 
 	fault = data->regs[LTC4261_FAULT] & attr->index;
 	if (fault)		/* Clear reported faults in chip register */
-		i2c_smbus_write_byte_data(client, LTC4261_FAULT, ~fault);
+		i2c_smbus_write_byte_data(data->client, LTC4261_FAULT, ~fault);
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", fault ? 1 : 0);
+	return sysfs_emit(buf, "%d\n", fault ? 1 : 0);
 }
 
 /*
  * Input voltages.
  */
-static SENSOR_DEVICE_ATTR(in1_input, S_IRUGO, ltc4261_show_value, NULL,
-			  LTC4261_ADIN_H);
-static SENSOR_DEVICE_ATTR(in2_input, S_IRUGO, ltc4261_show_value, NULL,
-			  LTC4261_ADIN2_H);
+static SENSOR_DEVICE_ATTR_RO(in1_input, ltc4261_value, LTC4261_ADIN_H);
+static SENSOR_DEVICE_ATTR_RO(in2_input, ltc4261_value, LTC4261_ADIN2_H);
 
 /*
  * Voltage alarms. The chip has only one set of voltage alarm status bits,
@@ -180,24 +164,18 @@ static SENSOR_DEVICE_ATTR(in2_input, S_IRUGO, ltc4261_show_value, NULL,
  * To ensure that the alarm condition is reported to the user, report it
  * with both voltage sensors.
  */
-static SENSOR_DEVICE_ATTR(in1_min_alarm, S_IRUGO, ltc4261_show_bool, NULL,
-			  FAULT_UV);
-static SENSOR_DEVICE_ATTR(in1_max_alarm, S_IRUGO, ltc4261_show_bool, NULL,
-			  FAULT_OV);
-static SENSOR_DEVICE_ATTR(in2_min_alarm, S_IRUGO, ltc4261_show_bool, NULL,
-			  FAULT_UV);
-static SENSOR_DEVICE_ATTR(in2_max_alarm, S_IRUGO, ltc4261_show_bool, NULL,
-			  FAULT_OV);
+static SENSOR_DEVICE_ATTR_RO(in1_min_alarm, ltc4261_bool, FAULT_UV);
+static SENSOR_DEVICE_ATTR_RO(in1_max_alarm, ltc4261_bool, FAULT_OV);
+static SENSOR_DEVICE_ATTR_RO(in2_min_alarm, ltc4261_bool, FAULT_UV);
+static SENSOR_DEVICE_ATTR_RO(in2_max_alarm, ltc4261_bool, FAULT_OV);
 
 /* Currents (via sense resistor) */
-static SENSOR_DEVICE_ATTR(curr1_input, S_IRUGO, ltc4261_show_value, NULL,
-			  LTC4261_SENSE_H);
+static SENSOR_DEVICE_ATTR_RO(curr1_input, ltc4261_value, LTC4261_SENSE_H);
 
 /* Overcurrent alarm */
-static SENSOR_DEVICE_ATTR(curr1_max_alarm, S_IRUGO, ltc4261_show_bool, NULL,
-			  FAULT_OC);
+static SENSOR_DEVICE_ATTR_RO(curr1_max_alarm, ltc4261_bool, FAULT_OC);
 
-static struct attribute *ltc4261_attributes[] = {
+static struct attribute *ltc4261_attrs[] = {
 	&sensor_dev_attr_in1_input.dev_attr.attr,
 	&sensor_dev_attr_in1_min_alarm.dev_attr.attr,
 	&sensor_dev_attr_in1_max_alarm.dev_attr.attr,
@@ -210,67 +188,42 @@ static struct attribute *ltc4261_attributes[] = {
 
 	NULL,
 };
+ATTRIBUTE_GROUPS(ltc4261);
 
-static const struct attribute_group ltc4261_group = {
-	.attrs = ltc4261_attributes,
-};
-
-static int ltc4261_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int ltc4261_probe(struct i2c_client *client)
 {
 	struct i2c_adapter *adapter = client->adapter;
+	struct device *dev = &client->dev;
 	struct ltc4261_data *data;
-	int ret;
+	struct device *hwmon_dev;
 
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 		return -ENODEV;
 
 	if (i2c_smbus_read_byte_data(client, LTC4261_STATUS) < 0) {
-		dev_err(&client->dev, "Failed to read status register\n");
+		dev_err(dev, "Failed to read status register\n");
 		return -ENODEV;
 	}
 
-	data = devm_kzalloc(&client->dev, sizeof(*data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, *data);
 	if (!data)
 		return -ENOMEM;
 
-	i2c_set_clientdata(client, data);
+	data->client = client;
 	mutex_init(&data->update_lock);
 
 	/* Clear faults */
 	i2c_smbus_write_byte_data(client, LTC4261_FAULT, 0x00);
 
-	/* Register sysfs hooks */
-	ret = sysfs_create_group(&client->dev.kobj, &ltc4261_group);
-	if (ret)
-		return ret;
-
-	data->hwmon_dev = hwmon_device_register(&client->dev);
-	if (IS_ERR(data->hwmon_dev)) {
-		ret = PTR_ERR(data->hwmon_dev);
-		goto out_hwmon_device_register;
-	}
-
-	return 0;
-
-out_hwmon_device_register:
-	sysfs_remove_group(&client->dev.kobj, &ltc4261_group);
-	return ret;
-}
-
-static int ltc4261_remove(struct i2c_client *client)
-{
-	struct ltc4261_data *data = i2c_get_clientdata(client);
-
-	hwmon_device_unregister(data->hwmon_dev);
-	sysfs_remove_group(&client->dev.kobj, &ltc4261_group);
-
-	return 0;
+	hwmon_dev = devm_hwmon_device_register_with_groups(dev, client->name,
+							   data,
+							   ltc4261_groups);
+	return PTR_ERR_OR_ZERO(hwmon_dev);
 }
 
 static const struct i2c_device_id ltc4261_id[] = {
-	{"ltc4261", 0},
-	{}
+	{ .name = "ltc4261" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, ltc4261_id);
@@ -281,7 +234,6 @@ static struct i2c_driver ltc4261_driver = {
 		   .name = "ltc4261",
 		   },
 	.probe = ltc4261_probe,
-	.remove = ltc4261_remove,
 	.id_table = ltc4261_id,
 };
 

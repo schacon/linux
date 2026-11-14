@@ -41,7 +41,7 @@
 #include <linux/compiler.h>
 #include <linux/export.h>
 #include <linux/module.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <asm/page.h>
 #include <scsi/scsi.h>
 #include <scsi/scsi_device.h>
@@ -147,31 +147,9 @@ csio_scsi_itnexus_loss_error(uint16_t error)
 	case FW_ERR_RDEV_LOST:
 	case FW_ERR_RDEV_LOGO:
 	case FW_ERR_RDEV_IMPL_LOGO:
-		return 1;
+		return true;
 	}
-	return 0;
-}
-
-static inline void
-csio_scsi_tag(struct scsi_cmnd *scmnd, uint8_t *tag, uint8_t hq,
-	      uint8_t oq, uint8_t sq)
-{
-	char stag[2];
-
-	if (scsi_populate_tag_msg(scmnd, stag)) {
-		switch (stag[0]) {
-		case HEAD_OF_QUEUE_TAG:
-			*tag = hq;
-			break;
-		case ORDERED_QUEUE_TAG:
-			*tag = oq;
-			break;
-		default:
-			*tag = sq;
-			break;
-		}
-	} else
-		*tag = 0;
+	return false;
 }
 
 /*
@@ -188,15 +166,13 @@ csio_scsi_fcp_cmnd(struct csio_ioreq *req, void *addr)
 	struct scsi_cmnd *scmnd = csio_scsi_cmnd(req);
 
 	/* Check for Task Management */
-	if (likely(scmnd->SCp.Message == 0)) {
+	if (likely(csio_priv(scmnd)->fc_tm_flags == 0)) {
 		int_to_scsilun(scmnd->device->lun, &fcp_cmnd->fc_lun);
 		fcp_cmnd->fc_tm_flags = 0;
 		fcp_cmnd->fc_cmdref = 0;
-		fcp_cmnd->fc_pri_ta = 0;
 
 		memcpy(fcp_cmnd->fc_cdb, scmnd->cmnd, 16);
-		csio_scsi_tag(scmnd, &fcp_cmnd->fc_pri_ta,
-			      FCP_PTA_HEADQ, FCP_PTA_ORDERED, FCP_PTA_SIMPLE);
+		fcp_cmnd->fc_pri_ta = FCP_PTA_SIMPLE;
 		fcp_cmnd->fc_dl = cpu_to_be32(scsi_bufflen(scmnd));
 
 		if (req->nsge)
@@ -209,7 +185,7 @@ csio_scsi_fcp_cmnd(struct csio_ioreq *req, void *addr)
 	} else {
 		memset(fcp_cmnd, 0, sizeof(*fcp_cmnd));
 		int_to_scsilun(scmnd->device->lun, &fcp_cmnd->fc_lun);
-		fcp_cmnd->fc_tm_flags = (uint8_t)scmnd->SCp.Message;
+		fcp_cmnd->fc_tm_flags = csio_priv(scmnd)->fc_tm_flags;
 	}
 }
 
@@ -230,10 +206,10 @@ csio_scsi_init_cmd_wr(struct csio_ioreq *req, void *addr, uint32_t size)
 	struct csio_dma_buf *dma_buf;
 	uint8_t imm = csio_hw_to_scsim(hw)->proto_cmd_len;
 
-	wr->op_immdlen = cpu_to_be32(FW_WR_OP(FW_SCSI_CMD_WR) |
+	wr->op_immdlen = cpu_to_be32(FW_WR_OP_V(FW_SCSI_CMD_WR) |
 					  FW_SCSI_CMD_WR_IMMDLEN(imm));
-	wr->flowid_len16 = cpu_to_be32(FW_WR_FLOWID(rn->flowid) |
-					    FW_WR_LEN16(
+	wr->flowid_len16 = cpu_to_be32(FW_WR_FLOWID_V(rn->flowid) |
+					    FW_WR_LEN16_V(
 						DIV_ROUND_UP(size, 16)));
 
 	wr->cookie = (uintptr_t) req;
@@ -322,8 +298,8 @@ csio_scsi_init_ultptx_dsgl(struct csio_hw *hw, struct csio_ioreq *req,
 	struct csio_dma_buf *dma_buf;
 	struct scsi_cmnd *scmnd = csio_scsi_cmnd(req);
 
-	sgl->cmd_nsge = htonl(ULPTX_CMD(ULP_TX_SC_DSGL) | ULPTX_MORE |
-				     ULPTX_NSGE(req->nsge));
+	sgl->cmd_nsge = htonl(ULPTX_CMD_V(ULP_TX_SC_DSGL) | ULPTX_MORE_F |
+				     ULPTX_NSGE_V(req->nsge));
 	/* Now add the data SGLs */
 	if (likely(!req->dcopy)) {
 		scsi_for_each_sg(scmnd, sgel, req->nsge, i) {
@@ -391,10 +367,10 @@ csio_scsi_init_read_wr(struct csio_ioreq *req, void *wrp, uint32_t size)
 	uint8_t imm = csio_hw_to_scsim(hw)->proto_cmd_len;
 	struct scsi_cmnd *scmnd = csio_scsi_cmnd(req);
 
-	wr->op_immdlen = cpu_to_be32(FW_WR_OP(FW_SCSI_READ_WR) |
+	wr->op_immdlen = cpu_to_be32(FW_WR_OP_V(FW_SCSI_READ_WR) |
 				     FW_SCSI_READ_WR_IMMDLEN(imm));
-	wr->flowid_len16 = cpu_to_be32(FW_WR_FLOWID(rn->flowid) |
-				       FW_WR_LEN16(DIV_ROUND_UP(size, 16)));
+	wr->flowid_len16 = cpu_to_be32(FW_WR_FLOWID_V(rn->flowid) |
+				       FW_WR_LEN16_V(DIV_ROUND_UP(size, 16)));
 	wr->cookie = (uintptr_t)req;
 	wr->iqid = cpu_to_be16(csio_q_physiqid(hw, req->iq_idx));
 	wr->tmo_val = (uint8_t)(req->tmo);
@@ -444,10 +420,10 @@ csio_scsi_init_write_wr(struct csio_ioreq *req, void *wrp, uint32_t size)
 	uint8_t imm = csio_hw_to_scsim(hw)->proto_cmd_len;
 	struct scsi_cmnd *scmnd = csio_scsi_cmnd(req);
 
-	wr->op_immdlen = cpu_to_be32(FW_WR_OP(FW_SCSI_WRITE_WR) |
+	wr->op_immdlen = cpu_to_be32(FW_WR_OP_V(FW_SCSI_WRITE_WR) |
 				     FW_SCSI_WRITE_WR_IMMDLEN(imm));
-	wr->flowid_len16 = cpu_to_be32(FW_WR_FLOWID(rn->flowid) |
-				       FW_WR_LEN16(DIV_ROUND_UP(size, 16)));
+	wr->flowid_len16 = cpu_to_be32(FW_WR_FLOWID_V(rn->flowid) |
+				       FW_WR_LEN16_V(DIV_ROUND_UP(size, 16)));
 	wr->cookie = (uintptr_t)req;
 	wr->iqid = cpu_to_be16(csio_q_physiqid(hw, req->iq_idx));
 	wr->tmo_val = (uint8_t)(req->tmo);
@@ -674,9 +650,9 @@ csio_scsi_init_abrt_cls_wr(struct csio_ioreq *req, void *addr, uint32_t size,
 	struct csio_rnode *rn = req->rnode;
 	struct fw_scsi_abrt_cls_wr *wr = (struct fw_scsi_abrt_cls_wr *)addr;
 
-	wr->op_immdlen = cpu_to_be32(FW_WR_OP(FW_SCSI_ABRT_CLS_WR));
-	wr->flowid_len16 = cpu_to_be32(FW_WR_FLOWID(rn->flowid) |
-					    FW_WR_LEN16(
+	wr->op_immdlen = cpu_to_be32(FW_WR_OP_V(FW_SCSI_ABRT_CLS_WR));
+	wr->flowid_len16 = cpu_to_be32(FW_WR_FLOWID_V(rn->flowid) |
+					    FW_WR_LEN16_V(
 						DIV_ROUND_UP(size, 16)));
 
 	wr->cookie = (uintptr_t) req;
@@ -824,7 +800,7 @@ csio_scsis_io_active(struct csio_ioreq *req, enum csio_scsi_ev evt)
 			rn = req->rnode;
 			/*
 			 * FW says remote device is lost, but rnode
-			 * doesnt reflect it.
+			 * doesn't reflect it.
 			 */
 			if (csio_scsi_itnexus_loss_error(req->wr_status) &&
 						csio_is_rnode_ready(rn)) {
@@ -957,14 +933,14 @@ csio_scsis_aborting(struct csio_ioreq *req, enum csio_scsi_ev evt)
 		 *    abort for that I/O by the FW crossed each other.
 		 *    The FW returned FW_EINVAL. The original I/O would have
 		 *    returned with FW_SUCCESS or any other SCSI error.
-		 * 3. The FW couldnt sent the abort out on the wire, as there
+		 * 3. The FW couldn't sent the abort out on the wire, as there
 		 *    was an I-T nexus loss (link down, remote device logged
 		 *    out etc). FW sent back an appropriate IT nexus loss status
 		 *    for the abort.
 		 * 4. FW sent an abort, but abort timed out (remote device
 		 *    didnt respond). FW replied back with
 		 *    FW_SCSI_ABORT_TIMEDOUT.
-		 * 5. FW couldnt genuinely abort the request for some reason,
+		 * 5. FW couldn't genuinely abort the request for some reason,
 		 *    and sent us an error.
 		 *
 		 * The first 3 scenarios are treated as  succesful abort
@@ -1174,15 +1150,15 @@ csio_scsi_cmpl_handler(struct csio_hw *hw, void *wr, uint32_t len,
 
 /*
  * csio_scsi_cleanup_io_q - Cleanup the given queue.
- * @scm: SCSI module.
+ * @hw: HW module.
  * @q: Queue to be cleaned up.
  *
  * Called with lock held. Has to exit with lock held.
  */
-void
-csio_scsi_cleanup_io_q(struct csio_scsim *scm, struct list_head *q)
+void csio_scsi_cleanup_io_q(struct csio_hw *hw, struct list_head *q)
+	__must_hold(&hw->lock)
 {
-	struct csio_hw *hw = scm->hw;
+	struct csio_scsim *scm = csio_hw_to_scsim(hw);
 	struct csio_ioreq *ioreq;
 	struct list_head *tmp, *next;
 	struct scsi_cmnd *scmnd;
@@ -1239,7 +1215,7 @@ csio_abrt_cls(struct csio_ioreq *ioreq, struct scsi_cmnd *scmnd)
 
 /*
  * csio_scsi_abort_io_q - Abort all I/Os on given queue
- * @scm: SCSI module.
+ * @hw: HW module.
  * @q: Queue to abort.
  * @tmo: Timeout in ms
  *
@@ -1253,10 +1229,10 @@ csio_abrt_cls(struct csio_ioreq *ioreq, struct scsi_cmnd *scmnd)
  * of this function has to ensure that the number of I/os to be aborted
  * is finite enough to not cause lock-held-for-too-long issues.
  */
-static int
-csio_scsi_abort_io_q(struct csio_scsim *scm, struct list_head *q, uint32_t tmo)
+static int csio_scsi_abort_io_q(struct csio_hw *hw, struct list_head *q,
+				uint32_t tmo)
+	__must_hold(&hw->lock)
 {
-	struct csio_hw *hw = scm->hw;
 	struct list_head *tmp, *next;
 	int count = DIV_ROUND_UP(tmo, CSIO_SCSI_ABORT_Q_POLL_MS);
 	struct scsi_cmnd *scmnd;
@@ -1288,15 +1264,15 @@ csio_scsi_abort_io_q(struct csio_scsim *scm, struct list_head *q, uint32_t tmo)
 
 /*
  * csio_scsim_cleanup_io - Cleanup all I/Os in SCSI module.
- * @scm: SCSI module.
+ * @hw: HW module.
  * @abort: abort required.
  * Called with lock held, should exit with lock held.
  * Can sleep when waiting for I/Os to complete.
  */
-int
-csio_scsim_cleanup_io(struct csio_scsim *scm, bool abort)
+int csio_scsim_cleanup_io(struct csio_hw *hw, bool abort)
+	__must_hold(&hw->lock)
 {
-	struct csio_hw *hw = scm->hw;
+	struct csio_scsim *scm = csio_hw_to_scsim(hw);
 	int rv = 0;
 	int count = DIV_ROUND_UP(60 * 1000, CSIO_SCSI_ABORT_Q_POLL_MS);
 
@@ -1317,13 +1293,13 @@ csio_scsim_cleanup_io(struct csio_scsim *scm, bool abort)
 
 	/* Else abort */
 	if (abort) {
-		rv = csio_scsi_abort_io_q(scm, &scm->active_q, 30000);
+		rv = csio_scsi_abort_io_q(hw, &scm->active_q, 30000);
 		if (rv == 0)
 			return rv;
 		csio_dbg(hw, "Some I/O aborts timed out, cleaning up..\n");
 	}
 
-	csio_scsi_cleanup_io_q(scm, &scm->active_q);
+	csio_scsi_cleanup_io_q(hw, &scm->active_q);
 
 	CSIO_DB_ASSERT(list_empty(&scm->active_q));
 
@@ -1332,16 +1308,16 @@ csio_scsim_cleanup_io(struct csio_scsim *scm, bool abort)
 
 /*
  * csio_scsim_cleanup_io_lnode - Cleanup all I/Os of given lnode.
- * @scm: SCSI module.
+ * @hw: HW module
  * @lnode: lnode
  *
  * Called with lock held, should exit with lock held.
  * Can sleep (with dropped lock) when waiting for I/Os to complete.
  */
-int
-csio_scsim_cleanup_io_lnode(struct csio_scsim *scm, struct csio_lnode *ln)
+int csio_scsim_cleanup_io_lnode(struct csio_hw *hw, struct csio_lnode *ln)
+	__must_hold(&hw->lock)
 {
-	struct csio_hw *hw = scm->hw;
+	struct csio_scsim *scm = csio_hw_to_scsim(hw);
 	struct csio_scsi_level_data sld;
 	int rv;
 	int count = DIV_ROUND_UP(60 * 1000, CSIO_SCSI_ABORT_Q_POLL_MS);
@@ -1371,10 +1347,10 @@ csio_scsim_cleanup_io_lnode(struct csio_scsim *scm, struct csio_lnode *ln)
 	csio_dbg(hw, "Some I/Os pending on ln:%p, aborting them..\n", ln);
 
 	/* I/Os are pending, abort them */
-	rv = csio_scsi_abort_io_q(scm, &ln->cmpl_q, 30000);
+	rv = csio_scsi_abort_io_q(hw, &ln->cmpl_q, 30000);
 	if (rv != 0) {
 		csio_dbg(hw, "Some I/O aborts timed out, cleaning up..\n");
-		csio_scsi_cleanup_io_q(scm, &ln->cmpl_q);
+		csio_scsi_cleanup_io_q(hw, &ln->cmpl_q);
 	}
 
 	CSIO_DB_ASSERT(list_empty(&ln->cmpl_q));
@@ -1390,9 +1366,9 @@ csio_show_hw_state(struct device *dev,
 	struct csio_hw *hw = csio_lnode_to_hw(ln);
 
 	if (csio_is_hw_ready(hw))
-		return snprintf(buf, PAGE_SIZE, "ready\n");
-	else
-		return snprintf(buf, PAGE_SIZE, "not ready\n");
+		return sysfs_emit(buf, "ready\n");
+
+	return sysfs_emit(buf, "not ready\n");
 }
 
 /* Device reset */
@@ -1407,7 +1383,7 @@ csio_device_reset(struct device *dev,
 		return -EINVAL;
 
 	/* Delete NPIV lnodes */
-	 csio_lnodes_exit(hw, 1);
+	csio_lnodes_exit(hw, 1);
 
 	/* Block upper IOs */
 	csio_lnodes_block_request(hw);
@@ -1454,7 +1430,7 @@ csio_show_dbg_level(struct device *dev,
 {
 	struct csio_lnode *ln = shost_priv(class_to_shost(dev));
 
-	return snprintf(buf, PAGE_SIZE, "%x\n", ln->params.log_level);
+	return sysfs_emit(buf, "%x\n", ln->params.log_level);
 }
 
 /* Store debug level */
@@ -1479,18 +1455,20 @@ csio_store_dbg_level(struct device *dev,
 }
 
 static DEVICE_ATTR(hw_state, S_IRUGO, csio_show_hw_state, NULL);
-static DEVICE_ATTR(device_reset, S_IRUGO | S_IWUSR, NULL, csio_device_reset);
-static DEVICE_ATTR(disable_port, S_IRUGO | S_IWUSR, NULL, csio_disable_port);
+static DEVICE_ATTR(device_reset, S_IWUSR, NULL, csio_device_reset);
+static DEVICE_ATTR(disable_port, S_IWUSR, NULL, csio_disable_port);
 static DEVICE_ATTR(dbg_level, S_IRUGO | S_IWUSR, csio_show_dbg_level,
 		  csio_store_dbg_level);
 
-static struct device_attribute *csio_fcoe_lport_attrs[] = {
-	&dev_attr_hw_state,
-	&dev_attr_device_reset,
-	&dev_attr_disable_port,
-	&dev_attr_dbg_level,
+static struct attribute *csio_fcoe_lport_attrs[] = {
+	&dev_attr_hw_state.attr,
+	&dev_attr_device_reset.attr,
+	&dev_attr_disable_port.attr,
+	&dev_attr_dbg_level.attr,
 	NULL,
 };
+
+ATTRIBUTE_GROUPS(csio_fcoe_lport);
 
 static ssize_t
 csio_show_num_reg_rnodes(struct device *dev,
@@ -1498,16 +1476,18 @@ csio_show_num_reg_rnodes(struct device *dev,
 {
 	struct csio_lnode *ln = shost_priv(class_to_shost(dev));
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", ln->num_reg_rnodes);
+	return sysfs_emit(buf, "%d\n", ln->num_reg_rnodes);
 }
 
 static DEVICE_ATTR(num_reg_rnodes, S_IRUGO, csio_show_num_reg_rnodes, NULL);
 
-static struct device_attribute *csio_fcoe_vport_attrs[] = {
-	&dev_attr_num_reg_rnodes,
-	&dev_attr_dbg_level,
+static struct attribute *csio_fcoe_vport_attrs[] = {
+	&dev_attr_num_reg_rnodes.attr,
+	&dev_attr_dbg_level.attr,
 	NULL,
 };
+
+ATTRIBUTE_GROUPS(csio_fcoe_vport);
 
 static inline uint32_t
 csio_scsi_copy_to_sgl(struct csio_hw *hw, struct csio_ioreq *req)
@@ -1657,7 +1637,7 @@ csio_scsi_err_handler(struct csio_hw *hw, struct csio_ioreq *req)
 	case FW_SCSI_UNDER_FLOW_ERR:
 		csio_warn(hw,
 			  "Under-flow error,cmnd:0x%x expected"
-			  " len:0x%x resid:0x%x lun:0x%x ssn:0x%x\n",
+			  " len:0x%x resid:0x%x lun:0x%llx ssn:0x%x\n",
 			  cmnd->cmnd[0], scsi_bufflen(cmnd),
 			  scsi_get_resid(cmnd), cmnd->device->lun,
 			  rn->flowid);
@@ -1737,15 +1717,18 @@ csio_scsi_err_handler(struct csio_hw *hw, struct csio_ioreq *req)
 	}
 
 out:
-	if (req->nsge > 0)
+	if (req->nsge > 0) {
 		scsi_dma_unmap(cmnd);
+		if (req->dcopy && (host_status == DID_OK))
+			host_status = csio_scsi_copy_to_sgl(hw, req);
+	}
 
 	cmnd->result = (((host_status) << 16) | scsi_status);
-	cmnd->scsi_done(cmnd);
+	scsi_done(cmnd);
 
 	/* Wake up waiting threads */
 	csio_scsi_cmnd(req) = NULL;
-	complete_all(&req->cmplobj);
+	complete(&req->cmplobj);
 }
 
 /*
@@ -1769,7 +1752,7 @@ csio_scsi_cbfn(struct csio_hw *hw, struct csio_ioreq *req)
 		}
 
 		cmnd->result = (((host_status) << 16) | scsi_status);
-		cmnd->scsi_done(cmnd);
+		scsi_done(cmnd);
 		csio_scsi_cmnd(req) = NULL;
 		CSIO_INC_STATS(csio_hw_to_scsim(hw), n_tot_success);
 	} else {
@@ -1792,8 +1775,8 @@ csio_scsi_cbfn(struct csio_hw *hw, struct csio_ioreq *req)
  *	- Kicks off the SCSI state machine for this IO.
  *	- Returns busy status on error.
  */
-static int
-csio_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmnd)
+static enum scsi_qc_status csio_queuecommand(struct Scsi_Host *host,
+					     struct scsi_cmnd *cmnd)
 {
 	struct csio_lnode *ln = shost_priv(host);
 	struct csio_hw *hw = csio_lnode_to_hw(ln);
@@ -1804,16 +1787,10 @@ csio_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmnd)
 	int nsge = 0;
 	int rv = SCSI_MLQUEUE_HOST_BUSY, nr;
 	int retval;
-	int cpu;
 	struct csio_scsi_qset *sqset;
 	struct fc_rport *rport = starget_to_rport(scsi_target(cmnd->device));
 
-	if (!blk_rq_cpu_valid(cmnd->request))
-		cpu = smp_processor_id();
-	else
-		cpu = cmnd->request->cpu;
-
-	sqset = &hw->sqset[ln->portid][cpu];
+	sqset = &hw->sqset[ln->portid][blk_mq_rq_cpu(scsi_cmd_to_rq(cmnd))];
 
 	nr = fc_remote_port_chkready(rport);
 	if (nr) {
@@ -1878,7 +1855,7 @@ csio_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmnd)
 
 	/* Needed during abort */
 	cmnd->host_scribble = (unsigned char *)ioreq;
-	cmnd->SCp.Message = 0;
+	csio_priv(cmnd)->fc_tm_flags = 0;
 
 	/* Kick off SCSI IO SM on the ioreq */
 	spin_lock_irqsave(&hw->lock, flags);
@@ -1886,7 +1863,7 @@ csio_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmnd)
 	spin_unlock_irqrestore(&hw->lock, flags);
 
 	if (retval != 0) {
-		csio_err(hw, "ioreq: %p couldnt be started, status:%d\n",
+		csio_err(hw, "ioreq: %p couldn't be started, status:%d\n",
 			 ioreq, retval);
 		CSIO_INC_STATS(scsim, n_busy_error);
 		goto err_put_req;
@@ -1903,7 +1880,7 @@ err:
 	return rv;
 
 err_done:
-	cmnd->scsi_done(cmnd);
+	scsi_done(cmnd);
 	return 0;
 }
 
@@ -1957,7 +1934,7 @@ csio_eh_abort_handler(struct scsi_cmnd *cmnd)
 
 	csio_dbg(hw,
 		 "Request to abort ioreq:%p cmd:%p cdb:%08llx"
-		 " ssni:0x%x lun:%d iq:0x%x\n",
+		 " ssni:0x%x lun:%llu iq:0x%x\n",
 		ioreq, cmnd, *((uint64_t *)cmnd->cmnd), rn->flowid,
 		cmnd->device->lun, csio_q_physiqid(hw, ioreq->iq_idx));
 
@@ -1969,6 +1946,7 @@ csio_eh_abort_handler(struct scsi_cmnd *cmnd)
 	ready = csio_is_lnode_ready(ln);
 	tmo = CSIO_SCSI_ABRT_TMO_MS;
 
+	reinit_completion(&ioreq->cmplobj);
 	spin_lock_irq(&hw->lock);
 	rv = csio_do_abrt_cls(hw, ioreq, (ready ? SCSI_ABORT : SCSI_CLOSE));
 	spin_unlock_irq(&hw->lock);
@@ -1988,8 +1966,6 @@ csio_eh_abort_handler(struct scsi_cmnd *cmnd)
 		goto inval_scmnd;
 	}
 
-	/* Wait for completion */
-	init_completion(&ioreq->cmplobj);
 	wait_for_completion_timeout(&ioreq->cmplobj, msecs_to_jiffies(tmo));
 
 	/* FW didnt respond to abort within our timeout */
@@ -2007,7 +1983,7 @@ inval_scmnd:
 		spin_unlock_irq(&hw->lock);
 
 		cmnd->result = (DID_ERROR << 16);
-		cmnd->scsi_done(cmnd);
+		scsi_done(cmnd);
 
 		return FAILED;
 	}
@@ -2015,15 +1991,15 @@ inval_scmnd:
 	/* FW successfully aborted the request */
 	if (host_byte(cmnd->result) == DID_REQUEUE) {
 		csio_info(hw,
-			"Aborted SCSI command to (%d:%d) serial#:0x%lx\n",
+			"Aborted SCSI command to (%d:%llu) tag %u\n",
 			cmnd->device->id, cmnd->device->lun,
-			cmnd->serial_number);
+			scsi_cmd_to_rq(cmnd)->tag);
 		return SUCCESS;
 	} else {
 		csio_info(hw,
-			"Failed to abort SCSI command, (%d:%d) serial#:0x%lx\n",
+			"Failed to abort SCSI command, (%d:%llu) tag %u\n",
 			cmnd->device->id, cmnd->device->lun,
-			cmnd->serial_number);
+			scsi_cmd_to_rq(cmnd)->tag);
 		return FAILED;
 	}
 }
@@ -2050,7 +2026,7 @@ csio_tm_cbfn(struct csio_hw *hw, struct csio_ioreq *req)
 		      req, req->wr_status);
 
 	/* Cache FW return status */
-	cmnd->SCp.Status = req->wr_status;
+	csio_priv(cmnd)->wr_status = req->wr_status;
 
 	/* Special handling based on FCP response */
 
@@ -2073,7 +2049,7 @@ csio_tm_cbfn(struct csio_hw *hw, struct csio_ioreq *req)
 		/* Modify return status if flags indicate success */
 		if (flags & FCP_RSP_LEN_VAL)
 			if (rsp_info->rsp_code == FCP_TMF_CMPL)
-				cmnd->SCp.Status = FW_SUCCESS;
+				csio_priv(cmnd)->wr_status = FW_SUCCESS;
 
 		csio_dbg(hw, "TM FCP rsp code: %d\n", rsp_info->rsp_code);
 	}
@@ -2098,15 +2074,15 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 	struct csio_scsi_level_data sld;
 
 	if (!rn)
-		goto fail;
+		goto fail_ret;
 
-	csio_dbg(hw, "Request to reset LUN:%d (ssni:0x%x tgtid:%d)\n",
+	csio_dbg(hw, "Request to reset LUN:%llu (ssni:0x%x tgtid:%d)\n",
 		      cmnd->device->lun, rn->flowid, rn->scsi_id);
 
 	if (!csio_is_lnode_ready(ln)) {
 		csio_err(hw,
 			 "LUN reset cannot be issued on non-ready"
-			 " local node vnpi:0x%x (LUN:%d)\n",
+			 " local node vnpi:0x%x (LUN:%llu)\n",
 			 ln->vnp_flowid, cmnd->device->lun);
 		goto fail;
 	}
@@ -2126,7 +2102,7 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 	if (fc_remote_port_chkready(rn->rport)) {
 		csio_err(hw,
 			 "LUN reset cannot be issued on non-ready"
-			 " remote node ssni:0x%x (LUN:%d)\n",
+			 " remote node ssni:0x%x (LUN:%llu)\n",
 			 rn->flowid, cmnd->device->lun);
 		goto fail;
 	}
@@ -2149,9 +2125,9 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 
 	csio_scsi_cmnd(ioreq)	= cmnd;
 	cmnd->host_scribble	= (unsigned char *)ioreq;
-	cmnd->SCp.Status	= 0;
+	csio_priv(cmnd)->wr_status = 0;
 
-	cmnd->SCp.Message	= FCP_TMF_LUN_RESET;
+	csio_priv(cmnd)->fc_tm_flags = FCP_TMF_LUN_RESET;
 	ioreq->tmo		= CSIO_SCSI_LUNRST_TMO_MS / 1000;
 
 	/*
@@ -2168,7 +2144,7 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 	sld.level = CSIO_LEV_LUN;
 	sld.lnode = ioreq->lnode;
 	sld.rnode = ioreq->rnode;
-	sld.oslun = (uint64_t)cmnd->device->lun;
+	sld.oslun = cmnd->device->lun;
 
 	spin_lock_irqsave(&hw->lock, flags);
 	/* Kick off TM SM on the ioreq */
@@ -2190,7 +2166,7 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 
 	/* LUN reset timed-out */
 	if (((struct scsi_cmnd *)csio_scsi_cmnd(ioreq)) == cmnd) {
-		csio_err(hw, "LUN reset (%d:%d) timed out\n",
+		csio_err(hw, "LUN reset (%d:%llu) timed out\n",
 			 cmnd->device->id, cmnd->device->lun);
 
 		spin_lock_irq(&hw->lock);
@@ -2202,9 +2178,10 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 	}
 
 	/* LUN reset returned, check cached status */
-	if (cmnd->SCp.Status != FW_SUCCESS) {
-		csio_err(hw, "LUN reset failed (%d:%d), status: %d\n",
-			 cmnd->device->id, cmnd->device->lun, cmnd->SCp.Status);
+	if (csio_priv(cmnd)->wr_status != FW_SUCCESS) {
+		csio_err(hw, "LUN reset failed (%d:%llu), status: %d\n",
+			 cmnd->device->id, cmnd->device->lun,
+			 csio_priv(cmnd)->wr_status);
 		goto fail;
 	}
 
@@ -2217,13 +2194,13 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 	spin_lock_irq(&hw->lock);
 	csio_scsi_gather_active_ios(scsim, &sld, &local_q);
 
-	retval = csio_scsi_abort_io_q(scsim, &local_q, 30000);
+	retval = csio_scsi_abort_io_q(hw, &local_q, 30000);
 	spin_unlock_irq(&hw->lock);
 
 	/* Aborts may have timed out */
 	if (retval != 0) {
 		csio_err(hw,
-			 "Attempt to abort I/Os during LUN reset of %d"
+			 "Attempt to abort I/Os during LUN reset of %llu"
 			 " returned %d\n", cmnd->device->lun, retval);
 		/* Return I/Os back to active_q */
 		spin_lock_irq(&hw->lock);
@@ -2234,7 +2211,7 @@ csio_eh_lun_reset_handler(struct scsi_cmnd *cmnd)
 
 	CSIO_INC_STATS(rn, n_lun_rst);
 
-	csio_info(hw, "LUN reset occurred (%d:%d)\n",
+	csio_info(hw, "LUN reset occurred (%d:%llu)\n",
 		  cmnd->device->id, cmnd->device->lun);
 
 	return SUCCESS;
@@ -2243,11 +2220,12 @@ fail_ret_ioreq:
 	csio_put_scsi_ioreq_lock(hw, scsim, ioreq);
 fail:
 	CSIO_INC_STATS(rn, n_lun_rst_fail);
+fail_ret:
 	return FAILED;
 }
 
 static int
-csio_slave_alloc(struct scsi_device *sdev)
+csio_sdev_init(struct scsi_device *sdev)
 {
 	struct fc_rport *rport = starget_to_rport(scsi_target(sdev));
 
@@ -2260,18 +2238,14 @@ csio_slave_alloc(struct scsi_device *sdev)
 }
 
 static int
-csio_slave_configure(struct scsi_device *sdev)
+csio_sdev_configure(struct scsi_device *sdev, struct queue_limits *lim)
 {
-	if (sdev->tagged_supported)
-		scsi_activate_tcq(sdev, csio_lun_qdepth);
-	else
-		scsi_deactivate_tcq(sdev, csio_lun_qdepth);
-
+	scsi_change_queue_depth(sdev, csio_lun_qdepth);
 	return 0;
 }
 
 static void
-csio_slave_destroy(struct scsi_device *sdev)
+csio_sdev_destroy(struct scsi_device *sdev)
 {
 	sdev->hostdata = NULL;
 }
@@ -2282,14 +2256,14 @@ csio_scan_finished(struct Scsi_Host *shost, unsigned long time)
 	struct csio_lnode *ln = shost_priv(shost);
 	int rv = 1;
 
-	spin_lock_irq(shost->host_lock);
+	spin_lock_irq(&shost->host_lock);
 	if (!ln->hwp || csio_list_deleted(&ln->sm.sm_list))
 		goto out;
 
 	rv = csio_scan_done(ln, jiffies, time, csio_max_scan_tmo * HZ,
 			    csio_delta_scan_tmo * HZ);
 out:
-	spin_unlock_irq(shost->host_lock);
+	spin_unlock_irq(&shost->host_lock);
 
 	return rv;
 }
@@ -2299,17 +2273,18 @@ struct scsi_host_template csio_fcoe_shost_template = {
 	.name			= CSIO_DRV_DESC,
 	.proc_name		= KBUILD_MODNAME,
 	.queuecommand		= csio_queuecommand,
+	.cmd_size		= sizeof(struct csio_cmd_priv),
+	.eh_timed_out		= fc_eh_timed_out,
 	.eh_abort_handler	= csio_eh_abort_handler,
 	.eh_device_reset_handler = csio_eh_lun_reset_handler,
-	.slave_alloc		= csio_slave_alloc,
-	.slave_configure	= csio_slave_configure,
-	.slave_destroy		= csio_slave_destroy,
+	.sdev_init		= csio_sdev_init,
+	.sdev_configure		= csio_sdev_configure,
+	.sdev_destroy		= csio_sdev_destroy,
 	.scan_finished		= csio_scan_finished,
 	.this_id		= -1,
 	.sg_tablesize		= CSIO_SCSI_MAX_SGE,
 	.cmd_per_lun		= CSIO_MAX_CMD_PER_LUN,
-	.use_clustering		= ENABLE_CLUSTERING,
-	.shost_attrs		= csio_fcoe_lport_attrs,
+	.shost_groups		= csio_fcoe_lport_groups,
 	.max_sectors		= CSIO_MAX_SECTOR_SIZE,
 };
 
@@ -2318,17 +2293,17 @@ struct scsi_host_template csio_fcoe_shost_vport_template = {
 	.name			= CSIO_DRV_DESC,
 	.proc_name		= KBUILD_MODNAME,
 	.queuecommand		= csio_queuecommand,
+	.eh_timed_out		= fc_eh_timed_out,
 	.eh_abort_handler	= csio_eh_abort_handler,
 	.eh_device_reset_handler = csio_eh_lun_reset_handler,
-	.slave_alloc		= csio_slave_alloc,
-	.slave_configure	= csio_slave_configure,
-	.slave_destroy		= csio_slave_destroy,
+	.sdev_init		= csio_sdev_init,
+	.sdev_configure		= csio_sdev_configure,
+	.sdev_destroy		= csio_sdev_destroy,
 	.scan_finished		= csio_scan_finished,
 	.this_id		= -1,
 	.sg_tablesize		= CSIO_SCSI_MAX_SGE,
 	.cmd_per_lun		= CSIO_MAX_CMD_PER_LUN,
-	.use_clustering		= ENABLE_CLUSTERING,
-	.shost_attrs		= csio_fcoe_vport_attrs,
+	.shost_groups		= csio_fcoe_vport_groups,
 	.max_sectors		= CSIO_MAX_SECTOR_SIZE,
 };
 
@@ -2366,7 +2341,7 @@ csio_scsi_alloc_ddp_bufs(struct csio_scsim *scm, struct csio_hw *hw,
 	for (n = 0; n < num_buf; n++) {
 		/* Set unit size to request size */
 		unit_size = buf_size;
-		ddp_desc = kzalloc(sizeof(struct csio_dma_buf), GFP_KERNEL);
+		ddp_desc = kzalloc_obj(struct csio_dma_buf);
 		if (!ddp_desc) {
 			csio_err(hw,
 				 "Failed to allocate ddp descriptors,"
@@ -2376,8 +2351,8 @@ csio_scsi_alloc_ddp_bufs(struct csio_scsim *scm, struct csio_hw *hw,
 		}
 
 		/* Allocate Dma buffers for DDP */
-		ddp_desc->vaddr = pci_alloc_consistent(hw->pdev, unit_size,
-							&ddp_desc->paddr);
+		ddp_desc->vaddr = dma_alloc_coherent(&hw->pdev->dev, unit_size,
+				&ddp_desc->paddr, GFP_KERNEL);
 		if (!ddp_desc->vaddr) {
 			csio_err(hw,
 				 "SCSI response DMA buffer (ddp) allocation"
@@ -2399,8 +2374,8 @@ no_mem:
 	list_for_each(tmp, &scm->ddp_freelist) {
 		ddp_desc = (struct csio_dma_buf *) tmp;
 		tmp = csio_list_prev(tmp);
-		pci_free_consistent(hw->pdev, ddp_desc->len, ddp_desc->vaddr,
-				    ddp_desc->paddr);
+		dma_free_coherent(&hw->pdev->dev, ddp_desc->len,
+				  ddp_desc->vaddr, ddp_desc->paddr);
 		list_del_init(&ddp_desc->list);
 		kfree(ddp_desc);
 	}
@@ -2426,8 +2401,8 @@ csio_scsi_free_ddp_bufs(struct csio_scsim *scm, struct csio_hw *hw)
 	list_for_each(tmp, &scm->ddp_freelist) {
 		ddp_desc = (struct csio_dma_buf *) tmp;
 		tmp = csio_list_prev(tmp);
-		pci_free_consistent(hw->pdev, ddp_desc->len, ddp_desc->vaddr,
-				    ddp_desc->paddr);
+		dma_free_coherent(&hw->pdev->dev, ddp_desc->len,
+				  ddp_desc->vaddr, ddp_desc->paddr);
 		list_del_init(&ddp_desc->list);
 		kfree(ddp_desc);
 	}
@@ -2460,7 +2435,7 @@ csio_scsim_init(struct csio_scsim *scm, struct csio_hw *hw)
 	INIT_LIST_HEAD(&scm->ioreq_freelist);
 	for (i = 0; i < csio_scsi_ioreqs; i++) {
 
-		ioreq = kzalloc(sizeof(struct csio_ioreq), GFP_KERNEL);
+		ioreq = kzalloc_obj(struct csio_ioreq);
 		if (!ioreq) {
 			csio_err(hw,
 				 "I/O request element allocation failed, "
@@ -2472,7 +2447,7 @@ csio_scsim_init(struct csio_scsim *scm, struct csio_hw *hw)
 
 		/* Allocate Dma buffers for Response Payload */
 		dma_buf = &ioreq->dma_buf;
-		dma_buf->vaddr = pci_pool_alloc(hw->scsi_pci_pool, GFP_KERNEL,
+		dma_buf->vaddr = dma_pool_alloc(hw->scsi_dma_pool, GFP_KERNEL,
 						&dma_buf->paddr);
 		if (!dma_buf->vaddr) {
 			csio_err(hw,
@@ -2512,7 +2487,7 @@ free_ioreq:
 		ioreq = (struct csio_ioreq *)tmp;
 
 		dma_buf = &ioreq->dma_buf;
-		pci_pool_free(hw->scsi_pci_pool, dma_buf->vaddr,
+		dma_pool_free(hw->scsi_dma_pool, dma_buf->vaddr,
 			      dma_buf->paddr);
 
 		kfree(ioreq);
@@ -2543,7 +2518,7 @@ csio_scsim_exit(struct csio_scsim *scm)
 		ioreq = (struct csio_ioreq *)tmp;
 
 		dma_buf = &ioreq->dma_buf;
-		pci_pool_free(scm->hw->scsi_pci_pool, dma_buf->vaddr,
+		dma_pool_free(scm->hw->scsi_dma_pool, dma_buf->vaddr,
 			      dma_buf->paddr);
 
 		kfree(ioreq);

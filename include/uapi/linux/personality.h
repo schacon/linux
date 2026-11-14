@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI_LINUX_PERSONALITY_H
 #define _UAPI_LINUX_PERSONALITY_H
 
@@ -61,7 +62,6 @@ enum {
 	PER_SOLARIS =		0x000d | STICKY_TIMEOUTS,
 	PER_UW7 =		0x000e | STICKY_TIMEOUTS | MMAP_PAGE_ZERO,
 	PER_OSF4 =		0x000f,			 /* OSF/1 v4 */
-	PER_HPUX =		0x0010,
 	PER_MASK =		0x00ff,
 };
 

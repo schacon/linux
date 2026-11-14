@@ -1,21 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2012 Avionic Design GmbH
+ * TI ADC081C/ADC101C/ADC121C 8/10/12-bit ADC driver
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+ * Copyright (C) 2012 Avionic Design GmbH
+ * Copyright (C) 2016 Intel
+ *
+ * Datasheets:
+ *	https://www.ti.com/lit/ds/symlink/adc081c021.pdf
+ *	https://www.ti.com/lit/ds/symlink/adc101c021.pdf
+ *	https://www.ti.com/lit/ds/symlink/adc121c021.pdf
+ *
+ * The devices have a very similar interface and differ mostly in the number of
+ * bits handled. For the 8-bit and 10-bit models the least-significant 4 or 2
+ * bits of value registers are reserved.
  */
 
 #include <linux/err.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
+#include <linux/property.h>
 
 #include <linux/iio/iio.h>
+#include <linux/iio/buffer.h>
+#include <linux/iio/trigger_consumer.h>
+#include <linux/iio/triggered_buffer.h>
 #include <linux/regulator/consumer.h>
 
 struct adc081c {
 	struct i2c_client *i2c;
 	struct regulator *ref;
+
+	/* 8, 10 or 12 */
+	int bits;
+
+	/* Ensure natural alignment of buffer elements */
+	struct {
+		u16 channel;
+		aligned_s64 ts;
+	} scan;
 };
 
 #define REG_CONV_RES 0x00
@@ -33,7 +55,7 @@ static int adc081c_read_raw(struct iio_dev *iio,
 		if (err < 0)
 			return err;
 
-		*value = (err >> 4) & 0xff;
+		*value = (err & 0xFFF) >> (12 - adc->bits);
 		return IIO_VAL_INT;
 
 	case IIO_CHAN_INFO_SCALE:
@@ -42,7 +64,7 @@ static int adc081c_read_raw(struct iio_dev *iio,
 			return err;
 
 		*value = err / 1000;
-		*shift = 8;
+		*shift = adc->bits;
 
 		return IIO_VAL_FRACTIONAL_LOG2;
 
@@ -53,109 +75,160 @@ static int adc081c_read_raw(struct iio_dev *iio,
 	return -EINVAL;
 }
 
-static const struct iio_chan_spec adc081c_channel = {
-	.type = IIO_VOLTAGE,
-	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),
-	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),
+#define ADCxx1C_CHAN(_bits) {					\
+	.type = IIO_VOLTAGE,					\
+	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),	\
+	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),		\
+	.scan_type = {						\
+		.sign = 'u',					\
+		.realbits = (_bits),				\
+		.storagebits = 16,				\
+		.shift = 12 - (_bits),				\
+		.endianness = IIO_CPU,				\
+	},							\
+}
+
+#define DEFINE_ADCxx1C_CHANNELS(_name, _bits)				\
+	static const struct iio_chan_spec _name ## _channels[] = {	\
+		ADCxx1C_CHAN((_bits)),					\
+		IIO_CHAN_SOFT_TIMESTAMP(1),				\
+	};								\
+
+#define ADC081C_NUM_CHANNELS 2
+
+struct adcxx1c_model {
+	const struct iio_chan_spec* channels;
+	int bits;
+};
+
+DEFINE_ADCxx1C_CHANNELS(adc081c,  8);
+DEFINE_ADCxx1C_CHANNELS(adc101c, 10);
+DEFINE_ADCxx1C_CHANNELS(adc121c, 12);
+
+static const struct adcxx1c_model adc081c_model = {
+	.channels = adc081c_channels,
+	.bits = 8,
+};
+
+static const struct adcxx1c_model adc101c_model = {
+	.channels = adc101c_channels,
+	.bits = 10,
+};
+
+static const struct adcxx1c_model adc121c_model = {
+	.channels = adc121c_channels,
+	.bits = 12,
 };
 
 static const struct iio_info adc081c_info = {
 	.read_raw = adc081c_read_raw,
-	.driver_module = THIS_MODULE,
 };
 
-static int adc081c_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static irqreturn_t adc081c_trigger_handler(int irq, void *p)
+{
+	struct iio_poll_func *pf = p;
+	struct iio_dev *indio_dev = pf->indio_dev;
+	struct adc081c *data = iio_priv(indio_dev);
+	int ret;
+
+	ret = i2c_smbus_read_word_swapped(data->i2c, REG_CONV_RES);
+	if (ret < 0)
+		goto out;
+	data->scan.channel = ret;
+	iio_push_to_buffers_with_ts(indio_dev, &data->scan, sizeof(data->scan),
+				    iio_get_time_ns(indio_dev));
+out:
+	iio_trigger_notify_done(indio_dev->trig);
+	return IRQ_HANDLED;
+}
+
+static void adc081c_reg_disable(void *reg)
+{
+	regulator_disable(reg);
+}
+
+static int adc081c_probe(struct i2c_client *client)
 {
 	struct iio_dev *iio;
 	struct adc081c *adc;
+	const struct adcxx1c_model *model;
 	int err;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_WORD_DATA))
-		return -ENODEV;
+		return -EOPNOTSUPP;
 
-	iio = iio_device_alloc(sizeof(*adc));
+	model = i2c_get_match_data(client);
+
+	iio = devm_iio_device_alloc(&client->dev, sizeof(*adc));
 	if (!iio)
 		return -ENOMEM;
 
 	adc = iio_priv(iio);
 	adc->i2c = client;
+	adc->bits = model->bits;
 
-	adc->ref = regulator_get(&client->dev, "vref");
-	if (IS_ERR(adc->ref)) {
-		err = PTR_ERR(adc->ref);
-		goto iio_free;
-	}
+	adc->ref = devm_regulator_get(&client->dev, "vref");
+	if (IS_ERR(adc->ref))
+		return PTR_ERR(adc->ref);
 
 	err = regulator_enable(adc->ref);
 	if (err < 0)
-		goto regulator_put;
+		return err;
 
-	iio->dev.parent = &client->dev;
+	err = devm_add_action_or_reset(&client->dev, adc081c_reg_disable,
+				       adc->ref);
+	if (err)
+		return err;
+
 	iio->name = dev_name(&client->dev);
 	iio->modes = INDIO_DIRECT_MODE;
 	iio->info = &adc081c_info;
 
-	iio->channels = &adc081c_channel;
-	iio->num_channels = 1;
+	iio->channels = model->channels;
+	iio->num_channels = ADC081C_NUM_CHANNELS;
 
-	err = iio_device_register(iio);
+	err = devm_iio_triggered_buffer_setup(&client->dev, iio, NULL,
+					      adc081c_trigger_handler, NULL);
 	if (err < 0)
-		goto regulator_disable;
+		return dev_err_probe(&client->dev, err, "iio triggered buffer setup failed\n");
 
-	i2c_set_clientdata(client, iio);
-
-	return 0;
-
-regulator_disable:
-	regulator_disable(adc->ref);
-regulator_put:
-	regulator_put(adc->ref);
-iio_free:
-	iio_device_free(iio);
-
-	return err;
-}
-
-static int adc081c_remove(struct i2c_client *client)
-{
-	struct iio_dev *iio = i2c_get_clientdata(client);
-	struct adc081c *adc = iio_priv(iio);
-
-	iio_device_unregister(iio);
-	regulator_disable(adc->ref);
-	regulator_put(adc->ref);
-	iio_device_free(iio);
-
-	return 0;
+	return devm_iio_device_register(&client->dev, iio);
 }
 
 static const struct i2c_device_id adc081c_id[] = {
-	{ "adc081c", 0 },
+	{ .name = "adc081c", .driver_data = (kernel_ulong_t)&adc081c_model },
+	{ .name = "adc101c", .driver_data = (kernel_ulong_t)&adc101c_model },
+	{ .name = "adc121c", .driver_data = (kernel_ulong_t)&adc121c_model },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adc081c_id);
 
-#ifdef CONFIG_OF
+static const struct acpi_device_id adc081c_acpi_match[] = {
+	/* Used on some AAEON boards */
+	{ "ADC081C", (kernel_ulong_t)&adc081c_model },
+	{ }
+};
+MODULE_DEVICE_TABLE(acpi, adc081c_acpi_match);
+
 static const struct of_device_id adc081c_of_match[] = {
-	{ .compatible = "ti,adc081c" },
+	{ .compatible = "ti,adc081c", .data = &adc081c_model },
+	{ .compatible = "ti,adc101c", .data = &adc101c_model },
+	{ .compatible = "ti,adc121c", .data = &adc121c_model },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, adc081c_of_match);
-#endif
 
 static struct i2c_driver adc081c_driver = {
 	.driver = {
 		.name = "adc081c",
-		.owner = THIS_MODULE,
-		.of_match_table = of_match_ptr(adc081c_of_match),
+		.of_match_table = adc081c_of_match,
+		.acpi_match_table = adc081c_acpi_match,
 	},
 	.probe = adc081c_probe,
-	.remove = adc081c_remove,
 	.id_table = adc081c_id,
 };
 module_i2c_driver(adc081c_driver);
 
 MODULE_AUTHOR("Thierry Reding <thierry.reding@avionic-design.de>");
-MODULE_DESCRIPTION("Texas Instruments ADC081C021/027 driver");
+MODULE_DESCRIPTION("Texas Instruments ADC081C/ADC101C/ADC121C driver");
 MODULE_LICENSE("GPL v2");

@@ -1,27 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for Digigram pcxhr compatible soundcards
  *
  * mixer interface for stereo cards
  *
  * Copyright (c) 2004 by Digigram <alsa@digigram.com>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/pci.h>
 #include <sound/core.h>
 #include <sound/control.h>
 #include <sound/tlv.h>
@@ -290,7 +278,8 @@ int hr222_sub_init(struct pcxhr_mgr *mgr)
 	reg = PCXHR_INPB(mgr, PCXHR_XLX_STATUS);
 	if (reg & PCXHR_STAT_MIC_CAPS)
 		mgr->board_has_mic = 1;	/* microphone available */
-	snd_printdd("MIC input available = %d\n", mgr->board_has_mic);
+	dev_dbg(&mgr->pci->dev,
+		"MIC input available = %d\n", mgr->board_has_mic);
 
 	/* reset codec */
 	PCXHR_OUTPB(mgr, PCXHR_DSP_RESET,
@@ -316,36 +305,6 @@ int hr222_sub_init(struct pcxhr_mgr *mgr)
 }
 
 
-/* calc PLL register */
-/* TODO : there is a very similar fct in pcxhr.c */
-static int hr222_pll_freq_register(unsigned int freq,
-				   unsigned int *pllreg,
-				   unsigned int *realfreq)
-{
-	unsigned int reg;
-
-	if (freq < 6900 || freq > 219000)
-		return -EINVAL;
-	reg = (28224000 * 2) / freq;
-	reg = (reg - 1) / 2;
-	if (reg < 0x100)
-		*pllreg = reg + 0xC00;
-	else if (reg < 0x200)
-		*pllreg = reg + 0x800;
-	else if (reg < 0x400)
-		*pllreg = reg & 0x1ff;
-	else if (reg < 0x800) {
-		*pllreg = ((reg >> 1) & 0x1ff) + 0x200;
-		reg &= ~1;
-	} else {
-		*pllreg = ((reg >> 2) & 0x1ff) + 0x400;
-		reg &= ~3;
-	}
-	if (realfreq)
-		*realfreq = (28224000 / (reg + 1));
-	return 0;
-}
-
 int hr222_sub_set_clock(struct pcxhr_mgr *mgr,
 			unsigned int rate,
 			int *changed)
@@ -356,7 +315,8 @@ int hr222_sub_set_clock(struct pcxhr_mgr *mgr,
 
 	switch (mgr->use_clock_type) {
 	case HR22_CLOCK_TYPE_INTERNAL:
-		err = hr222_pll_freq_register(rate, &pllreg, &realfreq);
+		err = pcxhr_pll_freq_register(rate, 219000,
+					      &pllreg, &realfreq);
 		if (err)
 			return err;
 
@@ -405,7 +365,7 @@ int hr222_sub_set_clock(struct pcxhr_mgr *mgr,
 
 	hr222_config_akm(mgr, AKM_UNMUTE_CMD);
 
-	snd_printdd("set_clock to %dHz (realfreq=%d pllreg=%x)\n",
+	dev_dbg(&mgr->pci->dev, "set_clock to %dHz (realfreq=%d pllreg=%x)\n",
 		    rate, realfreq, pllreg);
 	return 0;
 }
@@ -431,13 +391,15 @@ int hr222_get_external_clock(struct pcxhr_mgr *mgr,
 		reg = PCXHR_STAT_FREQ_UER1_MASK;
 
 	} else {
-		snd_printdd("get_external_clock : type %d not supported\n",
+		dev_dbg(&mgr->pci->dev,
+			"get_external_clock : type %d not supported\n",
 			    clock_type);
 		return -EINVAL; /* other clocks not supported */
 	}
 
 	if ((PCXHR_INPB(mgr, PCXHR_XLX_CSUER) & mask) != mask) {
-		snd_printdd("get_external_clock(%d) = 0 Hz\n", clock_type);
+		dev_dbg(&mgr->pci->dev,
+			"get_external_clock(%d) = 0 Hz\n", clock_type);
 		*sample_rate = 0;
 		return 0; /* no external clock locked */
 	}
@@ -495,7 +457,7 @@ int hr222_get_external_clock(struct pcxhr_mgr *mgr,
 	else
 		rate = 0;
 
-	snd_printdd("External clock is at %d Hz (measured %d Hz)\n",
+	dev_dbg(&mgr->pci->dev, "External clock is at %d Hz (measured %d Hz)\n",
 		    rate, calc_rate);
 	*sample_rate = rate;
 	return 0;
@@ -542,8 +504,9 @@ int hr222_manage_timecode(struct pcxhr_mgr *mgr, int enable)
 int hr222_update_analog_audio_level(struct snd_pcxhr *chip,
 				    int is_capture, int channel)
 {
-	snd_printdd("hr222_update_analog_audio_level(%s chan=%d)\n",
-		    is_capture ? "capture" : "playback", channel);
+	dev_dbg(chip->card->dev,
+		"hr222_update_analog_audio_level(%s chan=%d)\n",
+		snd_pcm_direction_name(is_capture), channel);
 	if (is_capture) {
 		int level_l, level_r, level_mic;
 		/* we have to update all levels */
@@ -642,7 +605,7 @@ int hr222_iec958_capture_byte(struct snd_pcxhr *chip,
 		if (PCXHR_INPB(chip->mgr, PCXHR_XLX_CSUER) & mask)
 			temp |= 1;
 	}
-	snd_printdd("read iec958 AES %d byte %d = 0x%x\n",
+	dev_dbg(chip->card->dev, "read iec958 AES %d byte %d = 0x%x\n",
 		    chip->chip_idx, aes_idx, temp);
 	*aes_bits = temp;
 	return 0;
@@ -684,7 +647,7 @@ static void hr222_micro_boost(struct pcxhr_mgr *mgr, int level)
 
 	PCXHR_OUTPB(mgr, PCXHR_XLX_SELMIC, mgr->xlx_selmic);
 
-	snd_printdd("hr222_micro_boost : set %x\n", boost_mask);
+	dev_dbg(&mgr->pci->dev, "hr222_micro_boost : set %x\n", boost_mask);
 }
 
 static void hr222_phantom_power(struct pcxhr_mgr *mgr, int power)
@@ -696,7 +659,7 @@ static void hr222_phantom_power(struct pcxhr_mgr *mgr, int power)
 
 	PCXHR_OUTPB(mgr, PCXHR_XLX_SELMIC, mgr->xlx_selmic);
 
-	snd_printdd("hr222_phantom_power : set %d\n", power);
+	dev_dbg(&mgr->pci->dev, "hr222_phantom_power : set %d\n", power);
 }
 
 
@@ -718,9 +681,9 @@ static int hr222_mic_vol_get(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
-	mutex_lock(&chip->mgr->mixer_mutex);
+
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	ucontrol->value.integer.value[0] = chip->mic_volume;
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return 0;
 }
 
@@ -729,17 +692,17 @@ static int hr222_mic_vol_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
 	int changed = 0;
-	mutex_lock(&chip->mgr->mixer_mutex);
+
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	if (chip->mic_volume != ucontrol->value.integer.value[0]) {
 		changed = 1;
 		chip->mic_volume = ucontrol->value.integer.value[0];
 		hr222_update_analog_audio_level(chip, 1, 0);
 	}
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return changed;
 }
 
-static struct snd_kcontrol_new hr222_control_mic_level = {
+static const struct snd_kcontrol_new hr222_control_mic_level = {
 	.iface =	SNDRV_CTL_ELEM_IFACE_MIXER,
 	.access =	(SNDRV_CTL_ELEM_ACCESS_READWRITE |
 			 SNDRV_CTL_ELEM_ACCESS_TLV_READ),
@@ -768,9 +731,9 @@ static int hr222_mic_boost_get(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
-	mutex_lock(&chip->mgr->mixer_mutex);
+
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	ucontrol->value.integer.value[0] = chip->mic_boost;
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return 0;
 }
 
@@ -779,17 +742,17 @@ static int hr222_mic_boost_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
 	int changed = 0;
-	mutex_lock(&chip->mgr->mixer_mutex);
+
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	if (chip->mic_boost != ucontrol->value.integer.value[0]) {
 		changed = 1;
 		chip->mic_boost = ucontrol->value.integer.value[0];
 		hr222_micro_boost(chip->mgr, chip->mic_boost);
 	}
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return changed;
 }
 
-static struct snd_kcontrol_new hr222_control_mic_boost = {
+static const struct snd_kcontrol_new hr222_control_mic_boost = {
 	.iface =	SNDRV_CTL_ELEM_IFACE_MIXER,
 	.access =	(SNDRV_CTL_ELEM_ACCESS_READWRITE |
 			 SNDRV_CTL_ELEM_ACCESS_TLV_READ),
@@ -808,9 +771,9 @@ static int hr222_phantom_power_get(struct snd_kcontrol *kcontrol,
 				   struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
-	mutex_lock(&chip->mgr->mixer_mutex);
+
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	ucontrol->value.integer.value[0] = chip->phantom_power;
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return 0;
 }
 
@@ -820,18 +783,17 @@ static int hr222_phantom_power_put(struct snd_kcontrol *kcontrol,
 	struct snd_pcxhr *chip = snd_kcontrol_chip(kcontrol);
 	int power, changed = 0;
 
-	mutex_lock(&chip->mgr->mixer_mutex);
+	guard(mutex)(&chip->mgr->mixer_mutex);
 	power = !!ucontrol->value.integer.value[0];
 	if (chip->phantom_power != power) {
 		hr222_phantom_power(chip->mgr, power);
 		chip->phantom_power = power;
 		changed = 1;
 	}
-	mutex_unlock(&chip->mgr->mixer_mutex);
 	return changed;
 }
 
-static struct snd_kcontrol_new hr222_phantom_power_switch = {
+static const struct snd_kcontrol_new hr222_phantom_power_switch = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Phantom Power Switch",
 	.info = hr222_phantom_power_info,

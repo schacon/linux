@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * abituguru3.c
  *
  * Copyright (c) 2006-2008 Hans de Goede <hdegoede@redhat.com>
  * Copyright (c) 2008 Alistair John Strachan <alistair@devzero.co.uk>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
  * This driver supports the sensor part of revision 3 of the custom Abit uGuru
@@ -158,7 +145,7 @@ struct abituguru3_data {
 	struct device *hwmon_dev;	/* hwmon registered device */
 	struct mutex update_lock;	/* protect access to data and uGuru */
 	unsigned short addr;		/* uguru base address */
-	char valid;			/* !=0 if following fields are valid */
+	bool valid;			/* true if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
 
 	/*
@@ -176,7 +163,7 @@ struct abituguru3_data {
 
 	/*
 	 * The abituguru3 supports up to 48 sensors, and thus has registers
-	 * sets for 48 sensors, for convienence reasons / simplicity of the
+	 * sets for 48 sensors, for convenience reasons / simplicity of the
 	 * code we always read and store all registers for all 48 sensors
 	 */
 
@@ -978,8 +965,7 @@ static int abituguru3_probe(struct platform_device *pdev)
 	u8 buf[2];
 	u16 id;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(struct abituguru3_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&pdev->dev, struct abituguru3_data);
 	if (!data)
 		return -ENOMEM;
 
@@ -1074,19 +1060,17 @@ abituguru3_probe_error:
 	return res;
 }
 
-static int abituguru3_remove(struct platform_device *pdev)
+static void abituguru3_remove(struct platform_device *pdev)
 {
 	int i;
 	struct abituguru3_data *data = platform_get_drvdata(pdev);
 
-	platform_set_drvdata(pdev, NULL);
 	hwmon_device_unregister(data->hwmon_dev);
 	for (i = 0; data->sysfs_attr[i].dev_attr.attr.name; i++)
 		device_remove_file(&pdev->dev, &data->sysfs_attr[i].dev_attr);
 	for (i = 0; i < ARRAY_SIZE(abituguru3_sysfs_attr); i++)
 		device_remove_file(&pdev->dev,
 			&abituguru3_sysfs_attr[i].dev_attr);
-	return 0;
 }
 
 static struct abituguru3_data *abituguru3_update_device(struct device *dev)
@@ -1097,7 +1081,7 @@ static struct abituguru3_data *abituguru3_update_device(struct device *dev)
 	mutex_lock(&data->update_lock);
 	if (!data->valid || time_after(jiffies, data->last_updated + HZ)) {
 		/* Clear data->valid while updating */
-		data->valid = 0;
+		data->valid = false;
 		/* Read alarms */
 		if (abituguru3_read_increment_offset(data,
 				ABIT_UGURU3_SETTINGS_BANK,
@@ -1131,7 +1115,7 @@ static struct abituguru3_data *abituguru3_update_device(struct device *dev)
 				goto LEAVE_UPDATE;
 		}
 		data->last_updated = jiffies;
-		data->valid = 1;
+		data->valid = true;
 	}
 LEAVE_UPDATE:
 	mutex_unlock(&data->update_lock);
@@ -1141,7 +1125,6 @@ LEAVE_UPDATE:
 		return NULL;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int abituguru3_suspend(struct device *dev)
 {
 	struct abituguru3_data *data = dev_get_drvdata(dev);
@@ -1160,17 +1143,12 @@ static int abituguru3_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(abituguru3_pm, abituguru3_suspend, abituguru3_resume);
-#define ABIT_UGURU3_PM	(&abituguru3_pm)
-#else
-#define ABIT_UGURU3_PM	NULL
-#endif /* CONFIG_PM */
+static DEFINE_SIMPLE_DEV_PM_OPS(abituguru3_pm, abituguru3_suspend, abituguru3_resume);
 
 static struct platform_driver abituguru3_driver = {
-	.driver = {
-		.owner	= THIS_MODULE,
+	.driver	= {
 		.name	= ABIT_UGURU3_NAME,
-		.pm	= ABIT_UGURU3_PM
+		.pm	= pm_sleep_ptr(&abituguru3_pm),
 	},
 	.probe	= abituguru3_probe,
 	.remove	= abituguru3_remove,

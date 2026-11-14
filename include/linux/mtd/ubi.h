@@ -1,19 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (c) International Business Machines Corp., 2006
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
- * the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  *
  * Author: Artem Bityutskiy (Битюцкий Артём)
  */
@@ -23,10 +10,17 @@
 
 #include <linux/ioctl.h>
 #include <linux/types.h>
+#include <linux/scatterlist.h>
 #include <mtd/ubi-user.h>
 
 /* All voumes/LEBs */
 #define UBI_ALL -1
+
+/*
+ * Maximum number of scatter gather list entries,
+ * we use only 64 to have a lower memory foot print.
+ */
+#define UBI_MAX_SG_COUNT 64
 
 /*
  * enum ubi_open_mode - UBI volume open mode constants.
@@ -34,11 +28,14 @@
  * UBI_READONLY: read-only mode
  * UBI_READWRITE: read-write mode
  * UBI_EXCLUSIVE: exclusive mode
+ * UBI_METAONLY: modify only the volume meta-data,
+ *  i.e. the data stored in the volume table, but not in any of volume LEBs.
  */
 enum {
 	UBI_READONLY = 1,
 	UBI_READWRITE,
-	UBI_EXCLUSIVE
+	UBI_EXCLUSIVE,
+	UBI_METAONLY
 };
 
 /**
@@ -113,7 +110,37 @@ struct ubi_volume_info {
 	int name_len;
 	const char *name;
 	dev_t cdev;
+	struct device *dev;
 };
+
+/**
+ * struct ubi_sgl - UBI scatter gather list data structure.
+ * @list_pos: current position in @sg[]
+ * @page_pos: current position in @sg[@list_pos]
+ * @sg: the scatter gather list itself
+ *
+ * ubi_sgl is a wrapper around a scatter list which keeps track of the
+ * current position in the list and the current list item such that
+ * it can be used across multiple ubi_leb_read_sg() calls.
+ */
+struct ubi_sgl {
+	int list_pos;
+	int page_pos;
+	struct scatterlist sg[UBI_MAX_SG_COUNT];
+};
+
+/**
+ * ubi_sgl_init - initialize an UBI scatter gather list data structure.
+ * @usgl: the UBI scatter gather struct itself
+ *
+ * Please note that you still have to use sg_init_table() or any adequate
+ * function to initialize the unterlaying struct scatterlist.
+ */
+static inline void ubi_sgl_init(struct ubi_sgl *usgl)
+{
+	usgl->list_pos = 0;
+	usgl->page_pos = 0;
+}
 
 /**
  * struct ubi_device_info - UBI device description data structure.
@@ -165,6 +192,7 @@ struct ubi_device_info {
  *			or a volume was removed)
  * @UBI_VOLUME_RESIZED: a volume has been re-sized
  * @UBI_VOLUME_RENAMED: a volume has been re-named
+ * @UBI_VOLUME_SHUTDOWN: a volume is going to removed, shutdown users
  * @UBI_VOLUME_UPDATED: data has been written to a volume
  *
  * These constants define which type of event has happened when a volume
@@ -175,6 +203,7 @@ enum {
 	UBI_VOLUME_REMOVED,
 	UBI_VOLUME_RESIZED,
 	UBI_VOLUME_RENAMED,
+	UBI_VOLUME_SHUTDOWN,
 	UBI_VOLUME_UPDATED,
 };
 
@@ -210,6 +239,8 @@ int ubi_unregister_volume_notifier(struct notifier_block *nb);
 void ubi_close_volume(struct ubi_volume_desc *desc);
 int ubi_leb_read(struct ubi_volume_desc *desc, int lnum, char *buf, int offset,
 		 int len, int check);
+int ubi_leb_read_sg(struct ubi_volume_desc *desc, int lnum, struct ubi_sgl *sgl,
+		   int offset, int len, int check);
 int ubi_leb_write(struct ubi_volume_desc *desc, int lnum, const void *buf,
 		  int offset, int len);
 int ubi_leb_change(struct ubi_volume_desc *desc, int lnum, const void *buf,
@@ -219,7 +250,6 @@ int ubi_leb_unmap(struct ubi_volume_desc *desc, int lnum);
 int ubi_leb_map(struct ubi_volume_desc *desc, int lnum);
 int ubi_is_mapped(struct ubi_volume_desc *desc, int lnum);
 int ubi_sync(int ubi_num);
-int ubi_flush(int ubi_num, int vol_id, int lnum);
 
 /*
  * This function is the same as the 'ubi_leb_read()' function, but it does not
@@ -229,5 +259,15 @@ static inline int ubi_read(struct ubi_volume_desc *desc, int lnum, char *buf,
 			   int offset, int len)
 {
 	return ubi_leb_read(desc, lnum, buf, offset, len, 0);
+}
+
+/*
+ * This function is the same as the 'ubi_leb_read_sg()' function, but it does
+ * not provide the checking capability.
+ */
+static inline int ubi_read_sg(struct ubi_volume_desc *desc, int lnum,
+			      struct ubi_sgl *sgl, int offset, int len)
+{
+	return ubi_leb_read_sg(desc, lnum, sgl, offset, len, 0);
 }
 #endif /* !__LINUX_UBI_H__ */

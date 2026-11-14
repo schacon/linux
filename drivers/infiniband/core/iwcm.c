@@ -46,9 +46,12 @@
 #include <linux/completion.h>
 #include <linux/slab.h>
 #include <linux/module.h>
+#include <linux/sysctl.h>
 
 #include <rdma/iw_cm.h>
 #include <rdma/ib_addr.h>
+#include <rdma/iw_portmap.h>
+#include <rdma/rdma_netlink.h>
 
 #include "iwcm.h"
 
@@ -56,13 +59,59 @@ MODULE_AUTHOR("Tom Tucker");
 MODULE_DESCRIPTION("iWARP CM");
 MODULE_LICENSE("Dual BSD/GPL");
 
+static const char * const iwcm_rej_reason_strs[] = {
+	[ECONNRESET]			= "reset by remote host",
+	[ECONNREFUSED]			= "refused by remote application",
+	[ETIMEDOUT]			= "setup timeout",
+};
+
+const char *__attribute_const__ iwcm_reject_msg(int reason)
+{
+	size_t index;
+
+	/* iWARP uses negative errnos */
+	index = -reason;
+
+	if (index < ARRAY_SIZE(iwcm_rej_reason_strs) &&
+	    iwcm_rej_reason_strs[index])
+		return iwcm_rej_reason_strs[index];
+	else
+		return "unrecognized reason";
+}
+EXPORT_SYMBOL(iwcm_reject_msg);
+
+static struct rdma_nl_cbs iwcm_nl_cb_table[RDMA_NL_IWPM_NUM_OPS] = {
+	[RDMA_NL_IWPM_REG_PID] = {.dump = iwpm_register_pid_cb},
+	[RDMA_NL_IWPM_ADD_MAPPING] = {.dump = iwpm_add_mapping_cb},
+	[RDMA_NL_IWPM_QUERY_MAPPING] = {.dump = iwpm_add_and_query_mapping_cb},
+	[RDMA_NL_IWPM_REMOTE_INFO] = {.dump = iwpm_remote_info_cb},
+	[RDMA_NL_IWPM_HANDLE_ERR] = {.dump = iwpm_mapping_error_cb},
+	[RDMA_NL_IWPM_MAPINFO] = {.dump = iwpm_mapping_info_cb},
+	[RDMA_NL_IWPM_MAPINFO_NUM] = {.dump = iwpm_ack_mapping_info_cb},
+	[RDMA_NL_IWPM_HELLO] = {.dump = iwpm_hello_cb}
+};
+
 static struct workqueue_struct *iwcm_wq;
 struct iwcm_work {
 	struct work_struct work;
 	struct iwcm_id_private *cm_id;
-	struct list_head list;
 	struct iw_cm_event event;
 	struct list_head free_list;
+};
+
+static unsigned int default_backlog = 256;
+
+static struct ctl_table_header *iwcm_ctl_table_hdr;
+static struct ctl_table iwcm_ctl_table[] = {
+	{
+		.procname	= "default_backlog",
+		.data		= &default_backlog,
+		.maxlen		= sizeof(default_backlog),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_INT_MAX,
+	},
 };
 
 /*
@@ -95,8 +144,8 @@ static struct iwcm_work *get_work(struct iwcm_id_private *cm_id_priv)
 
 	if (list_empty(&cm_id_priv->work_free_list))
 		return NULL;
-	work = list_entry(cm_id_priv->work_free_list.next, struct iwcm_work,
-			  free_list);
+	work = list_first_entry(&cm_id_priv->work_free_list, struct iwcm_work,
+				free_list);
 	list_del_init(&work->free_list);
 	return work;
 }
@@ -110,8 +159,10 @@ static void dealloc_work_entries(struct iwcm_id_private *cm_id_priv)
 {
 	struct list_head *e, *tmp;
 
-	list_for_each_safe(e, tmp, &cm_id_priv->work_free_list)
+	list_for_each_safe(e, tmp, &cm_id_priv->work_free_list) {
+		list_del(e);
 		kfree(list_entry(e, struct iwcm_work, free_list));
+	}
 }
 
 static int alloc_work_entries(struct iwcm_id_private *cm_id_priv, int count)
@@ -120,13 +171,12 @@ static int alloc_work_entries(struct iwcm_id_private *cm_id_priv, int count)
 
 	BUG_ON(!list_empty(&cm_id_priv->work_free_list));
 	while (count--) {
-		work = kmalloc(sizeof(struct iwcm_work), GFP_KERNEL);
+		work = kmalloc_obj(struct iwcm_work);
 		if (!work) {
 			dealloc_work_entries(cm_id_priv);
 			return -ENOMEM;
 		}
 		work->cm_id = cm_id_priv;
-		INIT_LIST_HEAD(&work->list);
 		put_work(work);
 	}
 	return 0;
@@ -156,37 +206,32 @@ static void free_cm_id(struct iwcm_id_private *cm_id_priv)
 
 /*
  * Release a reference on cm_id. If the last reference is being
- * released, enable the waiting thread (in iw_destroy_cm_id) to
- * get woken up, and return 1 if a thread is already waiting.
+ * released, free the cm_id and return 'true'.
  */
-static int iwcm_deref_id(struct iwcm_id_private *cm_id_priv)
+static bool iwcm_deref_id(struct iwcm_id_private *cm_id_priv)
 {
-	BUG_ON(atomic_read(&cm_id_priv->refcount)==0);
-	if (atomic_dec_and_test(&cm_id_priv->refcount)) {
-		BUG_ON(!list_empty(&cm_id_priv->work_list));
-		complete(&cm_id_priv->destroy_comp);
-		return 1;
+	if (refcount_dec_and_test(&cm_id_priv->refcount)) {
+		free_cm_id(cm_id_priv);
+		return true;
 	}
 
-	return 0;
+	return false;
 }
 
 static void add_ref(struct iw_cm_id *cm_id)
 {
 	struct iwcm_id_private *cm_id_priv;
 	cm_id_priv = container_of(cm_id, struct iwcm_id_private, id);
-	atomic_inc(&cm_id_priv->refcount);
+	refcount_inc(&cm_id_priv->refcount);
 }
 
 static void rem_ref(struct iw_cm_id *cm_id)
 {
 	struct iwcm_id_private *cm_id_priv;
+
 	cm_id_priv = container_of(cm_id, struct iwcm_id_private, id);
-	if (iwcm_deref_id(cm_id_priv) &&
-	    test_bit(IWCM_F_CALLBACK_DESTROY, &cm_id_priv->flags)) {
-		BUG_ON(!list_empty(&cm_id_priv->work_list));
-		free_cm_id(cm_id_priv);
-	}
+
+	(void)iwcm_deref_id(cm_id_priv);
 }
 
 static int cm_event_handler(struct iw_cm_id *cm_id, struct iw_cm_event *event);
@@ -197,7 +242,7 @@ struct iw_cm_id *iw_create_cm_id(struct ib_device *device,
 {
 	struct iwcm_id_private *cm_id_priv;
 
-	cm_id_priv = kzalloc(sizeof(*cm_id_priv), GFP_KERNEL);
+	cm_id_priv = kzalloc_obj(*cm_id_priv);
 	if (!cm_id_priv)
 		return ERR_PTR(-ENOMEM);
 
@@ -209,10 +254,9 @@ struct iw_cm_id *iw_create_cm_id(struct ib_device *device,
 	cm_id_priv->id.add_ref = add_ref;
 	cm_id_priv->id.rem_ref = rem_ref;
 	spin_lock_init(&cm_id_priv->lock);
-	atomic_set(&cm_id_priv->refcount, 1);
+	refcount_set(&cm_id_priv->refcount, 1);
 	init_waitqueue_head(&cm_id_priv->connect_wait);
 	init_completion(&cm_id_priv->destroy_comp);
-	INIT_LIST_HEAD(&cm_id_priv->work_list);
 	INIT_LIST_HEAD(&cm_id_priv->work_free_list);
 
 	return &cm_id_priv->id;
@@ -320,14 +364,13 @@ EXPORT_SYMBOL(iw_cm_disconnect);
 /*
  * CM_ID <-- DESTROYING
  *
- * Clean up all resources associated with the connection and release
- * the initial reference taken by iw_create_cm_id.
+ * Clean up all resources associated with the connection.
  */
 static void destroy_cm_id(struct iw_cm_id *cm_id)
 {
 	struct iwcm_id_private *cm_id_priv;
+	struct ib_qp *qp;
 	unsigned long flags;
-	int ret;
 
 	cm_id_priv = container_of(cm_id, struct iwcm_id_private, id);
 	/*
@@ -337,20 +380,29 @@ static void destroy_cm_id(struct iw_cm_id *cm_id)
 	wait_event(cm_id_priv->connect_wait,
 		   !test_bit(IWCM_F_CONNECT_WAIT, &cm_id_priv->flags));
 
+	/*
+	 * Since we're deleting the cm_id, drop any events that
+	 * might arrive before the last dereference.
+	 */
+	set_bit(IWCM_F_DROP_EVENTS, &cm_id_priv->flags);
+
 	spin_lock_irqsave(&cm_id_priv->lock, flags);
+	qp = cm_id_priv->qp;
+	cm_id_priv->qp = NULL;
+
 	switch (cm_id_priv->state) {
 	case IW_CM_STATE_LISTEN:
 		cm_id_priv->state = IW_CM_STATE_DESTROYING;
 		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 		/* destroy the listening endpoint */
-		ret = cm_id->device->iwcm->destroy_listen(cm_id);
+		cm_id->device->ops.iw_destroy_listen(cm_id);
 		spin_lock_irqsave(&cm_id_priv->lock, flags);
 		break;
 	case IW_CM_STATE_ESTABLISHED:
 		cm_id_priv->state = IW_CM_STATE_DESTROYING;
 		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 		/* Abrupt close of the connection */
-		(void)iwcm_modify_qp_err(cm_id_priv->qp);
+		(void)iwcm_modify_qp_err(qp);
 		spin_lock_irqsave(&cm_id_priv->lock, flags);
 		break;
 	case IW_CM_STATE_IDLE:
@@ -366,7 +418,7 @@ static void destroy_cm_id(struct iw_cm_id *cm_id)
 		 */
 		cm_id_priv->state = IW_CM_STATE_DESTROYING;
 		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
-		cm_id->device->iwcm->reject(cm_id, NULL, 0);
+		cm_id->device->ops.iw_reject(cm_id, NULL, 0);
 		spin_lock_irqsave(&cm_id_priv->lock, flags);
 		break;
 	case IW_CM_STATE_CONN_SENT:
@@ -375,35 +427,129 @@ static void destroy_cm_id(struct iw_cm_id *cm_id)
 		BUG();
 		break;
 	}
-	if (cm_id_priv->qp) {
-		cm_id_priv->id.device->iwcm->rem_ref(cm_id_priv->qp);
-		cm_id_priv->qp = NULL;
-	}
 	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
+	if (qp)
+		cm_id_priv->id.device->ops.iw_rem_ref(qp);
 
-	(void)iwcm_deref_id(cm_id_priv);
+	if (cm_id->mapped) {
+		iwpm_remove_mapinfo(&cm_id->local_addr, &cm_id->m_local_addr);
+		iwpm_remove_mapping(&cm_id->local_addr, RDMA_NL_IWCM);
+	}
 }
 
 /*
- * This function is only called by the application thread and cannot
- * be called by the event thread. The function will wait for all
- * references to be released on the cm_id and then kfree the cm_id
- * object.
+ * Destroy cm_id. If the cm_id still has other references, wait for all
+ * references to be released on the cm_id and then release the initial
+ * reference taken by iw_create_cm_id.
  */
 void iw_destroy_cm_id(struct iw_cm_id *cm_id)
 {
 	struct iwcm_id_private *cm_id_priv;
 
 	cm_id_priv = container_of(cm_id, struct iwcm_id_private, id);
-	BUG_ON(test_bit(IWCM_F_CALLBACK_DESTROY, &cm_id_priv->flags));
-
 	destroy_cm_id(cm_id);
-
-	wait_for_completion(&cm_id_priv->destroy_comp);
-
-	free_cm_id(cm_id_priv);
+	if (refcount_read(&cm_id_priv->refcount) > 1)
+		flush_workqueue(iwcm_wq);
+	iwcm_deref_id(cm_id_priv);
 }
 EXPORT_SYMBOL(iw_destroy_cm_id);
+
+/**
+ * iw_cm_check_wildcard - If IP address is 0 then use original
+ * @pm_addr: sockaddr containing the ip to check for wildcard
+ * @cm_addr: sockaddr containing the actual IP address
+ * @cm_outaddr: sockaddr to set IP addr which leaving port
+ *
+ *  Checks the pm_addr for wildcard and then sets cm_outaddr's
+ *  IP to the actual (cm_addr).
+ */
+static void iw_cm_check_wildcard(struct sockaddr_storage *pm_addr,
+				 struct sockaddr_storage *cm_addr,
+				 struct sockaddr_storage *cm_outaddr)
+{
+	if (pm_addr->ss_family == AF_INET) {
+		struct sockaddr_in *pm4_addr = (struct sockaddr_in *)pm_addr;
+
+		if (pm4_addr->sin_addr.s_addr == htonl(INADDR_ANY)) {
+			struct sockaddr_in *cm4_addr =
+				(struct sockaddr_in *)cm_addr;
+			struct sockaddr_in *cm4_outaddr =
+				(struct sockaddr_in *)cm_outaddr;
+
+			cm4_outaddr->sin_addr = cm4_addr->sin_addr;
+		}
+	} else {
+		struct sockaddr_in6 *pm6_addr = (struct sockaddr_in6 *)pm_addr;
+
+		if (ipv6_addr_type(&pm6_addr->sin6_addr) == IPV6_ADDR_ANY) {
+			struct sockaddr_in6 *cm6_addr =
+				(struct sockaddr_in6 *)cm_addr;
+			struct sockaddr_in6 *cm6_outaddr =
+				(struct sockaddr_in6 *)cm_outaddr;
+
+			cm6_outaddr->sin6_addr = cm6_addr->sin6_addr;
+		}
+	}
+}
+
+/**
+ * iw_cm_map - Use portmapper to map the ports
+ * @cm_id: connection manager pointer
+ * @active: Indicates the active side when true
+ * returns nonzero for error only if iwpm_create_mapinfo() fails
+ *
+ * Tries to add a mapping for a port using the Portmapper. If
+ * successful in mapping the IP/Port it will check the remote
+ * mapped IP address for a wildcard IP address and replace the
+ * zero IP address with the remote_addr.
+ */
+static int iw_cm_map(struct iw_cm_id *cm_id, bool active)
+{
+	const char *devname = dev_name(&cm_id->device->dev);
+	const char *ifname = cm_id->device->iw_ifname;
+	struct iwpm_dev_data pm_reg_msg = {};
+	struct iwpm_sa_data pm_msg;
+	int status;
+
+	if (strlen(devname) >= sizeof(pm_reg_msg.dev_name) ||
+	    strlen(ifname) >= sizeof(pm_reg_msg.if_name))
+		return -EINVAL;
+
+	cm_id->m_local_addr = cm_id->local_addr;
+	cm_id->m_remote_addr = cm_id->remote_addr;
+
+	strscpy(pm_reg_msg.dev_name, devname);
+	strscpy(pm_reg_msg.if_name, ifname);
+
+	if (iwpm_register_pid(&pm_reg_msg, RDMA_NL_IWCM) ||
+	    !iwpm_valid_pid())
+		return 0;
+
+	cm_id->mapped = true;
+	pm_msg.loc_addr = cm_id->local_addr;
+	pm_msg.rem_addr = cm_id->remote_addr;
+	pm_msg.flags = (cm_id->device->iw_driver_flags & IW_F_NO_PORT_MAP) ?
+		       IWPM_FLAGS_NO_PORT_MAP : 0;
+	if (active)
+		status = iwpm_add_and_query_mapping(&pm_msg,
+						    RDMA_NL_IWCM);
+	else
+		status = iwpm_add_mapping(&pm_msg, RDMA_NL_IWCM);
+
+	if (!status) {
+		cm_id->m_local_addr = pm_msg.mapped_loc_addr;
+		if (active) {
+			cm_id->m_remote_addr = pm_msg.mapped_rem_addr;
+			iw_cm_check_wildcard(&pm_msg.mapped_rem_addr,
+					     &cm_id->remote_addr,
+					     &cm_id->m_remote_addr);
+		}
+	}
+
+	return iwpm_create_mapinfo(&cm_id->local_addr,
+				   &cm_id->m_local_addr,
+				   RDMA_NL_IWCM, pm_msg.flags);
+}
 
 /*
  * CM_ID <-- LISTEN
@@ -419,6 +565,9 @@ int iw_cm_listen(struct iw_cm_id *cm_id, int backlog)
 
 	cm_id_priv = container_of(cm_id, struct iwcm_id_private, id);
 
+	if (!backlog)
+		backlog = default_backlog;
+
 	ret = alloc_work_entries(cm_id_priv, backlog);
 	if (ret)
 		return ret;
@@ -428,7 +577,10 @@ int iw_cm_listen(struct iw_cm_id *cm_id, int backlog)
 	case IW_CM_STATE_IDLE:
 		cm_id_priv->state = IW_CM_STATE_LISTEN;
 		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
-		ret = cm_id->device->iwcm->create_listen(cm_id, backlog);
+		ret = iw_cm_map(cm_id, false);
+		if (!ret)
+			ret = cm_id->device->ops.iw_create_listen(cm_id,
+								  backlog);
 		if (ret)
 			cm_id_priv->state = IW_CM_STATE_IDLE;
 		spin_lock_irqsave(&cm_id_priv->lock, flags);
@@ -468,7 +620,7 @@ int iw_cm_reject(struct iw_cm_id *cm_id,
 	cm_id_priv->state = IW_CM_STATE_IDLE;
 	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 
-	ret = cm_id->device->iwcm->reject(cm_id, private_data,
+	ret = cm_id->device->ops.iw_reject(cm_id, private_data,
 					  private_data_len);
 
 	clear_bit(IWCM_F_CONNECT_WAIT, &cm_id_priv->flags);
@@ -504,28 +656,28 @@ int iw_cm_accept(struct iw_cm_id *cm_id,
 		return -EINVAL;
 	}
 	/* Get the ib_qp given the QPN */
-	qp = cm_id->device->iwcm->get_qp(cm_id->device, iw_param->qpn);
+	qp = cm_id->device->ops.iw_get_qp(cm_id->device, iw_param->qpn);
 	if (!qp) {
 		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 		clear_bit(IWCM_F_CONNECT_WAIT, &cm_id_priv->flags);
 		wake_up_all(&cm_id_priv->connect_wait);
 		return -EINVAL;
 	}
-	cm_id->device->iwcm->add_ref(qp);
+	cm_id->device->ops.iw_add_ref(qp);
 	cm_id_priv->qp = qp;
 	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 
-	ret = cm_id->device->iwcm->accept(cm_id, iw_param);
+	ret = cm_id->device->ops.iw_accept(cm_id, iw_param);
 	if (ret) {
 		/* An error on accept precludes provider events */
 		BUG_ON(cm_id_priv->state != IW_CM_STATE_CONN_RECV);
 		cm_id_priv->state = IW_CM_STATE_IDLE;
 		spin_lock_irqsave(&cm_id_priv->lock, flags);
-		if (cm_id_priv->qp) {
-			cm_id->device->iwcm->rem_ref(qp);
-			cm_id_priv->qp = NULL;
-		}
+		qp = cm_id_priv->qp;
+		cm_id_priv->qp = NULL;
 		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
+		if (qp)
+			cm_id->device->ops.iw_rem_ref(qp);
 		clear_bit(IWCM_F_CONNECT_WAIT, &cm_id_priv->flags);
 		wake_up_all(&cm_id_priv->connect_wait);
 	}
@@ -546,7 +698,7 @@ int iw_cm_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *iw_param)
 	struct iwcm_id_private *cm_id_priv;
 	int ret;
 	unsigned long flags;
-	struct ib_qp *qp;
+	struct ib_qp *qp = NULL;
 
 	cm_id_priv = container_of(cm_id, struct iwcm_id_private, id);
 
@@ -558,39 +710,37 @@ int iw_cm_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *iw_param)
 	spin_lock_irqsave(&cm_id_priv->lock, flags);
 
 	if (cm_id_priv->state != IW_CM_STATE_IDLE) {
-		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
-		clear_bit(IWCM_F_CONNECT_WAIT, &cm_id_priv->flags);
-		wake_up_all(&cm_id_priv->connect_wait);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err;
 	}
 
 	/* Get the ib_qp given the QPN */
-	qp = cm_id->device->iwcm->get_qp(cm_id->device, iw_param->qpn);
+	qp = cm_id->device->ops.iw_get_qp(cm_id->device, iw_param->qpn);
 	if (!qp) {
-		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
-		clear_bit(IWCM_F_CONNECT_WAIT, &cm_id_priv->flags);
-		wake_up_all(&cm_id_priv->connect_wait);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto err;
 	}
-	cm_id->device->iwcm->add_ref(qp);
+	cm_id->device->ops.iw_add_ref(qp);
 	cm_id_priv->qp = qp;
 	cm_id_priv->state = IW_CM_STATE_CONN_SENT;
 	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 
-	ret = cm_id->device->iwcm->connect(cm_id, iw_param);
-	if (ret) {
-		spin_lock_irqsave(&cm_id_priv->lock, flags);
-		if (cm_id_priv->qp) {
-			cm_id->device->iwcm->rem_ref(qp);
-			cm_id_priv->qp = NULL;
-		}
-		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
-		BUG_ON(cm_id_priv->state != IW_CM_STATE_CONN_SENT);
-		cm_id_priv->state = IW_CM_STATE_IDLE;
-		clear_bit(IWCM_F_CONNECT_WAIT, &cm_id_priv->flags);
-		wake_up_all(&cm_id_priv->connect_wait);
-	}
+	ret = iw_cm_map(cm_id, true);
+	if (!ret)
+		ret = cm_id->device->ops.iw_connect(cm_id, iw_param);
+	if (!ret)
+		return 0;	/* success */
 
+	spin_lock_irqsave(&cm_id_priv->lock, flags);
+	qp = cm_id_priv->qp;
+	cm_id_priv->qp = NULL;
+	cm_id_priv->state = IW_CM_STATE_IDLE;
+err:
+	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
+	if (qp)
+		cm_id->device->ops.iw_rem_ref(qp);
+	clear_bit(IWCM_F_CONNECT_WAIT, &cm_id_priv->flags);
+	wake_up_all(&cm_id_priv->connect_wait);
 	return ret;
 }
 EXPORT_SYMBOL(iw_cm_connect);
@@ -632,8 +782,23 @@ static void cm_conn_req_handler(struct iwcm_id_private *listen_id_priv,
 		goto out;
 
 	cm_id->provider_data = iw_event->provider_data;
-	cm_id->local_addr = iw_event->local_addr;
-	cm_id->remote_addr = iw_event->remote_addr;
+	cm_id->m_local_addr = iw_event->local_addr;
+	cm_id->m_remote_addr = iw_event->remote_addr;
+	cm_id->local_addr = listen_id_priv->id.local_addr;
+
+	ret = iwpm_get_remote_info(&listen_id_priv->id.m_local_addr,
+				   &iw_event->remote_addr,
+				   &cm_id->remote_addr,
+				   RDMA_NL_IWCM);
+	if (ret) {
+		cm_id->remote_addr = iw_event->remote_addr;
+	} else {
+		iw_cm_check_wildcard(&listen_id_priv->id.m_local_addr,
+				     &iw_event->local_addr,
+				     &cm_id->local_addr);
+		iw_event->local_addr = cm_id->local_addr;
+		iw_event->remote_addr = cm_id->remote_addr;
+	}
 
 	cm_id_priv = container_of(cm_id, struct iwcm_id_private, id);
 	cm_id_priv->state = IW_CM_STATE_CONN_RECV;
@@ -662,10 +827,7 @@ static void cm_conn_req_handler(struct iwcm_id_private *listen_id_priv,
 	ret = cm_id->cm_handler(cm_id, iw_event);
 	if (ret) {
 		iw_cm_reject(cm_id, NULL, 0);
-		set_bit(IWCM_F_CALLBACK_DESTROY, &cm_id_priv->flags);
-		destroy_cm_id(cm_id);
-		if (atomic_read(&cm_id_priv->refcount)==0)
-			free_cm_id(cm_id_priv);
+		iw_destroy_cm_id(cm_id);
 	}
 
 out:
@@ -718,6 +880,7 @@ static int cm_conn_est_handler(struct iwcm_id_private *cm_id_priv,
 static int cm_conn_rep_handler(struct iwcm_id_private *cm_id_priv,
 			       struct iw_cm_event *iw_event)
 {
+	struct ib_qp *qp = NULL;
 	unsigned long flags;
 	int ret;
 
@@ -729,16 +892,20 @@ static int cm_conn_rep_handler(struct iwcm_id_private *cm_id_priv,
 	clear_bit(IWCM_F_CONNECT_WAIT, &cm_id_priv->flags);
 	BUG_ON(cm_id_priv->state != IW_CM_STATE_CONN_SENT);
 	if (iw_event->status == 0) {
-		cm_id_priv->id.local_addr = iw_event->local_addr;
-		cm_id_priv->id.remote_addr = iw_event->remote_addr;
+		cm_id_priv->id.m_local_addr = iw_event->local_addr;
+		cm_id_priv->id.m_remote_addr = iw_event->remote_addr;
+		iw_event->local_addr = cm_id_priv->id.local_addr;
+		iw_event->remote_addr = cm_id_priv->id.remote_addr;
 		cm_id_priv->state = IW_CM_STATE_ESTABLISHED;
 	} else {
 		/* REJECTED or RESET */
-		cm_id_priv->id.device->iwcm->rem_ref(cm_id_priv->qp);
+		qp = cm_id_priv->qp;
 		cm_id_priv->qp = NULL;
 		cm_id_priv->state = IW_CM_STATE_IDLE;
 	}
 	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
+	if (qp)
+		cm_id_priv->id.device->ops.iw_rem_ref(qp);
 	ret = cm_id_priv->id.cm_handler(&cm_id_priv->id, iw_event);
 
 	if (iw_event->private_data_len)
@@ -769,7 +936,7 @@ static void cm_disconnect_handler(struct iwcm_id_private *cm_id_priv,
 /*
  * CM_ID <-- IDLE
  *
- * If in the ESTBLISHED or CLOSING states, the QP will have have been
+ * If in the ESTBLISHED or CLOSING states, the QP will have been
  * moved by the provider to the ERR state. Disassociate the CM_ID from
  * the QP,  move to IDLE, and remove the 'connected' reference.
  *
@@ -780,21 +947,18 @@ static void cm_disconnect_handler(struct iwcm_id_private *cm_id_priv,
 static int cm_close_handler(struct iwcm_id_private *cm_id_priv,
 				  struct iw_cm_event *iw_event)
 {
+	struct ib_qp *qp;
 	unsigned long flags;
-	int ret = 0;
+	int ret = 0, notify_event = 0;
 	spin_lock_irqsave(&cm_id_priv->lock, flags);
+	qp = cm_id_priv->qp;
+	cm_id_priv->qp = NULL;
 
-	if (cm_id_priv->qp) {
-		cm_id_priv->id.device->iwcm->rem_ref(cm_id_priv->qp);
-		cm_id_priv->qp = NULL;
-	}
 	switch (cm_id_priv->state) {
 	case IW_CM_STATE_ESTABLISHED:
 	case IW_CM_STATE_CLOSING:
 		cm_id_priv->state = IW_CM_STATE_IDLE;
-		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
-		ret = cm_id_priv->id.cm_handler(&cm_id_priv->id, iw_event);
-		spin_lock_irqsave(&cm_id_priv->lock, flags);
+		notify_event = 1;
 		break;
 	case IW_CM_STATE_DESTROYING:
 		break;
@@ -803,6 +967,10 @@ static int cm_close_handler(struct iwcm_id_private *cm_id_priv,
 	}
 	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 
+	if (qp)
+		cm_id_priv->id.device->ops.iw_rem_ref(qp);
+	if (notify_event)
+		ret = cm_id_priv->id.cm_handler(&cm_id_priv->id, iw_event);
 	return ret;
 }
 
@@ -835,13 +1003,13 @@ static int process_event(struct iwcm_id_private *cm_id_priv,
 }
 
 /*
- * Process events on the work_list for the cm_id. If the callback
- * function requests that the cm_id be deleted, a flag is set in the
- * cm_id flags to indicate that when the last reference is
- * removed, the cm_id is to be destroyed. This is necessary to
- * distinguish between an object that will be destroyed by the app
- * thread asleep on the destroy_comp list vs. an object destroyed
- * here synchronously when the last reference is removed.
+ * Process events for the cm_id. If the callback function requests
+ * that the cm_id be deleted, a flag is set in the cm_id flags to
+ * indicate that when the last reference is removed, the cm_id is
+ * to be destroyed. This is necessary to distinguish between an
+ * object that will be destroyed by the app thread asleep on the
+ * destroy_comp list vs. an object destroyed here synchronously
+ * when the last reference is removed.
  */
 static void cm_work_handler(struct work_struct *_work)
 {
@@ -849,48 +1017,29 @@ static void cm_work_handler(struct work_struct *_work)
 	struct iw_cm_event levent;
 	struct iwcm_id_private *cm_id_priv = work->cm_id;
 	unsigned long flags;
-	int empty;
 	int ret = 0;
-	int destroy_id;
 
 	spin_lock_irqsave(&cm_id_priv->lock, flags);
-	empty = list_empty(&cm_id_priv->work_list);
-	while (!empty) {
-		work = list_entry(cm_id_priv->work_list.next,
-				  struct iwcm_work, list);
-		list_del_init(&work->list);
-		empty = list_empty(&cm_id_priv->work_list);
-		levent = work->event;
-		put_work(work);
-		spin_unlock_irqrestore(&cm_id_priv->lock, flags);
+	levent = work->event;
+	put_work(work);
+	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 
+	if (!test_bit(IWCM_F_DROP_EVENTS, &cm_id_priv->flags)) {
 		ret = process_event(cm_id_priv, &levent);
 		if (ret) {
-			set_bit(IWCM_F_CALLBACK_DESTROY, &cm_id_priv->flags);
 			destroy_cm_id(&cm_id_priv->id);
+			WARN_ON_ONCE(iwcm_deref_id(cm_id_priv));
 		}
-		BUG_ON(atomic_read(&cm_id_priv->refcount)==0);
-		destroy_id = test_bit(IWCM_F_CALLBACK_DESTROY, &cm_id_priv->flags);
-		if (iwcm_deref_id(cm_id_priv)) {
-			if (destroy_id) {
-				BUG_ON(!list_empty(&cm_id_priv->work_list));
-				free_cm_id(cm_id_priv);
-			}
-			return;
-		}
-		if (empty)
-			return;
-		spin_lock_irqsave(&cm_id_priv->lock, flags);
-	}
-	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
+	} else
+		pr_debug("dropping event %d\n", levent.event);
+	if (iwcm_deref_id(cm_id_priv))
+		return;
 }
 
 /*
  * This function is called on interrupt context. Schedule events on
  * the iwcm_wq thread to allow callback functions to downcall into
- * the CM and/or block.  Events are queued to a per-CM_ID
- * work_list. If this is the first event on the work_list, the work
- * element is also queued on the iwcm_wq thread.
+ * the CM and/or block.
  *
  * Each event holds a reference on the cm_id. Until the last posted
  * event has been delivered and processed, the cm_id cannot be
@@ -931,12 +1080,8 @@ static int cm_event_handler(struct iw_cm_id *cm_id,
 		}
 	}
 
-	atomic_inc(&cm_id_priv->refcount);
-	if (list_empty(&cm_id_priv->work_list)) {
-		list_add_tail(&work->list, &cm_id_priv->work_list);
-		queue_work(iwcm_wq, &work->work);
-	} else
-		list_add_tail(&work->list, &cm_id_priv->work_list);
+	refcount_inc(&cm_id_priv->refcount);
+	queue_work(iwcm_wq, &work->work);
 out:
 	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
 	return ret;
@@ -1020,17 +1165,42 @@ EXPORT_SYMBOL(iw_cm_init_qp_attr);
 
 static int __init iw_cm_init(void)
 {
-	iwcm_wq = create_singlethread_workqueue("iw_cm_wq");
-	if (!iwcm_wq)
-		return -ENOMEM;
+	int ret;
 
+	ret = iwpm_init(RDMA_NL_IWCM);
+	if (ret)
+		return ret;
+
+	iwcm_wq = alloc_ordered_workqueue("iw_cm_wq", WQ_MEM_RECLAIM);
+	if (!iwcm_wq)
+		goto err_alloc;
+
+	iwcm_ctl_table_hdr = register_net_sysctl(&init_net, "net/iw_cm",
+						 iwcm_ctl_table);
+	if (!iwcm_ctl_table_hdr) {
+		pr_err("iw_cm: couldn't register sysctl paths\n");
+		goto err_sysctl;
+	}
+
+	rdma_nl_register(RDMA_NL_IWCM, iwcm_nl_cb_table);
 	return 0;
+
+err_sysctl:
+	destroy_workqueue(iwcm_wq);
+err_alloc:
+	iwpm_exit(RDMA_NL_IWCM);
+	return -ENOMEM;
 }
 
 static void __exit iw_cm_cleanup(void)
 {
+	rdma_nl_unregister(RDMA_NL_IWCM);
+	unregister_net_sysctl_table(iwcm_ctl_table_hdr);
 	destroy_workqueue(iwcm_wq);
+	iwpm_exit(RDMA_NL_IWCM);
 }
+
+MODULE_ALIAS_RDMA_NETLINK(RDMA_NL_IWCM, 2);
 
 module_init(iw_cm_init);
 module_exit(iw_cm_cleanup);

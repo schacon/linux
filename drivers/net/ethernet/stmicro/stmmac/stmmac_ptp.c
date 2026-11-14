@@ -1,62 +1,40 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*******************************************************************************
   PTP 1588 clock using the STMMAC.
 
   Copyright (C) 2013  Vayavya Labs Pvt Ltd
 
-  This program is free software; you can redistribute it and/or modify it
-  under the terms and conditions of the GNU General Public License,
-  version 2, as published by the Free Software Foundation.
-
-  This program is distributed in the hope it will be useful, but WITHOUT
-  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-  more details.
-
-  You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc.,
-  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
-
-  The full GNU General Public License is included in this distribution in
-  the file called "COPYING".
 
   Author: Rayagond Kokatanur <rayagond@vayavyalabs.com>
 *******************************************************************************/
 #include "stmmac.h"
+#include "stmmac_est.h"
 #include "stmmac_ptp.h"
+
+#define PTP_SAFE_TIME_OFFSET_NS	500000
 
 /**
  * stmmac_adjust_freq
  *
  * @ptp: pointer to ptp_clock_info structure
- * @ppb: desired period change in parts ber billion
+ * @scaled_ppm: desired period change in scaled parts per million
  *
  * Description: this function will adjust the frequency of hardware clock.
+ *
+ * Scaled parts per million is ppm with a 16-bit binary fractional field.
  */
-static int stmmac_adjust_freq(struct ptp_clock_info *ptp, s32 ppb)
+static int stmmac_adjust_freq(struct ptp_clock_info *ptp, long scaled_ppm)
 {
 	struct stmmac_priv *priv =
 	    container_of(ptp, struct stmmac_priv, ptp_clock_ops);
 	unsigned long flags;
-	u32 diff, addend;
-	int neg_adj = 0;
-	u64 adj;
+	u32 addend;
 
-	if (ppb < 0) {
-		neg_adj = 1;
-		ppb = -ppb;
-	}
+	addend = adjust_by_scaled_ppm(priv->default_addend, scaled_ppm);
 
-	addend = priv->default_addend;
-	adj = addend;
-	adj *= ppb;
-	diff = div_u64(adj, 1000000000ULL);
-	addend = neg_adj ? (addend - diff) : (addend + diff);
-
-	spin_lock_irqsave(&priv->ptp_lock, flags);
-
-	priv->hw->ptp->config_addend(priv->ioaddr, addend);
-
-	spin_unlock_irqrestore(&priv->lock, flags);
+	write_lock_irqsave(&priv->ptp_lock, flags);
+	stmmac_config_addend(priv, priv->ptpaddr, addend);
+	write_unlock_irqrestore(&priv->ptp_lock, flags);
 
 	return 0;
 }
@@ -77,6 +55,9 @@ static int stmmac_adjust_time(struct ptp_clock_info *ptp, s64 delta)
 	u32 sec, nsec;
 	u32 quotient, reminder;
 	int neg_adj = 0;
+	bool xmac;
+
+	xmac = dwmac_is_xmac(priv->plat->core_type);
 
 	if (delta < 0) {
 		neg_adj = 1;
@@ -87,40 +68,47 @@ static int stmmac_adjust_time(struct ptp_clock_info *ptp, s64 delta)
 	sec = quotient;
 	nsec = reminder;
 
-	spin_lock_irqsave(&priv->ptp_lock, flags);
+	/* If EST is enabled, disabled it before adjust ptp time. */
+	mutex_lock(&priv->est_lock);
+	if (priv->est && priv->est->enable)
+		stmmac_est_configure(priv, priv, priv->est,
+				     priv->plat->clk_ptp_rate, false);
+	mutex_unlock(&priv->est_lock);
 
-	priv->hw->ptp->adjust_systime(priv->ioaddr, sec, nsec, neg_adj);
+	write_lock_irqsave(&priv->ptp_lock, flags);
+	stmmac_adjust_systime(priv, priv->ptpaddr, sec, nsec, neg_adj, xmac);
+	write_unlock_irqrestore(&priv->ptp_lock, flags);
 
-	spin_unlock_irqrestore(&priv->lock, flags);
+	/* Calculate new basetime and re-configured EST after PTP time adjust. */
+	mutex_lock(&priv->est_lock);
+	if (priv->est && priv->est->enable)
+		__stmmac_setup_est(priv);
+	mutex_unlock(&priv->est_lock);
 
 	return 0;
 }
 
 /**
- * stmmac_get_time
- *
+ * stmmac_get_timex - read the PTP clock, with system timestamps if requested
  * @ptp: pointer to ptp_clock_info structure
  * @ts: pointer to hold time/result
+ * @sts: pointer to hold system timestamps around the read, or NULL
  *
- * Description: this function will read the current time from the
- * hardware clock and store it in @ts.
+ * Return: 0
  */
-static int stmmac_get_time(struct ptp_clock_info *ptp, struct timespec *ts)
+static int stmmac_get_timex(struct ptp_clock_info *ptp, struct timespec64 *ts,
+			    struct ptp_system_timestamp *sts)
 {
 	struct stmmac_priv *priv =
 	    container_of(ptp, struct stmmac_priv, ptp_clock_ops);
 	unsigned long flags;
-	u64 ns;
-	u32 reminder;
+	u64 ns = 0;
 
-	spin_lock_irqsave(&priv->ptp_lock, flags);
+	read_lock_irqsave(&priv->ptp_lock, flags);
+	stmmac_get_systime(priv, priv->ptpaddr, &ns, sts);
+	read_unlock_irqrestore(&priv->ptp_lock, flags);
 
-	ns = priv->hw->ptp->get_systime(priv->ioaddr);
-
-	spin_unlock_irqrestore(&priv->ptp_lock, flags);
-
-	ts->tv_sec = div_u64_rem(ns, 1000000000ULL, &reminder);
-	ts->tv_nsec = reminder;
+	*ts = ns_to_timespec64(ns);
 
 	return 0;
 }
@@ -135,17 +123,15 @@ static int stmmac_get_time(struct ptp_clock_info *ptp, struct timespec *ts)
  * hardware clock.
  */
 static int stmmac_set_time(struct ptp_clock_info *ptp,
-			   const struct timespec *ts)
+			   const struct timespec64 *ts)
 {
 	struct stmmac_priv *priv =
 	    container_of(ptp, struct stmmac_priv, ptp_clock_ops);
 	unsigned long flags;
 
-	spin_lock_irqsave(&priv->ptp_lock, flags);
-
-	priv->hw->ptp->init_systime(priv->ioaddr, ts->tv_sec, ts->tv_nsec);
-
-	spin_unlock_irqrestore(&priv->ptp_lock, flags);
+	write_lock_irqsave(&priv->ptp_lock, flags);
+	stmmac_init_systime(priv, priv->ptpaddr, ts->tv_sec, ts->tv_nsec);
+	write_unlock_irqrestore(&priv->ptp_lock, flags);
 
 	return 0;
 }
@@ -153,23 +139,168 @@ static int stmmac_set_time(struct ptp_clock_info *ptp,
 static int stmmac_enable(struct ptp_clock_info *ptp,
 			 struct ptp_clock_request *rq, int on)
 {
-	return -EOPNOTSUPP;
+	struct stmmac_priv *priv =
+	    container_of(ptp, struct stmmac_priv, ptp_clock_ops);
+	void __iomem *ptpaddr = priv->ptpaddr;
+	struct stmmac_pps_cfg *cfg;
+	int ret = -EOPNOTSUPP;
+	unsigned long flags;
+	u32 acr_value;
+
+	switch (rq->type) {
+	case PTP_CLK_REQ_PEROUT: {
+		struct timespec64 curr_time;
+		u64 target_ns = 0;
+		u64 ns = 0;
+
+		/* Reject requests with unsupported flags */
+		if (rq->perout.flags)
+			return -EOPNOTSUPP;
+
+		cfg = &priv->pps[rq->perout.index];
+
+		cfg->start.tv_sec = rq->perout.start.sec;
+		cfg->start.tv_nsec = rq->perout.start.nsec;
+
+		/* A time set in the past won't trigger the start of the flexible PPS generation for
+		 * the GMAC5. For some reason it does for the GMAC4 but setting a time in the past
+		 * should be addressed anyway. Therefore, any value set it the past is considered as
+		 * an offset compared to the current MAC system time.
+		 * Be aware that an offset too low may not trigger flexible PPS generation
+		 * if time spent in this configuration makes the targeted time already outdated.
+		 * To address this, add a safe time offset.
+		 */
+		if (!cfg->start.tv_sec && cfg->start.tv_nsec < PTP_SAFE_TIME_OFFSET_NS)
+			cfg->start.tv_nsec += PTP_SAFE_TIME_OFFSET_NS;
+
+		target_ns = cfg->start.tv_nsec + ((u64)cfg->start.tv_sec * NSEC_PER_SEC);
+
+		stmmac_get_systime(priv, priv->ptpaddr, &ns, NULL);
+		if (ns > TIME64_MAX - PTP_SAFE_TIME_OFFSET_NS)
+			return -EINVAL;
+
+		curr_time = ns_to_timespec64(ns);
+		if (target_ns < ns + PTP_SAFE_TIME_OFFSET_NS) {
+			cfg->start = timespec64_add_safe(cfg->start, curr_time);
+			if (cfg->start.tv_sec == TIME64_MAX)
+				return -EINVAL;
+		}
+
+		cfg->period.tv_sec = rq->perout.period.sec;
+		cfg->period.tv_nsec = rq->perout.period.nsec;
+
+		write_lock_irqsave(&priv->ptp_lock, flags);
+		ret = stmmac_flex_pps_config(priv, priv->ioaddr,
+					     rq->perout.index, cfg, on,
+					     priv->sub_second_inc,
+					     priv->systime_flags);
+		write_unlock_irqrestore(&priv->ptp_lock, flags);
+		break;
+	}
+	case PTP_CLK_REQ_EXTTS: {
+		u8 channel;
+
+		mutex_lock(&priv->aux_ts_lock);
+		acr_value = readl(ptpaddr + PTP_ACR);
+		channel = ilog2(FIELD_GET(PTP_ACR_MASK, acr_value));
+		acr_value &= ~PTP_ACR_MASK;
+
+		if (on) {
+			if (FIELD_GET(PTP_ACR_MASK, acr_value)) {
+				netdev_err(priv->dev,
+					   "Cannot enable auxiliary snapshot %d as auxiliary snapshot %d is already enabled",
+					rq->extts.index, channel);
+				mutex_unlock(&priv->aux_ts_lock);
+				return -EBUSY;
+			}
+
+			priv->plat->flags |= STMMAC_FLAG_EXT_SNAPSHOT_EN;
+
+			/* Enable External snapshot trigger */
+			acr_value |= PTP_ACR_ATSEN(rq->extts.index);
+			acr_value |= PTP_ACR_ATSFC;
+		} else {
+			priv->plat->flags &= ~STMMAC_FLAG_EXT_SNAPSHOT_EN;
+		}
+		netdev_dbg(priv->dev, "Auxiliary Snapshot %d %s.\n",
+			   rq->extts.index, on ? "enabled" : "disabled");
+		writel(acr_value, ptpaddr + PTP_ACR);
+		mutex_unlock(&priv->aux_ts_lock);
+		/* wait for auxts fifo clear to finish */
+		ret = readl_poll_timeout(ptpaddr + PTP_ACR, acr_value,
+					 !(acr_value & PTP_ACR_ATSFC),
+					 10, 10000);
+		break;
+	}
+
+	default:
+		break;
+	}
+
+	return ret;
+}
+
+/**
+ * stmmac_get_syncdevicetime
+ * @device: current device time
+ * @system: system counter value read synchronously with device time
+ * @ctx: context provided by timekeeping code
+ * Description: Read device and system clock simultaneously and return the
+ * corrected clock values in ns.
+ **/
+static int stmmac_get_syncdevicetime(ktime_t *device,
+				     struct system_counterval_t *system,
+				     void *ctx)
+{
+	struct stmmac_priv *priv = (struct stmmac_priv *)ctx;
+
+	return priv->plat->crosststamp(device, system, ctx);
+}
+
+static int stmmac_getcrosststamp(struct ptp_clock_info *ptp,
+				 struct system_device_crosststamp *xtstamp)
+{
+	struct stmmac_priv *priv =
+		container_of(ptp, struct stmmac_priv, ptp_clock_ops);
+
+	return get_device_system_crosststamp(stmmac_get_syncdevicetime,
+					     priv, NULL, xtstamp);
 }
 
 /* structure describing a PTP hardware clock */
-static struct ptp_clock_info stmmac_ptp_clock_ops = {
+const struct ptp_clock_info stmmac_ptp_clock_ops = {
 	.owner = THIS_MODULE,
-	.name = "stmmac_ptp_clock",
+	.name = "stmmac ptp",
 	.max_adj = 62500000,
 	.n_alarm = 0,
-	.n_ext_ts = 0,
-	.n_per_out = 0,
+	.n_ext_ts = 0, /* will be overwritten in stmmac_ptp_register */
+	.n_per_out = 0, /* will be overwritten in stmmac_ptp_register */
+	.n_pins = 0,
 	.pps = 0,
-	.adjfreq = stmmac_adjust_freq,
+	.supported_extts_flags = PTP_RISING_EDGE | PTP_STRICT_FLAGS,
+	.adjfine = stmmac_adjust_freq,
 	.adjtime = stmmac_adjust_time,
-	.gettime = stmmac_get_time,
-	.settime = stmmac_set_time,
+	.gettimex64 = stmmac_get_timex,
+	.settime64 = stmmac_set_time,
 	.enable = stmmac_enable,
+};
+
+/* structure describing a PTP hardware clock */
+const struct ptp_clock_info dwmac1000_ptp_clock_ops = {
+	.owner = THIS_MODULE,
+	.name = "stmmac ptp",
+	.max_adj = 62500000,
+	.n_alarm = 0,
+	.n_ext_ts = 1,
+	.n_per_out = 0,
+	.n_pins = 0,
+	.pps = 0,
+	.supported_extts_flags = PTP_RISING_EDGE | PTP_STRICT_FLAGS,
+	.adjfine = stmmac_adjust_freq,
+	.adjtime = stmmac_adjust_time,
+	.gettimex64 = stmmac_get_timex,
+	.settime64 = stmmac_set_time,
+	.enable = dwmac1000_ptp_enable,
 };
 
 /**
@@ -178,21 +309,52 @@ static struct ptp_clock_info stmmac_ptp_clock_ops = {
  * Description: this function will register the ptp clock driver
  * to kernel. It also does some house keeping work.
  */
-int stmmac_ptp_register(struct stmmac_priv *priv)
+void stmmac_ptp_register(struct stmmac_priv *priv)
 {
-	spin_lock_init(&priv->ptp_lock);
-	priv->ptp_clock_ops = stmmac_ptp_clock_ops;
+	unsigned int pps_out_num = priv->dma_cap.pps_out_num;
+	unsigned int n_ext_ts;
+
+	if (pps_out_num > STMMAC_PPS_MAX) {
+		dev_warn(priv->device,
+			 "pps outputs (%u) exceeds driver maximum, limiting to %u\n",
+			 pps_out_num, STMMAC_PPS_MAX);
+		pps_out_num = STMMAC_PPS_MAX;
+	}
+
+	/* Calculate the clock domain crossing (CDC) error if necessary */
+	priv->plat->cdc_error_adj = 0;
+	if (priv->plat->core_type == DWMAC_CORE_GMAC4)
+		priv->plat->cdc_error_adj = (2 * NSEC_PER_SEC) / priv->plat->clk_ptp_rate;
+
+	/* Update the ptp clock parameters based on feature discovery, when
+	 * available
+	 */
+	if (pps_out_num)
+		priv->ptp_clock_ops.n_per_out = pps_out_num;
+
+	n_ext_ts = priv->dma_cap.aux_snapshot_n;
+	if (n_ext_ts)
+		priv->ptp_clock_ops.n_ext_ts = n_ext_ts;
+
+	if (priv->plat->ptp_max_adj)
+		priv->ptp_clock_ops.max_adj = priv->plat->ptp_max_adj;
+
+	if (priv->plat->crosststamp)
+		priv->ptp_clock_ops.getcrosststamp = stmmac_getcrosststamp;
+
+	mutex_init(&priv->aux_ts_lock);
 
 	priv->ptp_clock = ptp_clock_register(&priv->ptp_clock_ops,
 					     priv->device);
 	if (IS_ERR(priv->ptp_clock)) {
+		netdev_err(priv->dev, "ptp_clock_register failed\n");
 		priv->ptp_clock = NULL;
-		pr_err("ptp_clock_register() failed on %s\n", priv->dev->name);
-	} else
-		pr_debug("Added PTP HW clock successfully on %s\n",
-			 priv->dev->name);
+	}
 
-	return 0;
+	if (priv->ptp_clock)
+		netdev_info(priv->dev, "registered PTP clock\n");
+	else
+		mutex_destroy(&priv->aux_ts_lock);
 }
 
 /**
@@ -205,7 +367,10 @@ void stmmac_ptp_unregister(struct stmmac_priv *priv)
 {
 	if (priv->ptp_clock) {
 		ptp_clock_unregister(priv->ptp_clock);
+		priv->ptp_clock = NULL;
 		pr_debug("Removed PTP HW clock successfully on %s\n",
 			 priv->dev->name);
+
+		mutex_destroy(&priv->aux_ts_lock);
 	}
 }

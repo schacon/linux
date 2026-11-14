@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef GSPCAV2_H
 #define GSPCAV2_H
 
@@ -8,6 +9,8 @@
 #include <media/v4l2-common.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
+#include <media/videobuf2-v4l2.h>
+#include <media/videobuf2-vmalloc.h>
 #include <linux/mutex.h>
 
 
@@ -25,11 +28,12 @@
 extern int gspca_debug;
 
 
-#define PDEBUG(level, fmt, ...) \
-	v4l2_dbg(level, gspca_debug, &gspca_dev->v4l2_dev, fmt, ##__VA_ARGS__)
+#define gspca_dbg(gspca_dev, level, fmt, ...)			\
+	v4l2_dbg(level, gspca_debug, &(gspca_dev)->v4l2_dev,	\
+		 fmt, ##__VA_ARGS__)
 
-#define PERR(fmt, ...) \
-	v4l2_err(&gspca_dev->v4l2_dev, fmt, ##__VA_ARGS__)
+#define gspca_err(gspca_dev, fmt, ...)				\
+	v4l2_err(&(gspca_dev)->v4l2_dev, fmt, ##__VA_ARGS__)
 
 #define GSPCA_MAX_FRAMES 16	/* maximum number of video frame buffers */
 /* image transfers */
@@ -78,8 +82,8 @@ typedef int (*cam_get_reg_op) (struct gspca_dev *,
 				struct v4l2_dbg_register *);
 typedef int (*cam_set_reg_op) (struct gspca_dev *,
 				const struct v4l2_dbg_register *);
-typedef int (*cam_ident_op) (struct gspca_dev *,
-				struct v4l2_dbg_chip_ident *);
+typedef int (*cam_chip_info_op) (struct gspca_dev *,
+				struct v4l2_dbg_chip_info *);
 typedef void (*cam_streamparm_op) (struct gspca_dev *,
 				  struct v4l2_streamparm *);
 typedef void (*cam_pkt_op) (struct gspca_dev *gspca_dev,
@@ -88,6 +92,10 @@ typedef void (*cam_pkt_op) (struct gspca_dev *gspca_dev,
 typedef int (*cam_int_pkt_op) (struct gspca_dev *gspca_dev,
 				u8 *data,
 				int len);
+typedef void (*cam_format_op) (struct gspca_dev *gspca_dev,
+				struct v4l2_format *fmt);
+typedef int (*cam_frmsize_op) (struct gspca_dev *gspca_dev,
+				struct v4l2_frmsizeenum *fsize);
 
 /* subdriver description */
 struct sd_desc {
@@ -97,6 +105,7 @@ struct sd_desc {
 	cam_cf_op config;	/* called on probe */
 	cam_op init;		/* called on probe and resume */
 	cam_op init_controls;	/* called on probe */
+	cam_v_op probe_error;	/* called if probe failed, do cleanup here */
 	cam_op start;		/* called on stream on after URBs creation */
 	cam_pkt_op pkt_scan;
 /* optional operations */
@@ -109,11 +118,13 @@ struct sd_desc {
 	cam_set_jpg_op set_jcomp;
 	cam_streamparm_op get_streamparm;
 	cam_streamparm_op set_streamparm;
+	cam_format_op try_fmt;
+	cam_frmsize_op enum_framesizes;
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 	cam_set_reg_op set_register;
 	cam_get_reg_op get_register;
+	cam_chip_info_op get_chip_info;
 #endif
-	cam_ident_op get_chip_ident;
 #if IS_ENABLED(CONFIG_INPUT)
 	cam_int_pkt_op int_pkt_scan;
 	/* other_input makes the gspca core create gspca_dev->input even when
@@ -130,19 +141,22 @@ enum gspca_packet_type {
 	LAST_PACKET
 };
 
-struct gspca_frame {
-	__u8 *data;			/* frame buffer */
-	int vma_use_count;
-	struct v4l2_buffer v4l2_buf;
+struct gspca_buffer {
+	struct vb2_v4l2_buffer vb;
+	struct list_head list;
 };
+
+static inline struct gspca_buffer *to_gspca_buffer(struct vb2_buffer *vb2)
+{
+	return container_of(vb2, struct gspca_buffer, vb.vb2_buf);
+}
 
 struct gspca_dev {
 	struct video_device vdev;	/* !! must be the first item */
 	struct module *module;		/* subdriver handling the device */
 	struct v4l2_device v4l2_dev;
 	struct usb_device *dev;
-	struct file *capt_file;		/* file doing video capture */
-					/* protected by queue_lock */
+
 #if IS_ENABLED(CONFIG_INPUT)
 	struct input_dev *input_dev;
 	char phys[64];			/* physical device path */
@@ -168,39 +182,33 @@ struct gspca_dev {
 	struct urb *int_urb;
 #endif
 
-	__u8 *frbuf;				/* buffer for nframes */
-	struct gspca_frame frame[GSPCA_MAX_FRAMES];
-	u8 *image;				/* image beeing filled */
-	__u32 frsz;				/* frame size */
+	u8 *image;				/* image being filled */
 	u32 image_len;				/* current length of image */
-	atomic_t fr_q;				/* next frame to queue */
-	atomic_t fr_i;				/* frame being filled */
-	signed char fr_queue[GSPCA_MAX_FRAMES];	/* frame queue */
-	char nframes;				/* number of frames */
-	u8 fr_o;				/* next frame to dequeue */
 	__u8 last_packet_type;
 	__s8 empty_packet;		/* if (-1) don't check empty packets */
-	__u8 streaming;			/* protected by both mutexes (*) */
+	bool streaming;
 
 	__u8 curr_mode;			/* current camera mode */
-	__u32 pixfmt;			/* current mode parameters */
-	__u16 width;
-	__u16 height;
+	struct v4l2_pix_format pixfmt;	/* current mode parameters */
 	__u32 sequence;			/* frame sequence number */
+
+	struct vb2_queue queue;
+
+	spinlock_t qlock;
+	struct list_head buf_list;
 
 	wait_queue_head_t wq;		/* wait queue */
 	struct mutex usb_lock;		/* usb exchange protection */
-	struct mutex queue_lock;	/* ISOC queue protection */
 	int usb_err;			/* USB error - protected by usb_lock */
 	u16 pkt_size;			/* ISOC packet size */
 #ifdef CONFIG_PM
 	char frozen;			/* suspend - resume */
 #endif
-	char present;			/* device connected */
-	char nbufread;			/* number of buffers for read() */
+	bool present;
 	char memory;			/* memory type (V4L2_MEMORY_xxx) */
 	__u8 iface;			/* USB interface number */
 	__u8 alt;			/* USB alternate setting */
+	int xfer_ep;			/* USB transfer endpoint address */
 	u8 audio;			/* presence of audio device */
 
 	/* (*) These variables are proteced by both usb_lock and queue_lock,
@@ -230,6 +238,6 @@ int gspca_resume(struct usb_interface *intf);
 int gspca_expo_autogain(struct gspca_dev *gspca_dev, int avg_lum,
 	int desired_avg_lum, int deadzone, int gain_knee, int exposure_knee);
 int gspca_coarse_grained_expo_autogain(struct gspca_dev *gspca_dev,
-        int avg_lum, int desired_avg_lum, int deadzone);
+	int avg_lum, int desired_avg_lum, int deadzone);
 
 #endif /* GSPCAV2_H */

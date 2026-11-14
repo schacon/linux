@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef __PACKET_DIAG_H__
 #define __PACKET_DIAG_H__
 
@@ -29,6 +30,7 @@ struct packet_diag_msg {
 };
 
 enum {
+	/* PACKET_DIAG_NONE, standard nl API requires this attribute!  */
 	PACKET_DIAG_INFO,
 	PACKET_DIAG_MCLIST,
 	PACKET_DIAG_RX_RING,
@@ -63,7 +65,7 @@ struct packet_diag_mclist {
 	__u32	pdmc_count;
 	__u16	pdmc_type;
 	__u16	pdmc_alen;
-	__u8	pdmc_addr[MAX_ADDR_LEN];
+	__u8	pdmc_addr[32]; /* MAX_ADDR_LEN */
 };
 
 struct packet_diag_ring {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Backlight code for via-pmu
  *
@@ -9,9 +10,11 @@
 
 #include <asm/ptrace.h>
 #include <linux/adb.h>
+#include <linux/backlight.h>
+#include <linux/fb.h>
+#include <linux/of.h>
 #include <linux/pmu.h>
 #include <asm/backlight.h>
-#include <asm/prom.h>
 
 #define MAX_PMU_LEVEL 0xFF
 
@@ -71,12 +74,7 @@ static int pmu_backlight_get_level_brightness(int level)
 static int __pmu_backlight_update_status(struct backlight_device *bd)
 {
 	struct adb_request req;
-	int level = bd->props.brightness;
-
-
-	if (bd->props.power != FB_BLANK_UNBLANK ||
-	    bd->props.fb_blank != FB_BLANK_UNBLANK)
-		level = 0;
+	int level = backlight_get_brightness(bd);
 
 	if (level > 0) {
 		int pmulevel = pmu_backlight_get_level_brightness(level);
@@ -110,13 +108,7 @@ static int pmu_backlight_update_status(struct backlight_device *bd)
 }
 
 
-static int pmu_backlight_get_brightness(struct backlight_device *bd)
-{
-	return bd->props.brightness;
-}
-
 static const struct backlight_ops pmu_backlight_data = {
-	.get_brightness	= pmu_backlight_get_brightness,
 	.update_status	= pmu_backlight_update_status,
 
 };
@@ -142,7 +134,7 @@ void pmu_backlight_set_sleep(int sleep)
 }
 #endif /* CONFIG_PM */
 
-void __init pmu_backlight_init()
+void __init pmu_backlight_init(void)
 {
 	struct backlight_properties props;
 	struct backlight_device *bd;
@@ -188,7 +180,7 @@ void __init pmu_backlight_init()
 	}
 
 	bd->props.brightness = level;
-	bd->props.power = FB_BLANK_UNBLANK;
+	bd->props.power = BACKLIGHT_POWER_ON;
 	backlight_update_status(bd);
 
 	printk(KERN_INFO "PMU Backlight initialized (%s)\n", name);

@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  w83795.c - Linux kernel driver for hardware monitoring
  *  Copyright (C) 2008 Nuvoton Technology Corp.
  *                Wei Song
- *  Copyright (C) 2010 Jean Delvare <khali@linux-fr.org>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation - version 2.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- *  02110-1301 USA.
+ *  Copyright (C) 2010 Jean Delvare <jdelvare@suse.de>
  *
  *  Supports following chips:
  *
@@ -35,6 +22,7 @@
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <linux/jiffies.h>
+#include <linux/util_macros.h>
 
 /* Addresses to scan */
 static const unsigned short normal_i2c[] = {
@@ -308,11 +296,8 @@ static u8 pwm_freq_to_reg(unsigned long val, u16 clkin)
 	unsigned long best0, best1;
 
 	/* Best fit for cksel = 0 */
-	for (reg0 = 0; reg0 < ARRAY_SIZE(pwm_freq_cksel0) - 1; reg0++) {
-		if (val > (pwm_freq_cksel0[reg0] +
-			   pwm_freq_cksel0[reg0 + 1]) / 2)
-			break;
-	}
+	reg0 = find_closest_descending(val, pwm_freq_cksel0,
+				       ARRAY_SIZE(pwm_freq_cksel0));
 	if (val < 375)	/* cksel = 1 can't beat this */
 		return reg0;
 	best0 = pwm_freq_cksel0[reg0];
@@ -394,7 +379,7 @@ struct w83795_data {
 	u8 enable_beep;
 	u8 beeps[6];		/* Register value */
 
-	char valid;
+	bool valid;
 	char valid_limits;
 	char valid_pwm_config;
 };
@@ -699,7 +684,7 @@ static struct w83795_data *w83795_update_device(struct device *dev)
 			     tmp & ~ALARM_CTRL_RTSACS);
 
 	data->last_updated = jiffies;
-	data->valid = 1;
+	data->valid = true;
 
 END:
 	mutex_unlock(&data->update_lock);
@@ -779,7 +764,7 @@ store_chassis_clear(struct device *dev,
 
 	/* Clear status and force cache refresh */
 	w83795_read(client, W83795_REG_ALARM(5));
-	data->valid = 0;
+	data->valid = false;
 	mutex_unlock(&data->update_lock);
 	return count;
 }
@@ -1693,7 +1678,7 @@ store_sf_setup(struct device *dev, struct device_attribute *attr,
  * somewhere else in the code
  */
 #define SENSOR_ATTR_TEMP(index) {					\
-	SENSOR_ATTR_2(temp##index##_type, S_IRUGO | (index < 4 ? S_IWUSR : 0), \
+	SENSOR_ATTR_2(temp##index##_type, S_IRUGO | (index < 5 ? S_IWUSR : 0), \
 		show_temp_mode, store_temp_mode, NOT_USED, index - 1),	\
 	SENSOR_ATTR_2(temp##index##_input, S_IRUGO, show_temp,		\
 		NULL, TEMP_READ, index - 1),				\
@@ -1982,7 +1967,7 @@ static int w83795_detect(struct i2c_client *client,
 	else
 		chip_name = "w83795g";
 
-	strlcpy(info->type, chip_name, I2C_NAME_SIZE);
+	strscpy(info->type, chip_name, I2C_NAME_SIZE);
 	dev_info(&adapter->dev, "Found %s rev. %c at 0x%02hx\n", chip_name,
 		 'A' + (device_id & 0xf), address);
 
@@ -2142,15 +2127,14 @@ static void w83795_apply_temp_config(struct w83795_data *data, u8 config,
 		if (temp_chan >= 4)
 			break;
 		data->temp_mode |= 1 << temp_chan;
-		/* fall through */
+		fallthrough;
 	case 0x3: /* Thermistor */
 		data->has_temp |= 1 << temp_chan;
 		break;
 	}
 }
 
-static int w83795_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int w83795_probe(struct i2c_client *client)
 {
 	int i;
 	u8 tmp;
@@ -2158,12 +2142,12 @@ static int w83795_probe(struct i2c_client *client,
 	struct w83795_data *data;
 	int err;
 
-	data = devm_kzalloc(dev, sizeof(struct w83795_data), GFP_KERNEL);
+	data = devm_kzalloc_obj(dev, struct w83795_data);
 	if (!data)
 		return -ENOMEM;
 
 	i2c_set_clientdata(client, data);
-	data->chip_type = id->driver_data;
+	data->chip_type = (uintptr_t)i2c_get_match_data(client);
 	data->bank = i2c_smbus_read_byte_data(client, W83795_REG_BANKSEL);
 	mutex_init(&data->update_lock);
 
@@ -2249,20 +2233,18 @@ exit_remove:
 	return err;
 }
 
-static int w83795_remove(struct i2c_client *client)
+static void w83795_remove(struct i2c_client *client)
 {
 	struct w83795_data *data = i2c_get_clientdata(client);
 
 	hwmon_device_unregister(data->hwmon_dev);
 	w83795_handle_files(&client->dev, device_remove_file_wrapper);
-
-	return 0;
 }
 
 
 static const struct i2c_device_id w83795_id[] = {
-	{ "w83795g", w83795g },
-	{ "w83795adg", w83795adg },
+	{ .name = "w83795g", .driver_data = w83795g },
+	{ .name = "w83795adg", .driver_data = w83795adg },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, w83795_id);
@@ -2282,6 +2264,6 @@ static struct i2c_driver w83795_driver = {
 
 module_i2c_driver(w83795_driver);
 
-MODULE_AUTHOR("Wei Song, Jean Delvare <khali@linux-fr.org>");
+MODULE_AUTHOR("Wei Song, Jean Delvare <jdelvare@suse.de>");
 MODULE_DESCRIPTION("W83795G/ADG hardware monitoring driver");
 MODULE_LICENSE("GPL");

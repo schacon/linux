@@ -1,13 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  (C) 2010,2011       Thomas Renninger <trenn@suse.de>, Novell Inc.
  *
- *  Licensed under the terms of the GNU GPL License version 2.
- *
  *  Output format inspired by Len Brown's <lenb@kernel.org> turbostat tool.
- *
  */
 
 
+#include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -29,13 +28,15 @@ struct cpuidle_monitor *all_monitors[] = {
 0
 };
 
+int cpu_count;
+
 static struct cpuidle_monitor *monitors[MONITORS_MAX];
 static unsigned int avail_monitors;
 
 static char *progname;
 
 enum operation_mode_e { list = 1, show, show_all };
-static int mode;
+static enum operation_mode_e mode;
 static int interval = 1;
 static char *show_monitors_param;
 static struct cpupower_topology cpu_top;
@@ -70,17 +71,31 @@ void print_n_spaces(int n)
 		printf(" ");
 }
 
-/* size of s must be at least n + 1 */
+/*s is filled with left and right spaces
+ *to make its length atleast n+1
+ */
 int fill_string_with_spaces(char *s, int n)
 {
+	char *temp;
 	int len = strlen(s);
-	if (len > n)
+
+	if (len >= n)
 		return -1;
+
+	temp = malloc(sizeof(char) * (n+1));
 	for (; len < n; len++)
 		s[len] = ' ';
 	s[len] = '\0';
+	snprintf(temp, n+1, " %s", s);
+	strcpy(s, temp);
+	free(temp);
 	return 0;
 }
+
+#define MAX_COL_WIDTH		6
+#define TOPOLOGY_DEPTH_PKG	3
+#define TOPOLOGY_DEPTH_CORE	2
+#define TOPOLOGY_DEPTH_CPU	1
 
 void print_header(int topology_depth)
 {
@@ -88,42 +103,42 @@ void print_header(int topology_depth)
 	int state, need_len;
 	cstate_t s;
 	char buf[128] = "";
-	int percent_width = 4;
 
 	fill_string_with_spaces(buf, topology_depth * 5 - 1);
 	printf("%s|", buf);
 
 	for (mon = 0; mon < avail_monitors; mon++) {
-		need_len = monitors[mon]->hw_states_num * (percent_width + 3)
+		need_len = monitors[mon]->hw_states_num * (MAX_COL_WIDTH + 1)
 			- 1;
-		if (mon != 0) {
-			printf("|| ");
-			need_len--;
-		}
+		if (mon != 0)
+			printf("||");
 		sprintf(buf, "%s", monitors[mon]->name);
 		fill_string_with_spaces(buf, need_len);
 		printf("%s", buf);
 	}
 	printf("\n");
 
-	if (topology_depth > 2)
-		printf("PKG |");
-	if (topology_depth > 1)
+	switch (topology_depth) {
+	case TOPOLOGY_DEPTH_PKG:
+		printf(" PKG|");
+	case TOPOLOGY_DEPTH_CORE:
 		printf("CORE|");
-	if (topology_depth > 0)
-		printf("CPU |");
+	case	TOPOLOGY_DEPTH_CPU:
+		printf(" CPU|");
+		break;
+	default:
+		return;
+	}
 
 	for (mon = 0; mon < avail_monitors; mon++) {
 		if (mon != 0)
-			printf("|| ");
-		else
-			printf(" ");
+			printf("||");
 		for (state = 0; state < monitors[mon]->hw_states_num; state++) {
 			if (state != 0)
-				printf(" | ");
+				printf("|");
 			s = monitors[mon]->hw_states[state];
 			sprintf(buf, "%s", s.name);
-			fill_string_with_spaces(buf, percent_width);
+			fill_string_with_spaces(buf, MAX_COL_WIDTH);
 			printf("%s", buf);
 		}
 		printf(" ");
@@ -143,13 +158,21 @@ void print_results(int topology_depth, int cpu)
 	/* Be careful CPUs may got resorted for pkg value do not just use cpu */
 	if (!bitmask_isbitset(cpus_chosen, cpu_top.core_info[cpu].cpu))
 		return;
+	if (!cpu_top.core_info[cpu].is_online &&
+	    cpu_top.core_info[cpu].pkg == -1)
+		return;
 
-	if (topology_depth > 2)
+	switch (topology_depth) {
+	case TOPOLOGY_DEPTH_PKG:
 		printf("%4d|", cpu_top.core_info[cpu].pkg);
-	if (topology_depth > 1)
+	case TOPOLOGY_DEPTH_CORE:
 		printf("%4d|", cpu_top.core_info[cpu].core);
-	if (topology_depth > 0)
+	case TOPOLOGY_DEPTH_CPU:
 		printf("%4d|", cpu_top.core_info[cpu].cpu);
+		break;
+	default:
+		return;
+	}
 
 	for (mon = 0; mon < avail_monitors; mon++) {
 		if (mon != 0)
@@ -191,7 +214,8 @@ void print_results(int topology_depth, int cpu)
 	 * It's up to the monitor plug-in to check .is_online, this one
 	 * is just for additional info.
 	 */
-	if (!cpu_top.core_info[cpu].is_online) {
+	if (!cpu_top.core_info[cpu].is_online &&
+	    cpu_top.core_info[cpu].pkg != -1) {
 		printf(_(" *is offline\n"));
 		return;
 	} else
@@ -285,7 +309,10 @@ int fork_it(char **argv)
 
 	if (!child_pid) {
 		/* child */
-		execvp(argv[0], argv);
+		if (execvp(argv[0], argv) == -1) {
+			printf("Invalid monitor command %s\n", argv[0]);
+			exit(errno);
+		}
 	} else {
 		/* parent */
 		if (child_pid == -1) {
@@ -388,6 +415,9 @@ int cmd_monitor(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
+	if (!cpu_top.core_info[0].is_online)
+		printf("WARNING: at least one cpu is offline\n");
+
 	/* Default is: monitor all CPUs */
 	if (bitmask_isallclear(cpus_chosen))
 		bitmask_setall(cpus_chosen);
@@ -398,7 +428,7 @@ int cmd_monitor(int argc, char **argv)
 		dprint("Try to register: %s\n", all_monitors[num]->name);
 		test_mon = all_monitors[num]->do_register();
 		if (test_mon) {
-			if (test_mon->needs_root && !run_as_root) {
+			if (test_mon->flags.needs_root && !run_as_root) {
 				fprintf(stderr, _("Available monitor %s needs "
 					  "root access\n"), test_mon->name);
 				continue;
@@ -411,11 +441,13 @@ int cmd_monitor(int argc, char **argv)
 
 	if (avail_monitors == 0) {
 		printf(_("No HW Cstate monitors found\n"));
+		cpu_topology_release(cpu_top);
 		return 1;
 	}
 
 	if (mode == list) {
 		list_monitors();
+		cpu_topology_release(cpu_top);
 		exit(EXIT_SUCCESS);
 	}
 
@@ -436,20 +468,21 @@ int cmd_monitor(int argc, char **argv)
 	/* ToDo: Topology parsing needs fixing first to do
 	   this more generically */
 	if (cpu_top.pkgs > 1)
-		print_header(3);
+		print_header(TOPOLOGY_DEPTH_PKG);
 	else
-		print_header(1);
+		print_header(TOPOLOGY_DEPTH_CPU);
 
 	for (cpu = 0; cpu < cpu_count; cpu++) {
 		if (cpu_top.pkgs > 1)
-			print_results(3, cpu);
+			print_results(TOPOLOGY_DEPTH_PKG, cpu);
 		else
-			print_results(1, cpu);
+			print_results(TOPOLOGY_DEPTH_CPU, cpu);
 	}
 
-	for (num = 0; num < avail_monitors; num++)
-		monitors[num]->unregister();
-
+	for (num = 0; num < avail_monitors; num++) {
+		if (monitors[num]->unregister)
+			monitors[num]->unregister();
+	}
 	cpu_topology_release(cpu_top);
 	return 0;
 }

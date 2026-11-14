@@ -52,7 +52,7 @@ int carl9170_write_reg(struct ar9170 *ar, const u32 reg, const u32 val)
 				(u8 *) buf, 0, NULL);
 	if (err) {
 		if (net_ratelimit()) {
-			wiphy_err(ar->hw->wiphy, "writing reg %#x "
+			wiphy_dbg(ar->hw->wiphy, "writing reg %#x "
 				"(val %#x) failed (%d)\n", reg, val, err);
 		}
 	}
@@ -78,7 +78,7 @@ int carl9170_read_mreg(struct ar9170 *ar, const int nregs,
 				4 * nregs, (u8 *)res);
 	if (err) {
 		if (net_ratelimit()) {
-			wiphy_err(ar->hw->wiphy, "reading regs failed (%d)\n",
+			wiphy_dbg(ar->hw->wiphy, "reading regs failed (%d)\n",
 				  err);
 		}
 		return err;
@@ -120,7 +120,7 @@ struct carl9170_cmd *carl9170_cmd_buf(struct ar9170 *ar,
 {
 	struct carl9170_cmd *tmp;
 
-	tmp = kzalloc(sizeof(struct carl9170_cmd_head) + len, GFP_ATOMIC);
+	tmp = kzalloc_obj(*tmp, GFP_ATOMIC);
 	if (tmp) {
 		tmp->hdr.cmd = cmd;
 		tmp->hdr.len = len;
@@ -188,12 +188,12 @@ int carl9170_collect_tally(struct ar9170 *ar)
 
 		if (ar->channel) {
 			info = &ar->survey[ar->channel->hw_value];
-			info->channel_time = ar->tally.active;
-			info->channel_time_busy = ar->tally.cca;
-			info->channel_time_tx = ar->tally.tx_time;
-			do_div(info->channel_time, 1000);
-			do_div(info->channel_time_busy, 1000);
-			do_div(info->channel_time_tx, 1000);
+			info->time = ar->tally.active;
+			info->time_busy = ar->tally.cca;
+			info->time_tx = ar->tally.tx_time;
+			do_div(info->time, 1000);
+			do_div(info->time_busy, 1000);
+			do_div(info->time_tx, 1000);
 		}
 	}
 	return 0;

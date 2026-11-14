@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI_ASM_X86_E820_H
 #define _UAPI_ASM_X86_E820_H
 #define E820MAP	0x2d0		/* our map */
@@ -21,11 +22,6 @@
  * this size.
  */
 
-/*
- * Odd: 'make headers_check' complains about numa.h if I try
- * to collapse the next two #ifdef lines to a single line:
- *	#if defined(__KERNEL__) && defined(CONFIG_EFI)
- */
 #ifndef __KERNEL__
 #define E820_X_MAX E820MAX
 #endif
@@ -37,7 +33,18 @@
 #define E820_ACPI	3
 #define E820_NVS	4
 #define E820_UNUSABLE	5
+#define E820_PMEM	7
 
+/*
+ * This is a non-standardized way to represent ADR or NVDIMM regions that
+ * persist over a reboot.  The kernel will ignore their special capabilities
+ * unless the CONFIG_X86_PMEM_LEGACY option is set.
+ *
+ * ( Note that older platforms also used 6 for the same type of memory,
+ *   but newer versions switched to 12 as 6 was assigned differently.  Some
+ *   time they will learn... )
+ */
+#define E820_PRAM	12
 
 /*
  * reserved RAM used by kernel itself
@@ -47,7 +54,7 @@
  */
 #define E820_RESERVED_KERN        128
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #include <linux/types.h>
 struct e820entry {
 	__u64 addr;	/* start of memory segment */
@@ -69,7 +76,7 @@ struct e820map {
 #define BIOS_ROM_BASE		0xffe00000
 #define BIOS_ROM_END		0xffffffff
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 
 #endif /* _UAPI_ASM_X86_E820_H */

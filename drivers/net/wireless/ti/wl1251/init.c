@@ -1,22 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of wl1251
  *
  * Copyright (C) 2009 Nokia Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 
 #include <linux/kernel.h>
@@ -33,7 +19,7 @@ int wl1251_hw_init_hwenc_config(struct wl1251 *wl)
 {
 	int ret;
 
-	ret = wl1251_acx_feature_cfg(wl);
+	ret = wl1251_acx_feature_cfg(wl, 0);
 	if (ret < 0) {
 		wl1251_warning("couldn't set feature config");
 		return ret;
@@ -127,7 +113,7 @@ int wl1251_hw_init_phy_config(struct wl1251 *wl)
 	if (ret < 0)
 		return ret;
 
-	ret = wl1251_acx_group_address_tbl(wl);
+	ret = wl1251_acx_group_address_tbl(wl, true, NULL, 0);
 	if (ret < 0)
 		return ret;
 
@@ -208,8 +194,7 @@ int wl1251_hw_init_mem_config(struct wl1251 *wl)
 	if (ret < 0)
 		return ret;
 
-	wl->target_mem_map = kzalloc(sizeof(struct wl1251_acx_mem_map),
-					  GFP_KERNEL);
+	wl->target_mem_map = kzalloc_obj(struct wl1251_acx_mem_map);
 	if (!wl->target_mem_map) {
 		wl1251_error("couldn't allocate target memory map");
 		return -ENOMEM;
@@ -275,7 +260,7 @@ static int wl1251_hw_init_tx_queue_config(struct wl1251 *wl)
 
 	wl1251_debug(DEBUG_ACX, "acx tx queue config");
 
-	config = kzalloc(sizeof(*config), GFP_KERNEL);
+	config = kzalloc_obj(*config);
 	if (!config) {
 		ret = -ENOMEM;
 		goto out;
@@ -308,12 +293,9 @@ static int wl1251_hw_init_data_path_config(struct wl1251 *wl)
 	int ret;
 
 	/* asking for the data path parameters */
-	wl->data_path = kzalloc(sizeof(struct acx_data_path_params_resp),
-				GFP_KERNEL);
-	if (!wl->data_path) {
-		wl1251_error("Couldnt allocate data path parameters");
+	wl->data_path = kzalloc_obj(struct acx_data_path_params_resp);
+	if (!wl->data_path)
 		return -ENOMEM;
-	}
 
 	ret = wl1251_acx_data_path_params(wl, wl->data_path);
 	if (ret < 0) {
@@ -389,13 +371,18 @@ int wl1251_hw_init(struct wl1251 *wl)
 	if (ret < 0)
 		goto out_free_data_path;
 
-	/* Beacons and boradcast settings */
+	/* Beacons and broadcast settings */
 	ret = wl1251_hw_init_beacon_broadcast(wl);
 	if (ret < 0)
 		goto out_free_data_path;
 
-	/* Enable data path */
-	ret = wl1251_cmd_data_path(wl, wl->channel, 1);
+	/* Enable rx data path */
+	ret = wl1251_cmd_data_path_rx(wl, wl->channel, 1);
+	if (ret < 0)
+		goto out_free_data_path;
+
+	/* Enable tx data path */
+	ret = wl1251_cmd_data_path_tx(wl, wl->channel, 1);
 	if (ret < 0)
 		goto out_free_data_path;
 

@@ -21,23 +21,22 @@
  *
  * Authors: Ben Skeggs <bskeggs@redhat.com>
  */
-
-#include <core/object.h>
-#include <core/class.h>
-
-#include "nouveau_drm.h"
+#include "nouveau_drv.h"
 #include "nouveau_dma.h"
 #include "nv10_fence.h"
+
+#include <nvif/push006c.h>
+
+#include <nvhw/class/cl006e.h>
 
 int
 nv10_fence_emit(struct nouveau_fence *fence)
 {
-	struct nouveau_channel *chan = fence->channel;
-	int ret = RING_SPACE(chan, 2);
+	struct nvif_push *push = &fence->channel->chan.push;
+	int ret = PUSH_WAIT(push, 2);
 	if (ret == 0) {
-		BEGIN_NV04(chan, 0, NV10_SUBCHAN_REF_CNT, 1);
-		OUT_RING  (chan, fence->sequence);
-		FIRE_RING (chan);
+		PUSH_MTHD(push, NV06E, SET_REFERENCE, fence->base.seqno);
+		PUSH_KICK(push);
 	}
 	return ret;
 }
@@ -53,7 +52,7 @@ nv10_fence_sync(struct nouveau_fence *fence,
 u32
 nv10_fence_read(struct nouveau_channel *chan)
 {
-	return nv_ro32(chan->object, 0x0048);
+	return NVIF_RD32(&chan->user, NV06E, REFERENCE);
 }
 
 void
@@ -61,20 +60,21 @@ nv10_fence_context_del(struct nouveau_channel *chan)
 {
 	struct nv10_fence_chan *fctx = chan->fence;
 	nouveau_fence_context_del(&fctx->base);
+	nvif_object_dtor(&fctx->sema);
 	chan->fence = NULL;
-	kfree(fctx);
+	nouveau_fence_context_free(&fctx->base);
 }
 
-int
+static int
 nv10_fence_context_new(struct nouveau_channel *chan)
 {
 	struct nv10_fence_chan *fctx;
 
-	fctx = chan->fence = kzalloc(sizeof(*fctx), GFP_KERNEL);
+	fctx = chan->fence = kzalloc_obj(*fctx);
 	if (!fctx)
 		return -ENOMEM;
 
-	nouveau_fence_context_new(&fctx->base);
+	nouveau_fence_context_new(chan, &fctx->base);
 	fctx->base.emit = nv10_fence_emit;
 	fctx->base.read = nv10_fence_read;
 	fctx->base.sync = nv10_fence_sync;
@@ -85,10 +85,8 @@ void
 nv10_fence_destroy(struct nouveau_drm *drm)
 {
 	struct nv10_fence_priv *priv = drm->fence;
-	nouveau_bo_unmap(priv->bo);
-	if (priv->bo)
-		nouveau_bo_unpin(priv->bo);
-	nouveau_bo_ref(NULL, &priv->bo);
+
+	nouveau_bo_unpin_del(&priv->bo);
 	drm->fence = NULL;
 	kfree(priv);
 }
@@ -98,7 +96,7 @@ nv10_fence_create(struct nouveau_drm *drm)
 {
 	struct nv10_fence_priv *priv;
 
-	priv = drm->fence = kzalloc(sizeof(*priv), GFP_KERNEL);
+	priv = drm->fence = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 

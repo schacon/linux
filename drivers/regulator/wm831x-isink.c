@@ -1,15 +1,10 @@
-/*
- * wm831x-isink.c  --  Current sink driver for the WM831x series
- *
- * Copyright 2009 Wolfson Microelectronics PLC.
- *
- * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- */
+// SPDX-License-Identifier: GPL-2.0+
+//
+// wm831x-isink.c  --  Current sink driver for the WM831x series
+//
+// Copyright 2009 Wolfson Microelectronics PLC.
+//
+// Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -67,11 +62,7 @@ static int wm831x_isink_disable(struct regulator_dev *rdev)
 	if (ret < 0)
 		return ret;
 
-	ret = wm831x_set_bits(wm831x, isink->reg, WM831X_CS1_ENA, 0);
-	if (ret < 0)
-		return ret;
-
-	return ret;
+	return wm831x_set_bits(wm831x, isink->reg, WM831X_CS1_ENA, 0);
 
 }
 
@@ -92,48 +83,12 @@ static int wm831x_isink_is_enabled(struct regulator_dev *rdev)
 		return 0;
 }
 
-static int wm831x_isink_set_current(struct regulator_dev *rdev,
-				    int min_uA, int max_uA)
-{
-	struct wm831x_isink *isink = rdev_get_drvdata(rdev);
-	struct wm831x *wm831x = isink->wm831x;
-	int ret, i;
-
-	for (i = 0; i < ARRAY_SIZE(wm831x_isinkv_values); i++) {
-		int val = wm831x_isinkv_values[i];
-		if (min_uA <= val && val <= max_uA) {
-			ret = wm831x_set_bits(wm831x, isink->reg,
-					      WM831X_CS1_ISEL_MASK, i);
-			return ret;
-		}
-	}
-
-	return -EINVAL;
-}
-
-static int wm831x_isink_get_current(struct regulator_dev *rdev)
-{
-	struct wm831x_isink *isink = rdev_get_drvdata(rdev);
-	struct wm831x *wm831x = isink->wm831x;
-	int ret;
-
-	ret = wm831x_reg_read(wm831x, isink->reg);
-	if (ret < 0)
-		return ret;
-
-	ret &= WM831X_CS1_ISEL_MASK;
-	if (ret > WM831X_ISINK_MAX_ISEL)
-		ret = WM831X_ISINK_MAX_ISEL;
-
-	return wm831x_isinkv_values[ret];
-}
-
-static struct regulator_ops wm831x_isink_ops = {
+static const struct regulator_ops wm831x_isink_ops = {
 	.is_enabled = wm831x_isink_is_enabled,
 	.enable = wm831x_isink_enable,
 	.disable = wm831x_isink_disable,
-	.set_current_limit = wm831x_isink_set_current,
-	.get_current_limit = wm831x_isink_get_current,
+	.set_current_limit = regulator_set_current_limit_regmap,
+	.get_current_limit = regulator_get_current_limit_regmap,
 };
 
 static irqreturn_t wm831x_isink_irq(int irq, void *data)
@@ -151,7 +106,7 @@ static irqreturn_t wm831x_isink_irq(int irq, void *data)
 static int wm831x_isink_probe(struct platform_device *pdev)
 {
 	struct wm831x *wm831x = dev_get_drvdata(pdev->dev.parent);
-	struct wm831x_pdata *pdata = wm831x->dev->platform_data;
+	struct wm831x_pdata *pdata = dev_get_platdata(wm831x->dev);
 	struct wm831x_isink *isink;
 	int id = pdev->id % ARRAY_SIZE(pdata->isink);
 	struct regulator_config config = { };
@@ -163,12 +118,9 @@ static int wm831x_isink_probe(struct platform_device *pdev)
 	if (pdata == NULL || pdata->isink[id] == NULL)
 		return -ENODEV;
 
-	isink = devm_kzalloc(&pdev->dev, sizeof(struct wm831x_isink),
-			     GFP_KERNEL);
-	if (isink == NULL) {
-		dev_err(&pdev->dev, "Unable to allocate private data\n");
+	isink = devm_kzalloc_obj(&pdev->dev, struct wm831x_isink);
+	if (!isink)
 		return -ENOMEM;
-	}
 
 	isink->wm831x = wm831x;
 
@@ -189,12 +141,18 @@ static int wm831x_isink_probe(struct platform_device *pdev)
 	isink->desc.ops = &wm831x_isink_ops;
 	isink->desc.type = REGULATOR_CURRENT;
 	isink->desc.owner = THIS_MODULE;
+	isink->desc.curr_table = wm831x_isinkv_values;
+	isink->desc.n_current_limits = ARRAY_SIZE(wm831x_isinkv_values);
+	isink->desc.csel_reg = isink->reg;
+	isink->desc.csel_mask = WM831X_CS1_ISEL_MASK;
 
 	config.dev = pdev->dev.parent;
 	config.init_data = pdata->isink[id];
 	config.driver_data = isink;
+	config.regmap = wm831x->regmap;
 
-	isink->regulator = regulator_register(&isink->desc, &config);
+	isink->regulator = devm_regulator_register(&pdev->dev, &isink->desc,
+						   &config);
 	if (IS_ERR(isink->regulator)) {
 		ret = PTR_ERR(isink->regulator);
 		dev_err(wm831x->dev, "Failed to register ISINK%d: %d\n",
@@ -203,43 +161,30 @@ static int wm831x_isink_probe(struct platform_device *pdev)
 	}
 
 	irq = wm831x_irq(wm831x, platform_get_irq(pdev, 0));
-	ret = request_threaded_irq(irq, NULL, wm831x_isink_irq,
-				   IRQF_TRIGGER_RISING, isink->name, isink);
+	ret = devm_request_threaded_irq(&pdev->dev, irq, NULL,
+					wm831x_isink_irq,
+					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+					isink->name,
+					isink);
 	if (ret != 0) {
 		dev_err(&pdev->dev, "Failed to request ISINK IRQ %d: %d\n",
 			irq, ret);
-		goto err_regulator;
+		goto err;
 	}
 
 	platform_set_drvdata(pdev, isink);
 
 	return 0;
 
-err_regulator:
-	regulator_unregister(isink->regulator);
 err:
 	return ret;
 }
 
-static int wm831x_isink_remove(struct platform_device *pdev)
-{
-	struct wm831x_isink *isink = platform_get_drvdata(pdev);
-
-	platform_set_drvdata(pdev, NULL);
-
-	free_irq(wm831x_irq(isink->wm831x, platform_get_irq(pdev, 0)), isink);
-
-	regulator_unregister(isink->regulator);
-
-	return 0;
-}
-
 static struct platform_driver wm831x_isink_driver = {
 	.probe = wm831x_isink_probe,
-	.remove = wm831x_isink_remove,
 	.driver		= {
 		.name	= "wm831x-isink",
-		.owner	= THIS_MODULE,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 };
 

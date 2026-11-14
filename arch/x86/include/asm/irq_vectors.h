@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_X86_IRQ_VECTORS_H
 #define _ASM_X86_IRQ_VECTORS_H
 
@@ -17,61 +18,30 @@
  *  Vectors   0 ...  31 : system traps and exceptions - hardcoded events
  *  Vectors  32 ... 127 : device interrupts
  *  Vector  128         : legacy int80 syscall interface
- *  Vectors 129 ... INVALIDATE_TLB_VECTOR_START-1 except 204 : device interrupts
- *  Vectors INVALIDATE_TLB_VECTOR_START ... 255 : special interrupts
+ *  Vectors 129 ... FIRST_SYSTEM_VECTOR-1 : device interrupts
+ *  Vectors FIRST_SYSTEM_VECTOR ... 255   : special interrupts
  *
  * 64-bit x86 has per CPU IDT tables, 32-bit has one shared IDT table.
  *
  * This file enumerates the exact layout of them:
  */
 
+/* This is used as an interrupt vector when programming the APIC. */
 #define NMI_VECTOR			0x02
-#define MCE_VECTOR			0x12
 
 /*
  * IDT vectors usable for external interrupt sources start at 0x20.
  * (0x80 is the syscall vector, 0x30-0x3f are for ISA)
  */
 #define FIRST_EXTERNAL_VECTOR		0x20
-/*
- * We start allocating at 0x21 to spread out vectors evenly between
- * priority levels. (0x80 is the syscall vector)
- */
-#define VECTOR_OFFSET_START		1
-
-/*
- * Reserve the lowest usable vector (and hence lowest priority)  0x20 for
- * triggering cleanup after irq migration. 0x21-0x2f will still be used
- * for device interrupts.
- */
-#define IRQ_MOVE_CLEANUP_VECTOR		FIRST_EXTERNAL_VECTOR
 
 #define IA32_SYSCALL_VECTOR		0x80
-#ifdef CONFIG_X86_32
-# define SYSCALL_VECTOR			0x80
-#endif
 
 /*
  * Vectors 0x30-0x3f are used for ISA interrupts.
  *   round up to the next 16-vector boundary
  */
-#define IRQ0_VECTOR			((FIRST_EXTERNAL_VECTOR + 16) & ~15)
-
-#define IRQ1_VECTOR			(IRQ0_VECTOR +  1)
-#define IRQ2_VECTOR			(IRQ0_VECTOR +  2)
-#define IRQ3_VECTOR			(IRQ0_VECTOR +  3)
-#define IRQ4_VECTOR			(IRQ0_VECTOR +  4)
-#define IRQ5_VECTOR			(IRQ0_VECTOR +  5)
-#define IRQ6_VECTOR			(IRQ0_VECTOR +  6)
-#define IRQ7_VECTOR			(IRQ0_VECTOR +  7)
-#define IRQ8_VECTOR			(IRQ0_VECTOR +  8)
-#define IRQ9_VECTOR			(IRQ0_VECTOR +  9)
-#define IRQ10_VECTOR			(IRQ0_VECTOR + 10)
-#define IRQ11_VECTOR			(IRQ0_VECTOR + 11)
-#define IRQ12_VECTOR			(IRQ0_VECTOR + 12)
-#define IRQ13_VECTOR			(IRQ0_VECTOR + 13)
-#define IRQ14_VECTOR			(IRQ0_VECTOR + 14)
-#define IRQ15_VECTOR			(IRQ0_VECTOR + 15)
+#define ISA_IRQ_VECTOR(irq)		(((FIRST_EXTERNAL_VECTOR + 16) & ~15) + irq)
 
 /*
  * Special IRQ vectors used by the SMP architecture, 0xf0-0xff
@@ -102,41 +72,49 @@
  */
 #define X86_PLATFORM_IPI_VECTOR		0xf7
 
-/* Vector for KVM to deliver posted interrupt IPI */
-#ifdef CONFIG_HAVE_KVM
-#define POSTED_INTR_VECTOR		0xf2
-#endif
-
 /*
  * IRQ work vector:
  */
 #define IRQ_WORK_VECTOR			0xf6
 
-#define UV_BAU_MESSAGE			0xf5
+/* IRQ vector for PMIs when running a guest with a mediated PMU. */
+#define PERF_GUEST_MEDIATED_PMI_VECTOR	0xf5
+
+#define DEFERRED_ERROR_VECTOR		0xf4
 
 /* Vector on which hypervisor callbacks will be delivered */
 #define HYPERVISOR_CALLBACK_VECTOR	0xf3
 
+/* Vector for KVM to deliver posted interrupt IPI */
+#define POSTED_INTR_VECTOR		0xf2
+#define POSTED_INTR_WAKEUP_VECTOR	0xf1
+#define POSTED_INTR_NESTED_VECTOR	0xf0
+
+#define MANAGED_IRQ_SHUTDOWN_VECTOR	0xef
+
+#if IS_ENABLED(CONFIG_HYPERV)
+#define HYPERV_REENLIGHTENMENT_VECTOR	0xee
+#define HYPERV_STIMER0_VECTOR		0xed
+#endif
+
+#define LOCAL_TIMER_VECTOR		0xec
+
 /*
- * Local APIC timer IRQ vector is on a different priority level,
- * to work around the 'lost local interrupt if more than 2 IRQ
- * sources per level' errata.
+ * Posted interrupt notification vector for all device MSIs delivered to
+ * the host kernel.
  */
-#define LOCAL_TIMER_VECTOR		0xef
+#define POSTED_MSI_NOTIFICATION_VECTOR	0xeb
 
 #define NR_VECTORS			 256
 
-#define FPU_IRQ				  13
-
-#define	FIRST_VM86_IRQ			   3
-#define LAST_VM86_IRQ			  15
-
-#ifndef __ASSEMBLY__
-static inline int invalid_vm86_irq(int irq)
-{
-	return irq < FIRST_VM86_IRQ || irq > LAST_VM86_IRQ;
-}
+#ifdef CONFIG_X86_LOCAL_APIC
+#define FIRST_SYSTEM_VECTOR		POSTED_MSI_NOTIFICATION_VECTOR
+#else
+#define FIRST_SYSTEM_VECTOR		NR_VECTORS
 #endif
+
+#define NR_EXTERNAL_VECTORS		(FIRST_SYSTEM_VECTOR - FIRST_EXTERNAL_VECTOR)
+#define NR_SYSTEM_VECTORS		(NR_VECTORS - FIRST_SYSTEM_VECTOR)
 
 /*
  * Size the maximum number of interrupts.
@@ -149,18 +127,22 @@ static inline int invalid_vm86_irq(int irq)
  * static arrays.
  */
 
-#define NR_IRQS_LEGACY			  16
+#define NR_IRQS_LEGACY			16
 
-#define IO_APIC_VECTOR_LIMIT		( 32 * MAX_IO_APICS )
+#define CPU_VECTOR_LIMIT		(64 * NR_CPUS)
+#define IO_APIC_VECTOR_LIMIT		(32 * MAX_IO_APICS)
 
-#ifdef CONFIG_X86_IO_APIC
-# define CPU_VECTOR_LIMIT		(64 * NR_CPUS)
-# define NR_IRQS					\
+#if defined(CONFIG_X86_IO_APIC) && defined(CONFIG_PCI_MSI)
+#define NR_IRQS						\
 	(CPU_VECTOR_LIMIT > IO_APIC_VECTOR_LIMIT ?	\
 		(NR_VECTORS + CPU_VECTOR_LIMIT)  :	\
 		(NR_VECTORS + IO_APIC_VECTOR_LIMIT))
-#else /* !CONFIG_X86_IO_APIC: */
-# define NR_IRQS			NR_IRQS_LEGACY
+#elif defined(CONFIG_X86_IO_APIC)
+#define	NR_IRQS				(NR_VECTORS + IO_APIC_VECTOR_LIMIT)
+#elif defined(CONFIG_PCI_MSI)
+#define NR_IRQS				(NR_VECTORS + CPU_VECTOR_LIMIT)
+#else
+#define NR_IRQS				NR_IRQS_LEGACY
 #endif
 
 #endif /* _ASM_X86_IRQ_VECTORS_H */

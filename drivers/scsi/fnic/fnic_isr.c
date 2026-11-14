@@ -1,25 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2008 Cisco Systems, Inc.  All rights reserved.
  * Copyright 2007 Nuova Systems, Inc.  All rights reserved.
- *
- * This program is free software; you may redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
  */
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
-#include <scsi/libfc.h>
+#include <scsi/scsi_transport_fc.h>
 #include <scsi/fc_frame.h>
 #include "vnic_dev.h"
 #include "vnic_intr.h"
@@ -37,6 +25,9 @@ static irqreturn_t fnic_isr_legacy(int irq, void *data)
 	if (!pba)
 		return IRQ_NONE;
 
+	fnic->fnic_stats.misc_stats.last_isr_time = jiffies;
+	atomic64_inc(&fnic->fnic_stats.misc_stats.isr_count);
+
 	if (pba & (1 << FNIC_INTX_NOTIFY)) {
 		vnic_intr_return_all_credits(&fnic->intr[FNIC_INTX_NOTIFY]);
 		fnic_handle_link_event(fnic);
@@ -47,8 +38,13 @@ static irqreturn_t fnic_isr_legacy(int irq, void *data)
 		fnic_log_q_error(fnic);
 	}
 
+	if (pba & (1 << FNIC_INTX_DUMMY)) {
+		atomic64_inc(&fnic->fnic_stats.misc_stats.intx_dummy);
+		vnic_intr_return_all_credits(&fnic->intr[FNIC_INTX_DUMMY]);
+	}
+
 	if (pba & (1 << FNIC_INTX_WQ_RQ_COPYWQ)) {
-		work_done += fnic_wq_copy_cmpl_handler(fnic, -1);
+		work_done += fnic_wq_copy_cmpl_handler(fnic, io_completions, FNIC_MQ_CQ_INDEX);
 		work_done += fnic_wq_cmpl_handler(fnic, -1);
 		work_done += fnic_rq_cmpl_handler(fnic, -1);
 
@@ -66,7 +62,10 @@ static irqreturn_t fnic_isr_msi(int irq, void *data)
 	struct fnic *fnic = data;
 	unsigned long work_done = 0;
 
-	work_done += fnic_wq_copy_cmpl_handler(fnic, -1);
+	fnic->fnic_stats.misc_stats.last_isr_time = jiffies;
+	atomic64_inc(&fnic->fnic_stats.misc_stats.isr_count);
+
+	work_done += fnic_wq_copy_cmpl_handler(fnic, io_completions, FNIC_MQ_CQ_INDEX);
 	work_done += fnic_wq_cmpl_handler(fnic, -1);
 	work_done += fnic_rq_cmpl_handler(fnic, -1);
 
@@ -83,6 +82,9 @@ static irqreturn_t fnic_isr_msix_rq(int irq, void *data)
 	struct fnic *fnic = data;
 	unsigned long rq_work_done = 0;
 
+	fnic->fnic_stats.misc_stats.last_isr_time = jiffies;
+	atomic64_inc(&fnic->fnic_stats.misc_stats.isr_count);
+
 	rq_work_done = fnic_rq_cmpl_handler(fnic, -1);
 	vnic_intr_return_credits(&fnic->intr[FNIC_MSIX_RQ],
 				 rq_work_done,
@@ -97,6 +99,9 @@ static irqreturn_t fnic_isr_msix_wq(int irq, void *data)
 	struct fnic *fnic = data;
 	unsigned long wq_work_done = 0;
 
+	fnic->fnic_stats.misc_stats.last_isr_time = jiffies;
+	atomic64_inc(&fnic->fnic_stats.misc_stats.isr_count);
+
 	wq_work_done = fnic_wq_cmpl_handler(fnic, -1);
 	vnic_intr_return_credits(&fnic->intr[FNIC_MSIX_WQ],
 				 wq_work_done,
@@ -109,9 +114,22 @@ static irqreturn_t fnic_isr_msix_wq_copy(int irq, void *data)
 {
 	struct fnic *fnic = data;
 	unsigned long wq_copy_work_done = 0;
+	int i;
 
-	wq_copy_work_done = fnic_wq_copy_cmpl_handler(fnic, -1);
-	vnic_intr_return_credits(&fnic->intr[FNIC_MSIX_WQ_COPY],
+	fnic->fnic_stats.misc_stats.last_isr_time = jiffies;
+	atomic64_inc(&fnic->fnic_stats.misc_stats.isr_count);
+
+	i = irq - fnic->msix[0].irq_num;
+	if (i >= fnic->wq_copy_count + fnic->copy_wq_base ||
+		i < 0 || fnic->msix[i].irq_num != irq) {
+		for (i = fnic->copy_wq_base; i < fnic->wq_copy_count + fnic->copy_wq_base ; i++) {
+			if (fnic->msix[i].irq_num == irq)
+				break;
+		}
+	}
+
+	wq_copy_work_done = fnic_wq_copy_cmpl_handler(fnic, io_completions, i);
+	vnic_intr_return_credits(&fnic->intr[i],
 				 wq_copy_work_done,
 				 1 /* unmask intr */,
 				 1 /* reset intr timer */);
@@ -122,7 +140,10 @@ static irqreturn_t fnic_isr_msix_err_notify(int irq, void *data)
 {
 	struct fnic *fnic = data;
 
-	vnic_intr_return_all_credits(&fnic->intr[FNIC_MSIX_ERR_NOTIFY]);
+	fnic->fnic_stats.misc_stats.last_isr_time = jiffies;
+	atomic64_inc(&fnic->fnic_stats.misc_stats.isr_count);
+
+	vnic_intr_return_all_credits(&fnic->intr[fnic->err_intr_offset]);
 	fnic_log_q_error(fnic);
 	fnic_handle_link_event(fnic);
 
@@ -136,13 +157,13 @@ void fnic_free_intr(struct fnic *fnic)
 	switch (vnic_dev_get_intr_mode(fnic->vdev)) {
 	case VNIC_DEV_INTR_MODE_INTX:
 	case VNIC_DEV_INTR_MODE_MSI:
-		free_irq(fnic->pdev->irq, fnic);
+		free_irq(pci_irq_vector(fnic->pdev, 0), fnic);
 		break;
 
 	case VNIC_DEV_INTR_MODE_MSIX:
 		for (i = 0; i < ARRAY_SIZE(fnic->msix); i++)
 			if (fnic->msix[i].requested)
-				free_irq(fnic->msix_entry[i].vector,
+				free_irq(pci_irq_vector(fnic->pdev, i),
 					 fnic->msix[i].devid);
 		break;
 
@@ -159,12 +180,12 @@ int fnic_request_intr(struct fnic *fnic)
 	switch (vnic_dev_get_intr_mode(fnic->vdev)) {
 
 	case VNIC_DEV_INTR_MODE_INTX:
-		err = request_irq(fnic->pdev->irq, &fnic_isr_legacy,
-				  IRQF_SHARED, DRV_NAME, fnic);
+		err = request_irq(pci_irq_vector(fnic->pdev, 0),
+				&fnic_isr_legacy, IRQF_SHARED, DRV_NAME, fnic);
 		break;
 
 	case VNIC_DEV_INTR_MODE_MSI:
-		err = request_irq(fnic->pdev->irq, &fnic_isr_msi,
+		err = request_irq(pci_irq_vector(fnic->pdev, 0), &fnic_isr_msi,
 				  0, fnic->name, fnic);
 		break;
 
@@ -180,26 +201,30 @@ int fnic_request_intr(struct fnic *fnic)
 		fnic->msix[FNIC_MSIX_WQ].isr = fnic_isr_msix_wq;
 		fnic->msix[FNIC_MSIX_WQ].devid = fnic;
 
-		sprintf(fnic->msix[FNIC_MSIX_WQ_COPY].devname,
-			"%.11s-scsi-wq", fnic->name);
-		fnic->msix[FNIC_MSIX_WQ_COPY].isr = fnic_isr_msix_wq_copy;
-		fnic->msix[FNIC_MSIX_WQ_COPY].devid = fnic;
+		for (i = fnic->copy_wq_base; i < fnic->wq_copy_count + fnic->copy_wq_base; i++) {
+			sprintf(fnic->msix[i].devname,
+				"%.11s-scsi-wq-%d", fnic->name, i-FNIC_MSIX_WQ_COPY);
+			fnic->msix[i].isr = fnic_isr_msix_wq_copy;
+			fnic->msix[i].devid = fnic;
+		}
 
-		sprintf(fnic->msix[FNIC_MSIX_ERR_NOTIFY].devname,
+		sprintf(fnic->msix[fnic->err_intr_offset].devname,
 			"%.11s-err-notify", fnic->name);
-		fnic->msix[FNIC_MSIX_ERR_NOTIFY].isr =
+		fnic->msix[fnic->err_intr_offset].isr =
 			fnic_isr_msix_err_notify;
-		fnic->msix[FNIC_MSIX_ERR_NOTIFY].devid = fnic;
+		fnic->msix[fnic->err_intr_offset].devid = fnic;
 
-		for (i = 0; i < ARRAY_SIZE(fnic->msix); i++) {
-			err = request_irq(fnic->msix_entry[i].vector,
-					  fnic->msix[i].isr, 0,
-					  fnic->msix[i].devname,
-					  fnic->msix[i].devid);
+		for (i = 0; i < fnic->intr_count; i++) {
+			fnic->msix[i].irq_num = pci_irq_vector(fnic->pdev, i);
+
+			err = request_irq(fnic->msix[i].irq_num,
+							fnic->msix[i].isr, 0,
+							fnic->msix[i].devname,
+							fnic->msix[i].devid);
 			if (err) {
-				shost_printk(KERN_ERR, fnic->lport->host,
-					     "MSIX: request_irq"
-					     " failed %d\n", err);
+				FNIC_ISR_DBG(KERN_ERR, fnic,
+							"request_irq failed with error: %d\n",
+							err);
 				fnic_free_intr(fnic);
 				break;
 			}
@@ -214,48 +239,106 @@ int fnic_request_intr(struct fnic *fnic)
 	return err;
 }
 
-int fnic_set_intr_mode(struct fnic *fnic)
+int fnic_set_intr_mode_msix(struct fnic *fnic)
 {
 	unsigned int n = ARRAY_SIZE(fnic->rq);
 	unsigned int m = ARRAY_SIZE(fnic->wq);
-	unsigned int o = ARRAY_SIZE(fnic->wq_copy);
-	unsigned int i;
+	unsigned int o = ARRAY_SIZE(fnic->hw_copy_wq);
+	unsigned int min_irqs = n + m + 1 + 1; /*rq, raw wq, wq, err*/
+	/*
+	 * Make driver critical vectors unmanaged, or else it can get tied
+	 * to an offline CPU. This can happen when hyper-threading is off.
+	 */
+	struct irq_affinity affd = {
+		.pre_vectors = n + m + 1, /* rq, raw wq, 1 ioq */
+		.post_vectors = 1, /* err */
+	};
+	/*
+	 * We need n RQs, m WQs, o Copy WQs, n+m+o CQs, and n+m+o+1 INTRs
+	 * (last INTR is used for WQ/RQ errors and notification area)
+	 */
+	FNIC_ISR_DBG(KERN_INFO, fnic,
+		"rq-array size: %d wq-array size: %d copy-wq array size: %d\n",
+		n, m, o);
+	FNIC_ISR_DBG(KERN_INFO, fnic,
+		"rq_count: %d raw_wq_count: %d wq_copy_count: %d cq_count: %d\n",
+		fnic->rq_count, fnic->raw_wq_count,
+		fnic->wq_copy_count, fnic->cq_count);
+
+	if (fnic->rq_count <= n && fnic->raw_wq_count <= m &&
+		fnic->wq_copy_count <= o) {
+		int vec_count = 0;
+		int vecs = fnic->rq_count + fnic->raw_wq_count + fnic->wq_copy_count + 1;
+
+		vec_count = pci_alloc_irq_vectors_affinity(fnic->pdev, min_irqs,
+			    vecs, PCI_IRQ_MSIX|PCI_IRQ_AFFINITY, &affd);
+		FNIC_ISR_DBG(KERN_INFO, fnic,
+					"allocated %d MSI-X vectors\n",
+					vec_count);
+
+		if (vec_count > 0) {
+			if (vec_count < vecs) {
+				FNIC_ISR_DBG(KERN_ERR, fnic,
+				"interrupts number mismatch: vec_count: %d vecs: %d\n",
+				vec_count, vecs);
+				if (vec_count < min_irqs) {
+					FNIC_ISR_DBG(KERN_ERR, fnic,
+								"no interrupts for copy wq\n");
+					return 1;
+				}
+			}
+
+			fnic->rq_count = n;
+			fnic->raw_wq_count = m;
+			fnic->copy_wq_base = fnic->rq_count + fnic->raw_wq_count;
+			fnic->wq_copy_count = vec_count - n - m - 1;
+			fnic->wq_count = fnic->raw_wq_count + fnic->wq_copy_count;
+			if (fnic->cq_count != vec_count - 1) {
+				FNIC_ISR_DBG(KERN_ERR, fnic,
+				"CQ count: %d does not match MSI-X vector count: %d\n",
+				fnic->cq_count, vec_count);
+				fnic->cq_count = vec_count - 1;
+			}
+			fnic->intr_count = vec_count;
+			fnic->err_intr_offset = fnic->rq_count + fnic->wq_count;
+
+			FNIC_ISR_DBG(KERN_INFO, fnic,
+				"rq_count: %d raw_wq_count: %d copy_wq_base: %d\n",
+				fnic->rq_count,
+				fnic->raw_wq_count, fnic->copy_wq_base);
+
+			FNIC_ISR_DBG(KERN_INFO, fnic,
+				"wq_copy_count: %d wq_count: %d cq_count: %d\n",
+				fnic->wq_copy_count,
+				fnic->wq_count, fnic->cq_count);
+
+			FNIC_ISR_DBG(KERN_INFO, fnic,
+				"intr_count: %d err_intr_offset: %u\n",
+				fnic->intr_count,
+				fnic->err_intr_offset);
+
+			vnic_dev_set_intr_mode(fnic->vdev, VNIC_DEV_INTR_MODE_MSIX);
+			FNIC_ISR_DBG(KERN_INFO, fnic,
+					"fnic using MSI-X\n");
+			return 0;
+		}
+	}
+	return 1;
+}
+
+int fnic_set_intr_mode(struct fnic *fnic)
+{
+	int ret_status = 0;
 
 	/*
 	 * Set interrupt mode (INTx, MSI, MSI-X) depending
 	 * system capabilities.
 	 *
 	 * Try MSI-X first
-	 *
-	 * We need n RQs, m WQs, o Copy WQs, n+m+o CQs, and n+m+o+1 INTRs
-	 * (last INTR is used for WQ/RQ errors and notification area)
 	 */
-
-	BUG_ON(ARRAY_SIZE(fnic->msix_entry) < n + m + o + 1);
-	for (i = 0; i < n + m + o + 1; i++)
-		fnic->msix_entry[i].entry = i;
-
-	if (fnic->rq_count >= n &&
-	    fnic->raw_wq_count >= m &&
-	    fnic->wq_copy_count >= o &&
-	    fnic->cq_count >= n + m + o) {
-		if (!pci_enable_msix(fnic->pdev, fnic->msix_entry,
-				    n + m + o + 1)) {
-			fnic->rq_count = n;
-			fnic->raw_wq_count = m;
-			fnic->wq_copy_count = o;
-			fnic->wq_count = m + o;
-			fnic->cq_count = n + m + o;
-			fnic->intr_count = n + m + o + 1;
-			fnic->err_intr_offset = FNIC_MSIX_ERR_NOTIFY;
-
-			FNIC_ISR_DBG(KERN_DEBUG, fnic->lport->host,
-				     "Using MSI-X Interrupts\n");
-			vnic_dev_set_intr_mode(fnic->vdev,
-					       VNIC_DEV_INTR_MODE_MSIX);
-			return 0;
-		}
-	}
+	ret_status = fnic_set_intr_mode_msix(fnic);
+	if (ret_status == 0)
+		return ret_status;
 
 	/*
 	 * Next try MSI
@@ -266,8 +349,7 @@ int fnic_set_intr_mode(struct fnic *fnic)
 	    fnic->wq_copy_count >= 1 &&
 	    fnic->cq_count >= 3 &&
 	    fnic->intr_count >= 1 &&
-	    !pci_enable_msi(fnic->pdev)) {
-
+	    pci_alloc_irq_vectors(fnic->pdev, 1, 1, PCI_IRQ_MSI) == 1) {
 		fnic->rq_count = 1;
 		fnic->raw_wq_count = 1;
 		fnic->wq_copy_count = 1;
@@ -276,7 +358,7 @@ int fnic_set_intr_mode(struct fnic *fnic)
 		fnic->intr_count = 1;
 		fnic->err_intr_offset = 0;
 
-		FNIC_ISR_DBG(KERN_DEBUG, fnic->lport->host,
+		FNIC_ISR_DBG(KERN_DEBUG, fnic,
 			     "Using MSI Interrupts\n");
 		vnic_dev_set_intr_mode(fnic->vdev, VNIC_DEV_INTR_MODE_MSI);
 
@@ -302,7 +384,7 @@ int fnic_set_intr_mode(struct fnic *fnic)
 		fnic->cq_count = 3;
 		fnic->intr_count = 3;
 
-		FNIC_ISR_DBG(KERN_DEBUG, fnic->lport->host,
+		FNIC_ISR_DBG(KERN_DEBUG, fnic,
 			     "Using Legacy Interrupts\n");
 		vnic_dev_set_intr_mode(fnic->vdev, VNIC_DEV_INTR_MODE_INTX);
 
@@ -316,17 +398,6 @@ int fnic_set_intr_mode(struct fnic *fnic)
 
 void fnic_clear_intr_mode(struct fnic *fnic)
 {
-	switch (vnic_dev_get_intr_mode(fnic->vdev)) {
-	case VNIC_DEV_INTR_MODE_MSIX:
-		pci_disable_msix(fnic->pdev);
-		break;
-	case VNIC_DEV_INTR_MODE_MSI:
-		pci_disable_msi(fnic->pdev);
-		break;
-	default:
-		break;
-	}
-
+	pci_free_irq_vectors(fnic->pdev);
 	vnic_dev_set_intr_mode(fnic->vdev, VNIC_DEV_INTR_MODE_INTX);
 }
-

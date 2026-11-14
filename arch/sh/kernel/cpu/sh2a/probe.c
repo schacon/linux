@@ -1,19 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/kernel/cpu/sh2a/probe.c
  *
  * CPU Subtype Probing for SH-2A.
  *
  * Copyright (C) 2004 - 2007  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <asm/processor.h>
 #include <asm/cache.h>
 
-void __cpuinit cpu_probe(void)
+void cpu_probe(void)
 {
 	boot_cpu_data.family			= CPU_FAMILY_SH2A;
 

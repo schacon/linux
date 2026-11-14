@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 
 /*
  *   pata-isapnp.c - ISA PnP PATA controller driver.
@@ -19,7 +20,7 @@
 #define DRV_NAME "pata_isapnp"
 #define DRV_VERSION "0.2.5"
 
-static struct scsi_host_template isapnp_sht = {
+static const struct scsi_host_template isapnp_sht = {
 	ATA_PIO_SHT(DRV_NAME),
 };
 
@@ -78,9 +79,12 @@ static int isapnp_init_one(struct pnp_dev *idev, const struct pnp_device_id *dev
 
 	ap->ioaddr.cmd_addr = cmd_addr;
 
-	if (pnp_port_valid(idev, 1) == 0) {
+	if (pnp_port_valid(idev, 1)) {
 		ctl_addr = devm_ioport_map(&idev->dev,
 					   pnp_port_start(idev, 1), 1);
+		if (!ctl_addr)
+			return -ENOMEM;
+
 		ap->ioaddr.altstatus_addr = ctl_addr;
 		ap->ioaddr.ctl_addr = ctl_addr;
 		ap->ops = &isapnp_port_ops;
@@ -115,8 +119,8 @@ static void isapnp_remove_one(struct pnp_dev *idev)
 
 static struct pnp_device_id isapnp_devices[] = {
   	/* Generic ESDI/IDE/ATA compatible hard disk controller */
-	{.id = "PNP0600", .driver_data = 0},
-	{.id = ""}
+	{ .id = "PNP0600" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pnp, isapnp_devices);
@@ -128,20 +132,8 @@ static struct pnp_driver isapnp_driver = {
 	.remove		= isapnp_remove_one,
 };
 
-static int __init isapnp_init(void)
-{
-	return pnp_register_driver(&isapnp_driver);
-}
-
-static void __exit isapnp_exit(void)
-{
-	pnp_unregister_driver(&isapnp_driver);
-}
-
+module_pnp_driver(isapnp_driver);
 MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("low-level driver for ISA PnP ATA");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(DRV_VERSION);
-
-module_init(isapnp_init);
-module_exit(isapnp_exit);

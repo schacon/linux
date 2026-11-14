@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #ifndef __TRACE_EVENTS_H
 #define __TRACE_EVENTS_H
 
@@ -14,13 +15,23 @@ trace_print_printk_msg_only(struct trace_iterator *iter);
 extern int
 seq_print_ip_sym(struct trace_seq *s, unsigned long ip,
 		unsigned long sym_flags);
-extern int seq_print_userip_objs(const struct userstack_entry *entry,
-				 struct trace_seq *s, unsigned long sym_flags);
-extern int seq_print_user_ip(struct trace_seq *s, struct mm_struct *mm,
-			     unsigned long ip, unsigned long sym_flags);
 
+static inline int seq_print_ip_sym_offset(struct trace_seq *s, unsigned long ip,
+					   unsigned long sym_flags)
+{
+	return seq_print_ip_sym(s, ip, sym_flags | TRACE_ITER(SYM_OFFSET));
+}
+static inline int seq_print_ip_sym_no_offset(struct trace_seq *s, unsigned long ip,
+					   unsigned long sym_flags)
+{
+	return seq_print_ip_sym(s, ip, sym_flags & ~TRACE_ITER(SYM_OFFSET));
+}
+
+extern void trace_seq_print_sym(struct trace_seq *s, unsigned long address, bool offset);
 extern int trace_print_context(struct trace_iterator *iter);
 extern int trace_print_lat_context(struct trace_iterator *iter);
+extern enum print_line_t print_event_fields(struct trace_iterator *iter,
+					    struct trace_event *event);
 
 extern void trace_event_read_lock(void);
 extern void trace_event_read_unlock(void);
@@ -32,24 +43,23 @@ extern int
 trace_print_lat_fmt(struct trace_seq *s, struct trace_entry *entry);
 
 /* used by module unregistering */
-extern int __unregister_ftrace_event(struct trace_event *event);
+extern int __unregister_trace_event(struct trace_event *event);
 extern struct rw_semaphore trace_event_sem;
 
-#define MAX_MEMHEX_BYTES	8
-#define HEX_CHARS		(MAX_MEMHEX_BYTES*2 + 1)
+#define SEQ_PUT_FIELD(s, x)				\
+	trace_seq_putmem(s, &(x), sizeof(x))
 
-#define SEQ_PUT_FIELD_RET(s, x)				\
-do {							\
-	if (!trace_seq_putmem(s, &(x), sizeof(x)))	\
-		return TRACE_TYPE_PARTIAL_LINE;		\
-} while (0)
+#define SEQ_PUT_HEX_FIELD(s, x)				\
+	trace_seq_putmem_hex(s, &(x), sizeof(x))
 
-#define SEQ_PUT_HEX_FIELD_RET(s, x)			\
-do {							\
-	BUILD_BUG_ON(sizeof(x) > MAX_MEMHEX_BYTES);	\
-	if (!trace_seq_putmem_hex(s, &(x), sizeof(x)))	\
-		return TRACE_TYPE_PARTIAL_LINE;		\
-} while (0)
-
+#ifdef CONFIG_FUNCTION_TRACE_ARGS
+void print_function_args(struct trace_seq *s, unsigned long *args,
+			 unsigned long func);
+#else
+static inline void print_function_args(struct trace_seq *s, unsigned long *args,
+				       unsigned long func) {
+	trace_seq_puts(s, "()");
+}
+#endif
 #endif
 

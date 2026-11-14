@@ -69,10 +69,15 @@
 #define SGI_EISA_IRQ	SGINT_LOCAL2 + 3	/* EISA interrupts */
 #define SGI_KEYBD_IRQ	SGINT_LOCAL2 + 4	/* keyboard */
 #define SGI_SERIAL_IRQ	SGINT_LOCAL2 + 5	/* onboard serial */
+#define SGI_GIOEXP0_IRQ	(SGINT_LOCAL2 + 6)	/* Indy GIO EXP0 */
+#define SGI_GIOEXP1_IRQ	(SGINT_LOCAL2 + 7)	/* Indy GIO EXP1 */
 
 #define ip22_is_fullhouse()	(sgioc->sysid & SGIOC_SYSID_FULLHOUSE)
 
 extern unsigned short ip22_eeprom_read(unsigned int *ctrl, int reg);
 extern unsigned short ip22_nvram_read(int reg);
+extern void ip22_be_interrupt(int irq);
+extern void ip22_be_init(void) __init;
+extern void indy_8254timer_irq(void);
 
 #endif

@@ -1,16 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * A gpio chip driver for TXx9 SoCs
  *
  * Copyright (C) 2008 Atsushi Nemoto <anemo@mba.ocn.ne.jp>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/init.h>
 #include <linux/spinlock.h>
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
 #include <linux/errno.h>
 #include <linux/io.h>
 #include <asm/txx9pio.h>
@@ -21,7 +18,7 @@ static struct txx9_pio_reg __iomem *txx9_pioptr;
 
 static int txx9_gpio_get(struct gpio_chip *chip, unsigned int offset)
 {
-	return __raw_readl(&txx9_pioptr->din) & (1 << offset);
+	return !!(__raw_readl(&txx9_pioptr->din) & (1 << offset));
 }
 
 static void txx9_gpio_set_raw(unsigned int offset, int value)
@@ -35,14 +32,16 @@ static void txx9_gpio_set_raw(unsigned int offset, int value)
 	__raw_writel(val, &txx9_pioptr->dout);
 }
 
-static void txx9_gpio_set(struct gpio_chip *chip, unsigned int offset,
-			  int value)
+static int txx9_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			 int value)
 {
 	unsigned long flags;
 	spin_lock_irqsave(&txx9_gpio_lock, flags);
 	txx9_gpio_set_raw(offset, value);
 	mmiowb();
 	spin_unlock_irqrestore(&txx9_gpio_lock, flags);
+
+	return 0;
 }
 
 static int txx9_gpio_dir_in(struct gpio_chip *chip, unsigned int offset)
@@ -77,13 +76,12 @@ static struct gpio_chip txx9_gpio_chip = {
 	.label = "TXx9",
 };
 
-int __init txx9_gpio_init(unsigned long baseaddr,
-			  unsigned int base, unsigned int num)
+int __init txx9_gpio_init(unsigned long baseaddr, unsigned int num)
 {
 	txx9_pioptr = ioremap(baseaddr, sizeof(struct txx9_pio_reg));
 	if (!txx9_pioptr)
 		return -ENODEV;
-	txx9_gpio_chip.base = base;
+	txx9_gpio_chip.base = -1;
 	txx9_gpio_chip.ngpio = num;
-	return gpiochip_add(&txx9_gpio_chip);
+	return gpiochip_add_data(&txx9_gpio_chip, NULL);
 }

@@ -1,25 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  cx18 ADEC header
  *
  *  Derived from cx25840-core.h
  *
- *  Copyright (C) 2007  Hans Verkuil <hverkuil@xs4all.nl>
+ *  Copyright (C) 2007  Hans Verkuil <hverkuil@kernel.org>
  *  Copyright (C) 2008  Andy Walls <awalls@md.metrocast.net>
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version 2
- *  of the License, or (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- *  02110-1301, USA.
  */
 
 #ifndef _CX18_AV_CORE_H_
@@ -104,7 +90,6 @@ struct cx18_av_state {
 	enum cx18_av_audio_input aud_input;
 	u32 audclk_freq;
 	int audmode;
-	u32 id;
 	u32 rev;
 	int is_initialized;
 
@@ -355,7 +340,7 @@ static inline struct v4l2_subdev *to_sd(struct v4l2_ctrl *ctrl)
 }
 
 /* ----------------------------------------------------------------------- */
-/* cx18_av-core.c 							   */
+/* cx18_av-core.c							   */
 int cx18_av_write(struct cx18 *cx, u16 addr, u8 value);
 int cx18_av_write4(struct cx18 *cx, u16 addr, u32 value);
 int cx18_av_write4_noretry(struct cx18 *cx, u16 addr, u32 value);

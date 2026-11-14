@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  pci_slot.c - ACPI PCI Slot Driver
  *
@@ -11,23 +12,11 @@
  *
  *  Copyright (C) 2013 Huawei Tech. Co., Ltd.
  *	Jiang Liu <jiang.liu@huawei.com>
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms and conditions of the GNU General Public License,
- *  version 2, as published by the Free Software Foundation.
- *
- *  This program is distributed in the hope that it will be useful, but
- *  WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
-#include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/types.h>
@@ -35,30 +24,9 @@
 #include <linux/pci.h>
 #include <linux/acpi.h>
 #include <linux/dmi.h>
+#include <linux/pci-acpi.h>
 
-static bool debug;
 static int check_sta_before_sun;
-
-#define DRIVER_VERSION 	"0.1"
-#define DRIVER_AUTHOR	"Alex Chiang <achiang@hp.com>"
-#define DRIVER_DESC	"ACPI PCI Slot Detection Driver"
-MODULE_AUTHOR(DRIVER_AUTHOR);
-MODULE_DESCRIPTION(DRIVER_DESC);
-MODULE_LICENSE("GPL");
-MODULE_PARM_DESC(debug, "Debugging mode enabled or not");
-module_param(debug, bool, 0644);
-
-#define _COMPONENT		ACPI_PCI_COMPONENT
-ACPI_MODULE_NAME("pci_slot");
-
-#define MY_NAME "pci_slot"
-#define err(format, arg...) pr_err("%s: " format , MY_NAME , ## arg)
-#define info(format, arg...) pr_info("%s: " format , MY_NAME , ## arg)
-#define dbg(format, arg...)					\
-	do {							\
-		if (debug)					\
-			pr_debug("%s: " format,	MY_NAME , ## arg); \
-	} while (0)
 
 #define SLOT_NAME_SIZE 21		/* Inspired by #define in acpiphp.h */
 
@@ -74,12 +42,13 @@ static int
 check_slot(acpi_handle handle, unsigned long long *sun)
 {
 	int device = -1;
-	unsigned long long adr, sta;
+	unsigned long long sta;
 	acpi_status status;
+	u64 adr;
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
 
 	acpi_get_name(handle, ACPI_FULL_PATHNAME, &buffer);
-	dbg("Checking slot on path: %s\n", (char *)buffer.pointer);
+	pr_debug("Checking slot on path: %s\n", (char *)buffer.pointer);
 
 	if (check_sta_before_sun) {
 		/* If SxFy doesn't have _STA, we just assume it's there */
@@ -88,16 +57,17 @@ check_slot(acpi_handle handle, unsigned long long *sun)
 			goto out;
 	}
 
-	status = acpi_evaluate_integer(handle, "_ADR", NULL, &adr);
-	if (ACPI_FAILURE(status)) {
-		dbg("_ADR returned %d on %s\n", status, (char *)buffer.pointer);
+	if (acpi_get_local_u64_address(handle, &adr)) {
+		pr_debug("_ADR returned with failure on %s\n",
+			 (char *)buffer.pointer);
 		goto out;
 	}
 
 	/* No _SUN == not a slot == bail */
 	status = acpi_evaluate_integer(handle, "_SUN", NULL, sun);
 	if (ACPI_FAILURE(status)) {
-		dbg("_SUN returned %d on %s\n", status, (char *)buffer.pointer);
+		pr_debug("_SUN returned %d on %s\n",
+			 status, (char *)buffer.pointer);
 		goto out;
 	}
 
@@ -134,16 +104,14 @@ register_slot(acpi_handle handle, u32 lvl, void *context, void **rv)
 			return AE_OK;
 	}
 
-	slot = kmalloc(sizeof(*slot), GFP_KERNEL);
-	if (!slot) {
-		err("%s: cannot allocate memory\n", __func__);
+	slot = kmalloc_obj(*slot);
+	if (!slot)
 		return AE_OK;
-	}
 
 	snprintf(name, sizeof(name), "%llu", sun);
 	pci_slot = pci_create_slot(pci_bus, device, name, NULL);
 	if (IS_ERR(pci_slot)) {
-		err("pci_create_slot returned %ld\n", PTR_ERR(pci_slot));
+		pr_err("pci_create_slot returned %pe\n", pci_slot);
 		kfree(slot);
 		return AE_OK;
 	}
@@ -153,18 +121,22 @@ register_slot(acpi_handle handle, u32 lvl, void *context, void **rv)
 
 	get_device(&pci_bus->dev);
 
-	dbg("pci_slot: %p, pci_bus: %x, device: %d, name: %s\n",
-		pci_slot, pci_bus->number, device, name);
+	pr_debug("%p, pci_bus: %x, device: %d, name: %s\n",
+		 pci_slot, pci_bus->number, device, name);
 
 	return AE_OK;
 }
 
-void acpi_pci_slot_enumerate(struct pci_bus *bus, acpi_handle handle)
+void acpi_pci_slot_enumerate(struct pci_bus *bus)
 {
-	mutex_lock(&slot_list_lock);
-	acpi_walk_namespace(ACPI_TYPE_DEVICE, handle, 1,
-			    register_slot, NULL, bus, NULL);
-	mutex_unlock(&slot_list_lock);
+	acpi_handle handle = ACPI_HANDLE(bus->bridge);
+
+	if (handle) {
+		mutex_lock(&slot_list_lock);
+		acpi_walk_namespace(ACPI_TYPE_DEVICE, handle, 1,
+				    register_slot, NULL, bus, NULL);
+		mutex_unlock(&slot_list_lock);
+	}
 }
 
 void acpi_pci_slot_remove(struct pci_bus *bus)
@@ -185,12 +157,13 @@ void acpi_pci_slot_remove(struct pci_bus *bus)
 
 static int do_sta_before_sun(const struct dmi_system_id *d)
 {
-	info("%s detected: will evaluate _STA before calling _SUN\n", d->ident);
+	pr_info("%s detected: will evaluate _STA before calling _SUN\n",
+		d->ident);
 	check_sta_before_sun = 1;
 	return 0;
 }
 
-static struct dmi_system_id acpi_pci_slot_dmi_table[] __initdata = {
+static const struct dmi_system_id acpi_pci_slot_dmi_table[] __initconst = {
 	/*
 	 * Fujitsu Primequest machines will return 1023 to indicate an
 	 * error if the _SUN method is evaluated on SxFy objects that

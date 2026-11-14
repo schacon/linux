@@ -1,5 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+#include <linux/cache.h>
 #include <linux/sched.h>
-#include <linux/namei.h>
 #include <linux/slab.h>
 #include <linux/pid_namespace.h>
 #include "internal.h"
@@ -7,83 +8,56 @@
 /*
  * /proc/self:
  */
-static int proc_self_readlink(struct dentry *dentry, char __user *buffer,
-			      int buflen)
+static const char *proc_self_get_link(struct dentry *dentry,
+				      struct inode *inode,
+				      struct delayed_call *done)
 {
-	struct pid_namespace *ns = dentry->d_sb->s_fs_info;
+	struct pid_namespace *ns = proc_pid_ns(inode->i_sb);
 	pid_t tgid = task_tgid_nr_ns(current, ns);
-	char tmp[PROC_NUMBUF];
+	char *name;
+
 	if (!tgid)
-		return -ENOENT;
-	sprintf(tmp, "%d", tgid);
-	return vfs_readlink(dentry,buffer,buflen,tmp);
-}
-
-static void *proc_self_follow_link(struct dentry *dentry, struct nameidata *nd)
-{
-	struct pid_namespace *ns = dentry->d_sb->s_fs_info;
-	pid_t tgid = task_tgid_nr_ns(current, ns);
-	char *name = ERR_PTR(-ENOENT);
-	if (tgid) {
-		/* 11 for max length of signed int in decimal + NULL term */
-		name = kmalloc(12, GFP_KERNEL);
-		if (!name)
-			name = ERR_PTR(-ENOMEM);
-		else
-			sprintf(name, "%d", tgid);
-	}
-	nd_set_link(nd, name);
-	return NULL;
-}
-
-static void proc_self_put_link(struct dentry *dentry, struct nameidata *nd,
-				void *cookie)
-{
-	char *s = nd_get_link(nd);
-	if (!IS_ERR(s))
-		kfree(s);
+		return ERR_PTR(-ENOENT);
+	/* max length of unsigned int in decimal + NULL term */
+	name = kmalloc(10 + 1, dentry ? GFP_KERNEL : GFP_ATOMIC);
+	if (unlikely(!name))
+		return dentry ? ERR_PTR(-ENOMEM) : ERR_PTR(-ECHILD);
+	sprintf(name, "%u", tgid);
+	set_delayed_call(done, kfree_link, name);
+	return name;
 }
 
 static const struct inode_operations proc_self_inode_operations = {
-	.readlink	= proc_self_readlink,
-	.follow_link	= proc_self_follow_link,
-	.put_link	= proc_self_put_link,
+	.get_link	= proc_self_get_link,
 };
 
-static unsigned self_inum;
+unsigned self_inum __ro_after_init;
 
 int proc_setup_self(struct super_block *s)
 {
-	struct inode *root_inode = s->s_root->d_inode;
-	struct pid_namespace *ns = s->s_fs_info;
 	struct dentry *self;
-	
-	mutex_lock(&root_inode->i_mutex);
+	int ret = -ENOMEM;
+
 	self = d_alloc_name(s->s_root, "self");
 	if (self) {
-		struct inode *inode = new_inode_pseudo(s);
+		struct inode *inode = new_inode(s);
 		if (inode) {
 			inode->i_ino = self_inum;
-			inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
+			simple_inode_init_ts(inode);
 			inode->i_mode = S_IFLNK | S_IRWXUGO;
 			inode->i_uid = GLOBAL_ROOT_UID;
 			inode->i_gid = GLOBAL_ROOT_GID;
 			inode->i_op = &proc_self_inode_operations;
-			d_add(self, inode);
-		} else {
-			dput(self);
-			self = ERR_PTR(-ENOMEM);
+			d_make_persistent(self, inode);
+			ret = 0;
 		}
-	} else {
-		self = ERR_PTR(-ENOMEM);
+		dput(self);
 	}
-	mutex_unlock(&root_inode->i_mutex);
-	if (IS_ERR(self)) {
+
+	if (ret)
 		pr_err("proc_fill_super: can't allocate /proc/self\n");
-		return PTR_ERR(self);
-	}
-	ns->proc_self = self;
-	return 0;
+
+	return ret;
 }
 
 void __init proc_self_init(void)

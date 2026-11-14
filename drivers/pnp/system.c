@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * system.c - a driver for reserving pnp system resources
  *
@@ -16,10 +17,10 @@
 
 static const struct pnp_device_id pnp_dev_table[] = {
 	/* General ID for reserving resources */
-	{"PNP0c02", 0},
+	{ .id = "PNP0c02" },
 	/* memory controller */
-	{"PNP0c01", 0},
-	{"", 0}
+	{ .id = "PNP0c01" },
+	{ }
 };
 
 static void reserve_range(struct pnp_dev *dev, struct resource *r, int port)
@@ -105,7 +106,7 @@ static int __init pnp_system_init(void)
 	return pnp_register_driver(&system_pnp_driver);
 }
 
-/**
+/*
  * Reserve motherboard resources after PCI claim BARs,
  * but before PCI assign resources for uninitialized PCI devices
  */

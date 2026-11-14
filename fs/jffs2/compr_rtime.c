@@ -33,9 +33,12 @@ static int jffs2_rtime_compress(unsigned char *data_in,
 				unsigned char *cpage_out,
 				uint32_t *sourcelen, uint32_t *dstlen)
 {
-	short positions[256];
+	unsigned short positions[256];
 	int outpos = 0;
 	int pos=0;
+
+	if (*dstlen <= 3)
+		return -1;
 
 	memset(positions,0,sizeof(positions));
 
@@ -74,7 +77,7 @@ static int jffs2_rtime_decompress(unsigned char *data_in,
 				  unsigned char *cpage_out,
 				  uint32_t srclen, uint32_t destlen)
 {
-	short positions[256];
+	unsigned short positions[256];
 	int outpos = 0;
 	int pos=0;
 
@@ -92,6 +95,9 @@ static int jffs2_rtime_decompress(unsigned char *data_in,
 
 		positions[value]=outpos;
 		if (repeat) {
+			if ((outpos + repeat) > destlen) {
+				return 1;
+			}
 			if (backoffs + repeat >= outpos) {
 				while(repeat) {
 					cpage_out[outpos++] = cpage_out[backoffs++];

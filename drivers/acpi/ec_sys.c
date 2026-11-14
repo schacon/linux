@@ -1,17 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ec_sys.c
  *
  * Copyright (C) 2010 SUSE Products GmbH/Novell
  * Author:
  *      Thomas Renninger <trenn@suse.de>
- *
- * This work is licensed under the terms of the GNU GPL, version 2.
  */
 
 #include <linux/kernel.h>
 #include <linux/acpi.h>
 #include <linux/debugfs.h>
 #include <linux/module.h>
+#include <linux/uaccess.h>
 #include "internal.h"
 
 MODULE_AUTHOR("Thomas Renninger <trenn@suse.de>");
@@ -19,7 +19,7 @@ MODULE_DESCRIPTION("ACPI EC sysfs access driver");
 MODULE_LICENSE("GPL");
 
 static bool write_support;
-module_param(write_support, bool, 0644);
+module_param_hw(write_support, bool, other, 0644);
 MODULE_PARM_DESC(write_support, "Dangerous, reboot and removal of battery may "
 		 "be needed.");
 
@@ -34,7 +34,6 @@ static ssize_t acpi_ec_read_io(struct file *f, char __user *buf,
 	 * struct acpi_ec *ec = ((struct seq_file *)f->private_data)->private;
 	 */
 	unsigned int size = EC_SPACE_SIZE;
-	u8 *data = (u8 *) buf;
 	loff_t init_off = *off;
 	int err = 0;
 
@@ -47,9 +46,15 @@ static ssize_t acpi_ec_read_io(struct file *f, char __user *buf,
 		size = count;
 
 	while (size) {
-		err = ec_read(*off, &data[*off - init_off]);
+		u8 byte_read;
+		err = ec_read(*off, &byte_read);
 		if (err)
 			return err;
+		if (put_user(byte_read, buf + *off - init_off)) {
+			if (*off - init_off)
+				return *off - init_off; /* partial read */
+			return -EFAULT;
+		}
 		*off += 1;
 		size--;
 	}
@@ -65,8 +70,10 @@ static ssize_t acpi_ec_write_io(struct file *f, const char __user *buf,
 
 	unsigned int size = count;
 	loff_t init_off = *off;
-	u8 *data = (u8 *) buf;
 	int err = 0;
+
+	if (!write_support)
+		return -EINVAL;
 
 	if (*off >= EC_SPACE_SIZE)
 		return 0;
@@ -76,7 +83,12 @@ static ssize_t acpi_ec_write_io(struct file *f, const char __user *buf,
 	}
 
 	while (size) {
-		u8 byte_write = data[*off - init_off];
+		u8 byte_write;
+		if (get_user(byte_write, buf + *off - init_off)) {
+			if (*off - init_off)
+				return *off - init_off; /* partial write */
+			return -EFAULT;
+		}
 		err = ec_write(*off, byte_write);
 		if (err)
 			return err;
@@ -95,52 +107,32 @@ static const struct file_operations acpi_ec_io_ops = {
 	.llseek = default_llseek,
 };
 
-int acpi_ec_add_debugfs(struct acpi_ec *ec, unsigned int ec_device_count)
+static void acpi_ec_add_debugfs(struct acpi_ec *ec, unsigned int ec_device_count)
 {
 	struct dentry *dev_dir;
 	char name[64];
 	umode_t mode = 0400;
 
-	if (ec_device_count == 0) {
+	if (ec_device_count == 0)
 		acpi_ec_debugfs_dir = debugfs_create_dir("ec", NULL);
-		if (!acpi_ec_debugfs_dir)
-			return -ENOMEM;
-	}
 
 	sprintf(name, "ec%u", ec_device_count);
 	dev_dir = debugfs_create_dir(name, acpi_ec_debugfs_dir);
-	if (!dev_dir) {
-		if (ec_device_count != 0)
-			goto error;
-		return -ENOMEM;
-	}
 
-	if (!debugfs_create_x32("gpe", 0444, dev_dir, (u32 *)&first_ec->gpe))
-		goto error;
-	if (!debugfs_create_bool("use_global_lock", 0444, dev_dir,
-				 (u32 *)&first_ec->global_lock))
-		goto error;
+	debugfs_create_x32("gpe", 0444, dev_dir, &first_ec->gpe);
+	debugfs_create_bool("use_global_lock", 0444, dev_dir,
+			    &first_ec->global_lock);
 
 	if (write_support)
 		mode = 0600;
-	if (!debugfs_create_file("io", mode, dev_dir, ec, &acpi_ec_io_ops))
-		goto error;
-
-	return 0;
-
-error:
-	debugfs_remove_recursive(acpi_ec_debugfs_dir);
-	return -ENOMEM;
+	debugfs_create_file("io", mode, dev_dir, ec, &acpi_ec_io_ops);
 }
 
 static int __init acpi_ec_sys_init(void)
 {
-	int err = 0;
 	if (first_ec)
-		err = acpi_ec_add_debugfs(first_ec, 0);
-	else
-		err = -ENODEV;
-	return err;
+		acpi_ec_add_debugfs(first_ec, 0);
+	return 0;
 }
 
 static void __exit acpi_ec_sys_exit(void)

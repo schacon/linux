@@ -22,18 +22,13 @@
 
 #define CI(c, p) { ci->c = PVR_##p(pvr); }
 
-#if defined(CONFIG_EARLY_PRINTK) && defined(CONFIG_SERIAL_UARTLITE_CONSOLE)
 #define err_printk(x) \
-	early_printk("ERROR: Microblaze " x "-different for PVR and DTS\n");
-#else
-#define err_printk(x) \
-	pr_info("ERROR: Microblaze " x "-different for PVR and DTS\n");
-#endif
+	pr_err("ERROR: Microblaze " x "-different for PVR and DTS\n")
 
 void set_cpuinfo_pvr_full(struct cpuinfo *ci, struct device_node *cpu)
 {
 	struct pvr_s pvr;
-	int temp; /* for saving temp value */
+	u32 temp; /* for saving temp value */
 	get_pvr(&pvr);
 
 	CI(ver_code, VERSION);
@@ -112,7 +107,4 @@ void set_cpuinfo_pvr_full(struct cpuinfo *ci, struct device_node *cpu)
 	CI(num_wr_brk, NUMBER_OF_WR_ADDR_BRK);
 
 	CI(fpga_family_code, TARGET_FAMILY);
-
-	/* take timebase-frequency from DTS */
-	ci->cpu_clock_freq = fcpu(cpu, "timebase-frequency");
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Touchright serial touchscreen driver
  *
@@ -8,11 +9,6 @@
  * and Dan Streetman <ddstreet@ieee.org>
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
- */
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -20,7 +16,6 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/serio.h>
-#include <linux/init.h>
 
 #define DRIVER_DESC	"Touchright serial touchscreen driver"
 
@@ -107,7 +102,7 @@ static int tr_connect(struct serio *serio, struct serio_driver *drv)
 	struct input_dev *input_dev;
 	int err;
 
-	tr = kzalloc(sizeof(struct tr), GFP_KERNEL);
+	tr = kzalloc_obj(*tr);
 	input_dev = input_allocate_device();
 	if (!tr || !input_dev) {
 		err = -ENOMEM;
@@ -116,7 +111,7 @@ static int tr_connect(struct serio *serio, struct serio_driver *drv)
 
 	tr->serio = serio;
 	tr->dev = input_dev;
-	snprintf(tr->phys, sizeof(tr->phys), "%s/input0", serio->phys);
+	scnprintf(tr->phys, sizeof(tr->phys), "%s/input0", serio->phys);
 
 	input_dev->name = "Touchright Serial TouchScreen";
 	input_dev->phys = tr->phys;
@@ -153,7 +148,7 @@ static int tr_connect(struct serio *serio, struct serio_driver *drv)
  * The serio driver structure.
  */
 
-static struct serio_device_id tr_serio_ids[] = {
+static const struct serio_device_id tr_serio_ids[] = {
 	{
 		.type	= SERIO_RS232,
 		.proto	= SERIO_TOUCHRIGHT,

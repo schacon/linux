@@ -1,20 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * mach-davinci/sram.c - DaVinci simple SRAM allocator
  *
  * Copyright (C) 2009 David Brownell
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/genalloc.h>
 
-#include <mach/common.h>
-#include <mach/sram.h>
+#include "common.h"
+#include "sram.h"
 
 static struct gen_pool *sram_pool;
 
@@ -25,7 +21,6 @@ struct gen_pool *sram_get_gen_pool(void)
 
 void *sram_alloc(size_t len, dma_addr_t *dma)
 {
-	unsigned long vaddr;
 	dma_addr_t dma_base = davinci_soc_info.sram_dma;
 
 	if (dma)
@@ -33,13 +28,7 @@ void *sram_alloc(size_t len, dma_addr_t *dma)
 	if (!sram_pool || (dma && !dma_base))
 		return NULL;
 
-	vaddr = gen_pool_alloc(sram_pool, len);
-	if (!vaddr)
-		return NULL;
-
-	if (dma)
-		*dma = gen_pool_virt_to_phys(sram_pool, vaddr);
-	return (void *)vaddr;
+	return gen_pool_dma_alloc(sram_pool, len, dma);
 
 }
 EXPORT_SYMBOL(sram_alloc);

@@ -57,6 +57,7 @@
 #include <linux/zorro.h>
 #include <linux/bitops.h>
 
+#include <asm/byteorder.h>
 #include <asm/irq.h>
 #include <asm/amigaints.h>
 #include <asm/amigahw.h>
@@ -117,11 +118,8 @@ struct lance_private {
 	int auto_select;	      /* cable-selection by carrier */
 	unsigned short busmaster_regval;
 
-#ifdef CONFIG_SUNLANCE
-	struct Linux_SBus_DMA *ledma; /* if set this points to ledma and arch=4m */
-	int burst_sizes;	      /* ledma SBus burst sizes */
-#endif
 	struct timer_list         multicast_timer;
+	struct net_device	  *dev;
 };
 
 #define LANCE_ADDR(x) ((int)(x) & ~0xff000000)
@@ -488,7 +486,7 @@ static int lance_close(struct net_device *dev)
 	volatile struct lance_regs *ll = lp->ll;
 
 	netif_stop_queue(dev);
-	del_timer_sync(&lp->multicast_timer);
+	timer_delete_sync(&lp->multicast_timer);
 
 	/* Stop the card */
 	ll->rap = LE_CSR0;
@@ -511,7 +509,7 @@ static inline int lance_reset(struct net_device *dev)
 	load_csrs(lp);
 
 	lance_init_ring(dev);
-	dev->trans_start = jiffies; /* prevent tx timeout */
+	netif_trans_update(dev); /* prevent tx timeout */
 	netif_start_queue(dev);
 
 	status = init_restart_lance(lp);
@@ -520,7 +518,7 @@ static inline int lance_reset(struct net_device *dev)
 	return status;
 }
 
-static void lance_tx_timeout(struct net_device *dev)
+static void lance_tx_timeout(struct net_device *dev, unsigned int txqueue)
 {
 	struct lance_private *lp = netdev_priv(dev);
 	volatile struct lance_regs *ll = lp->ll;
@@ -546,16 +544,13 @@ static netdev_tx_t lance_start_xmit(struct sk_buff *skb,
 
 	local_irq_save(flags);
 
-	if (!lance_tx_buffs_avail(lp)) {
-		local_irq_restore(flags);
-		return NETDEV_TX_LOCKED;
-	}
+	if (!lance_tx_buffs_avail(lp))
+		goto out_free;
 
-#ifdef DEBUG
 	/* dump the packet */
-	print_hex_dump(KERN_DEBUG, "skb->data: ", DUMP_PREFIX_NONE,
-		       16, 1, skb->data, 64, true);
-#endif
+	print_hex_dump_debug("skb->data: ", DUMP_PREFIX_NONE, 16, 1, skb->data,
+			     64, true);
+
 	entry = lp->tx_new & lp->tx_ring_mod_mask;
 	ib->btx_ring[entry].length = (-skblen) | 0xf000;
 	ib->btx_ring[entry].misc = 0;
@@ -572,6 +567,7 @@ static netdev_tx_t lance_start_xmit(struct sk_buff *skb,
 
 	/* Kick the lance: transmit now */
 	ll->rdp = LE_C0_INEA | LE_C0_TDMD;
+ out_free:
 	dev_kfree_skb(skb);
 
 	local_irq_restore(flags);
@@ -638,16 +634,23 @@ static void lance_set_multicast(struct net_device *dev)
 	netif_wake_queue(dev);
 }
 
+static void lance_set_multicast_retry(struct timer_list *t)
+{
+	struct lance_private *lp = timer_container_of(lp, t, multicast_timer);
+
+	lance_set_multicast(lp->dev);
+}
+
 static int a2065_init_one(struct zorro_dev *z,
 			  const struct zorro_device_id *ent);
 static void a2065_remove_one(struct zorro_dev *z);
 
 
-static struct zorro_device_id a2065_zorro_tbl[] = {
-	{ ZORRO_PROD_CBM_A2065_1 },
-	{ ZORRO_PROD_CBM_A2065_2 },
-	{ ZORRO_PROD_AMERISTAR_A2065 },
-	{ 0 }
+static const struct zorro_device_id a2065_zorro_tbl[] = {
+	{ .id = ZORRO_PROD_CBM_A2065_1 },
+	{ .id = ZORRO_PROD_CBM_A2065_2 },
+	{ .id = ZORRO_PROD_AMERISTAR_A2065 },
+	{ }
 };
 MODULE_DEVICE_TABLE(zorro, a2065_zorro_tbl);
 
@@ -665,7 +668,6 @@ static const struct net_device_ops lance_netdev_ops = {
 	.ndo_tx_timeout		= lance_tx_timeout,
 	.ndo_set_rx_mode	= lance_set_multicast,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_change_mtu		= eth_change_mtu,
 	.ndo_set_mac_address	= eth_mac_addr,
 };
 
@@ -678,6 +680,8 @@ static int a2065_init_one(struct zorro_dev *z,
 	unsigned long base_addr = board + A2065_LANCE;
 	unsigned long mem_start = board + A2065_RAM;
 	struct resource *r1, *r2;
+	u8 addr[ETH_ALEN];
+	u32 serial;
 	int err;
 
 	r1 = request_mem_region(base_addr, sizeof(struct lance_regs),
@@ -691,7 +695,7 @@ static int a2065_init_one(struct zorro_dev *z,
 	}
 
 	dev = alloc_etherdev(sizeof(struct lance_private));
-	if (dev == NULL) {
+	if (!dev) {
 		release_mem_region(base_addr, sizeof(struct lance_regs));
 		release_mem_region(mem_start, A2065_RAM_SIZE);
 		return -ENOMEM;
@@ -702,19 +706,21 @@ static int a2065_init_one(struct zorro_dev *z,
 	r1->name = dev->name;
 	r2->name = dev->name;
 
-	dev->dev_addr[0] = 0x00;
+	serial = be32_to_cpu(z->rom.er_SerialNumber);
+	addr[0] = 0x00;
 	if (z->id != ZORRO_PROD_AMERISTAR_A2065) {	/* Commodore */
-		dev->dev_addr[1] = 0x80;
-		dev->dev_addr[2] = 0x10;
+		addr[1] = 0x80;
+		addr[2] = 0x10;
 	} else {					/* Ameristar */
-		dev->dev_addr[1] = 0x00;
-		dev->dev_addr[2] = 0x9f;
+		addr[1] = 0x00;
+		addr[2] = 0x9f;
 	}
-	dev->dev_addr[3] = (z->rom.er_SerialNumber >> 16) & 0xff;
-	dev->dev_addr[4] = (z->rom.er_SerialNumber >> 8) & 0xff;
-	dev->dev_addr[5] = z->rom.er_SerialNumber & 0xff;
-	dev->base_addr = ZTWO_VADDR(base_addr);
-	dev->mem_start = ZTWO_VADDR(mem_start);
+	addr[3] = (serial >> 16) & 0xff;
+	addr[4] = (serial >> 8) & 0xff;
+	addr[5] = serial & 0xff;
+	eth_hw_addr_set(dev, addr);
+	dev->base_addr = (unsigned long)ZTWO_VADDR(base_addr);
+	dev->mem_start = (unsigned long)ZTWO_VADDR(mem_start);
 	dev->mem_end = dev->mem_start + A2065_RAM_SIZE;
 
 	priv->ll = (volatile struct lance_regs *)dev->base_addr;
@@ -727,15 +733,13 @@ static int a2065_init_one(struct zorro_dev *z,
 	priv->lance_log_tx_bufs = LANCE_LOG_TX_BUFFERS;
 	priv->rx_ring_mod_mask = RX_RING_MOD_MASK;
 	priv->tx_ring_mod_mask = TX_RING_MOD_MASK;
+	priv->dev = dev;
 
 	dev->netdev_ops = &lance_netdev_ops;
 	dev->watchdog_timeo = 5*HZ;
 	dev->dma = 0;
 
-	init_timer(&priv->multicast_timer);
-	priv->multicast_timer.data = (unsigned long) dev;
-	priv->multicast_timer.function =
-		(void (*)(unsigned long))lance_set_multicast;
+	timer_setup(&priv->multicast_timer, lance_set_multicast_retry, 0);
 
 	err = register_netdev(dev);
 	if (err) {
@@ -777,4 +781,5 @@ static void __exit a2065_cleanup_module(void)
 module_init(a2065_init_module);
 module_exit(a2065_cleanup_module);
 
+MODULE_DESCRIPTION("Commodore A2065 Ethernet driver");
 MODULE_LICENSE("GPL");

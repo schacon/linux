@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * newport_con.c: Abscon for newport hardware
  * 
@@ -21,9 +22,8 @@
 #include <linux/slab.h>
 
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/gio_device.h>
 
 #include <video/newport.h>
@@ -31,17 +31,14 @@
 #include <linux/linux_logo.h>
 #include <linux/font.h>
 
-#define FONT_DATA ((unsigned char *)font_vga_8x16.data)
+#define NEWPORT_LEN	0x10000
 
-/* borrowed from fbcon.c */
-#define REFCOUNT(fd)	(((int *)(fd))[-1])
-#define FNTSIZE(fd)	(((int *)(fd))[-2])
-#define FNTCHARCNT(fd)	(((int *)(fd))[-3])
-#define FONT_EXTRA_WORDS 3
+#define FONT_DATA font_vga_8x16.data
 
-static unsigned char *font_data[MAX_NR_CONSOLES];
+static font_data_t *font_data[MAX_NR_CONSOLES];
 
 static struct newport_regs *npregs;
+static unsigned long newport_addr;
 
 static int logo_active;
 static int topscan;
@@ -98,7 +95,7 @@ static inline void newport_init_cmap(void)
 
 static const struct linux_logo *newport_show_logo(void)
 {
-#ifdef CONFIG_LOGO_SGI_CLUT224
+#ifdef CONFIG_LOGO_LINUX_CLUT224
 	const struct linux_logo *logo = fb_find_logo(8);
 	const unsigned char *clut;
 	const unsigned char *data;
@@ -128,7 +125,9 @@ static const struct linux_logo *newport_show_logo(void)
 		npregs->go.hostrw0 = *data++ << 24;
 
 	return logo;
-#endif /* CONFIG_LOGO_SGI_CLUT224 */
+#else
+	return NULL;
+#endif /* CONFIG_LOGO_LINUX_CLUT224 */
 }
 
 static inline void newport_clear_screen(int xstart, int ystart, int xend,
@@ -297,7 +296,7 @@ static void newport_exit(void)
 		newport_set_def_font(i, NULL);
 }
 
-/* Can't be __init, take_over_console may call it later */
+/* Can't be __init, do_take_over_console may call it later */
 static const char *newport_startup(void)
 {
 	int i;
@@ -325,7 +324,7 @@ out_unmap:
 	return NULL;
 }
 
-static void newport_init(struct vc_data *vc, int init)
+static void newport_init(struct vc_data *vc, bool init)
 {
 	int cols, rows;
 
@@ -347,33 +346,33 @@ static void newport_deinit(struct vc_data *c)
 	}
 }
 
-static void newport_clear(struct vc_data *vc, int sy, int sx, int height,
-			  int width)
+static void newport_clear(struct vc_data *vc, unsigned int sy, unsigned int sx,
+			  unsigned int width)
 {
 	int xend = ((sx + width) << 3) - 1;
 	int ystart = ((sy << 4) + topscan) & 0x3ff;
-	int yend = (((sy + height) << 4) + topscan - 1) & 0x3ff;
+	int yend = (((sy + 1) << 4) + topscan - 1) & 0x3ff;
 
 	if (logo_active)
 		return;
 
 	if (ystart < yend) {
 		newport_clear_screen(sx << 3, ystart, xend, yend,
-				     (vc->vc_color & 0xf0) >> 4);
+				     (vc->state.color & 0xf0) >> 4);
 	} else {
 		newport_clear_screen(sx << 3, ystart, xend, 1023,
-				     (vc->vc_color & 0xf0) >> 4);
+				     (vc->state.color & 0xf0) >> 4);
 		newport_clear_screen(sx << 3, 0, xend, yend,
-				     (vc->vc_color & 0xf0) >> 4);
+				     (vc->state.color & 0xf0) >> 4);
 	}
 }
 
-static void newport_putc(struct vc_data *vc, int charattr, int ypos,
-			 int xpos)
+static void newport_putc(struct vc_data *vc, u16 charattr, unsigned int ypos,
+			 unsigned int xpos)
 {
-	unsigned char *p;
+	const unsigned char *p;
 
-	p = &font_data[vc->vc_num][(charattr & 0xff) << 4];
+	p = &font_data_buf(font_data[vc->vc_num])[(charattr & 0xff) << 4];
 	charattr = (charattr >> 8) & 0xff;
 	xpos <<= 3;
 	ypos <<= 4;
@@ -397,12 +396,13 @@ static void newport_putc(struct vc_data *vc, int charattr, int ypos,
 	RENDER(npregs, p);
 }
 
-static void newport_putcs(struct vc_data *vc, const unsigned short *s,
-			  int count, int ypos, int xpos)
+static void newport_putcs(struct vc_data *vc, const u16 *s,
+			  unsigned int count, unsigned int ypos,
+			  unsigned int xpos)
 {
-	int i;
-	int charattr;
-	unsigned char *p;
+	const unsigned char *p;
+	unsigned int i;
+	u16 charattr;
 
 	charattr = (scr_readw(s) >> 8) & 0xff;
 
@@ -424,7 +424,7 @@ static void newport_putcs(struct vc_data *vc, const unsigned short *s,
 				 NPORT_DMODE0_L32);
 
 	for (i = 0; i < count; i++, xpos += 8) {
-		p = &font_data[vc->vc_num][(scr_readw(s++) & 0xff) << 4];
+		p = &font_data_buf(font_data[vc->vc_num])[(scr_readw(s++) & 0xff) << 4];
 
 		newport_wait(npregs);
 
@@ -438,32 +438,28 @@ static void newport_putcs(struct vc_data *vc, const unsigned short *s,
 	}
 }
 
-static void newport_cursor(struct vc_data *vc, int mode)
+static void newport_cursor(struct vc_data *vc, bool enable)
 {
 	unsigned short treg;
 	int xcurs, ycurs;
 
-	switch (mode) {
-	case CM_ERASE:
-		treg = newport_vc2_get(npregs, VC2_IREG_CONTROL);
+	treg = newport_vc2_get(npregs, VC2_IREG_CONTROL);
+
+	if (!enable) {
 		newport_vc2_set(npregs, VC2_IREG_CONTROL,
 				(treg & ~(VC2_CTRL_ECDISP)));
-		break;
-
-	case CM_MOVE:
-	case CM_DRAW:
-		treg = newport_vc2_get(npregs, VC2_IREG_CONTROL);
-		newport_vc2_set(npregs, VC2_IREG_CONTROL,
-				(treg | VC2_CTRL_ECDISP));
-		xcurs = (vc->vc_pos - vc->vc_visible_origin) / 2;
-		ycurs = ((xcurs / vc->vc_cols) << 4) + 31;
-		xcurs = ((xcurs % vc->vc_cols) << 3) + xcurs_correction;
-		newport_vc2_set(npregs, VC2_IREG_CURSX, xcurs);
-		newport_vc2_set(npregs, VC2_IREG_CURSY, ycurs);
+		return;
 	}
+
+	newport_vc2_set(npregs, VC2_IREG_CONTROL, (treg | VC2_CTRL_ECDISP));
+	xcurs = (vc->vc_pos - vc->vc_visible_origin) / 2;
+	ycurs = ((xcurs / vc->vc_cols) << 4) + 31;
+	xcurs = ((xcurs % vc->vc_cols) << 3) + xcurs_correction;
+	newport_vc2_set(npregs, VC2_IREG_CURSX, xcurs);
+	newport_vc2_set(npregs, VC2_IREG_CURSY, ycurs);
 }
 
-static int newport_switch(struct vc_data *vc)
+static bool newport_switch(struct vc_data *vc)
 {
 	static int logo_drawn = 0;
 
@@ -477,76 +473,61 @@ static int newport_switch(struct vc_data *vc)
 		}
 	}
 
-	return 1;
+	return true;
 }
 
-static int newport_blank(struct vc_data *c, int blank, int mode_switch)
+static bool newport_blank(struct vc_data *c, enum vesa_blank_mode blank,
+			  bool mode_switch)
 {
 	unsigned short treg;
 
-	if (blank == 0) {
-		/* unblank console */
-		treg = newport_vc2_get(npregs, VC2_IREG_CONTROL);
-		newport_vc2_set(npregs, VC2_IREG_CONTROL,
-				(treg | VC2_CTRL_EDISP));
-	} else {
-		/* blank console */
-		treg = newport_vc2_get(npregs, VC2_IREG_CONTROL);
-		newport_vc2_set(npregs, VC2_IREG_CONTROL,
-				(treg & ~(VC2_CTRL_EDISP)));
-	}
-	return 1;
+	treg = newport_vc2_get(npregs, VC2_IREG_CONTROL);
+	newport_vc2_set(npregs, VC2_IREG_CONTROL, (treg & ~(VC2_CTRL_EDISP)));
+
+	return true;
 }
 
-static int newport_set_font(int unit, struct console_font *op)
+static bool newport_unblank(struct vc_data *c, bool mode_switch)
+{
+	unsigned short treg;
+
+	treg = newport_vc2_get(npregs, VC2_IREG_CONTROL);
+	newport_vc2_set(npregs, VC2_IREG_CONTROL, (treg | VC2_CTRL_EDISP));
+
+	return true;
+}
+
+static int newport_set_font(int unit, const struct console_font *op,
+			    unsigned int vpitch)
 {
 	int w = op->width;
 	int h = op->height;
-	int size = h * op->charcount;
 	int i;
-	unsigned char *new_data, *data = op->data, *p;
+	font_data_t *new_data;
 
 	/* ladis: when I grow up, there will be a day... and more sizes will
 	 * be supported ;-) */
-	if ((w != 8) || (h != 16)
-	    || (op->charcount != 256 && op->charcount != 512))
+	if (w != 8 || h != 16 || (op->charcount != 256 && op->charcount != 512))
 		return -EINVAL;
 
-	if (!(new_data = kmalloc(FONT_EXTRA_WORDS * sizeof(int) + size,
-	     GFP_USER))) return -ENOMEM;
-
-	new_data += FONT_EXTRA_WORDS * sizeof(int);
-	FNTSIZE(new_data) = size;
-	FNTCHARCNT(new_data) = op->charcount;
-	REFCOUNT(new_data) = 0;	/* usage counter */
-
-	p = new_data;
-	for (i = 0; i < op->charcount; i++) {
-		memcpy(p, data, h);
-		data += 32;
-		p += h;
-	}
+	new_data = font_data_import(op, vpitch, NULL);
+	if (IS_ERR(new_data))
+		return PTR_ERR(new_data);
 
 	/* check if font is already used by other console */
 	for (i = 0; i < MAX_NR_CONSOLES; i++) {
-		if (font_data[i] != FONT_DATA
-		    && FNTSIZE(font_data[i]) == size
-		    && !memcmp(font_data[i], new_data, size)) {
-			kfree(new_data - FONT_EXTRA_WORDS * sizeof(int));
+		if (font_data_is_equal(font_data[i], new_data)) {
+			font_data_put(new_data);
 			/* current font is the same as the new one */
 			if (i == unit)
 				return 0;
 			new_data = font_data[i];
+			font_data_get(new_data);
 			break;
 		}
 	}
-	/* old font is user font */
-	if (font_data[unit] != FONT_DATA) {
-		if (--REFCOUNT(font_data[unit]) == 0)
-			kfree(font_data[unit] -
-			      FONT_EXTRA_WORDS * sizeof(int));
-	}
-	REFCOUNT(new_data)++;
+
+	font_data_put(font_data[unit]);
 	font_data[unit] = new_data;
 
 	return 0;
@@ -554,39 +535,27 @@ static int newport_set_font(int unit, struct console_font *op)
 
 static int newport_set_def_font(int unit, struct console_font *op)
 {
-	if (font_data[unit] != FONT_DATA) {
-		if (--REFCOUNT(font_data[unit]) == 0)
-			kfree(font_data[unit] -
-			      FONT_EXTRA_WORDS * sizeof(int));
-		font_data[unit] = FONT_DATA;
-	}
+	font_data_put(font_data[unit]);
+	font_data[unit] = FONT_DATA;
+	font_data_get(font_data[unit]);
 
 	return 0;
 }
 
-static int newport_font_default(struct vc_data *vc, struct console_font *op, char *name)
+static int newport_font_default(struct vc_data *vc, struct console_font *op,
+				const char *name)
 {
 	return newport_set_def_font(vc->vc_num, op);
 }
 
-static int newport_font_set(struct vc_data *vc, struct console_font *font, unsigned flags)
+static int newport_font_set(struct vc_data *vc, const struct console_font *font,
+			    unsigned int vpitch, unsigned int flags)
 {
-	return newport_set_font(vc->vc_num, font);
+	return newport_set_font(vc->vc_num, font, vpitch);
 }
 
-static int newport_set_palette(struct vc_data *vc, unsigned char *table)
-{
-	return -EINVAL;
-}
-
-static int newport_scrolldelta(struct vc_data *vc, int lines)
-{
-	/* there is (nearly) no off-screen memory, so we can't scroll back */
-	return 0;
-}
-
-static int newport_scroll(struct vc_data *vc, int t, int b, int dir,
-			  int lines)
+static bool newport_scroll(struct vc_data *vc, unsigned int t, unsigned int b,
+		enum con_scroll dir, unsigned int lines)
 {
 	int count, x, y;
 	unsigned short *s, *d;
@@ -599,14 +568,14 @@ static int newport_scroll(struct vc_data *vc, int t, int b, int dir,
 			topscan = (topscan + (lines << 4)) & 0x3ff;
 			newport_clear_lines(vc->vc_rows - lines,
 					    vc->vc_rows - 1,
-					    (vc->vc_color & 0xf0) >> 4);
+					    (vc->state.color & 0xf0) >> 4);
 		} else {
 			topscan = (topscan + (-lines << 4)) & 0x3ff;
 			newport_clear_lines(0, lines - 1,
-					    (vc->vc_color & 0xf0) >> 4);
+					    (vc->state.color & 0xf0) >> 4);
 		}
 		npregs->cset.topscan = (topscan - 1) & 0x3ff;
-		return 0;
+		return false;
 	}
 
 	count = (b - t - lines) * vc->vc_cols;
@@ -681,45 +650,10 @@ static int newport_scroll(struct vc_data *vc, int t, int b, int dir,
 			}
 		}
 	}
-	return 1;
+	return true;
 }
 
-static void newport_bmove(struct vc_data *vc, int sy, int sx, int dy,
-			  int dx, int h, int w)
-{
-	short xs, ys, xe, ye, xoffs, yoffs, tmp;
-
-	xs = sx << 3;
-	xe = ((sx + w) << 3) - 1;
-	/*
-	 * as bmove is only used to move stuff around in the same line
-	 * (h == 1), we don't care about wrap arounds caused by topscan != 0
-	 */
-	ys = ((sy << 4) + topscan) & 0x3ff;
-	ye = (((sy + h) << 4) - 1 + topscan) & 0x3ff;
-	xoffs = (dx - sx) << 3;
-	yoffs = (dy - sy) << 4;
-	if (xoffs > 0) {
-		/* move to the right, exchange starting points */
-		tmp = xe;
-		xe = xs;
-		xs = tmp;
-	}
-	newport_wait(npregs);
-	npregs->set.drawmode0 = (NPORT_DMODE0_S2S | NPORT_DMODE0_BLOCK |
-				 NPORT_DMODE0_DOSETUP | NPORT_DMODE0_STOPX
-				 | NPORT_DMODE0_STOPY);
-	npregs->set.xystarti = (xs << 16) | ys;
-	npregs->set.xyendi = (xe << 16) | ye;
-	npregs->go.xymove = (xoffs << 16) | yoffs;
-}
-
-static int newport_dummy(struct vc_data *c)
-{
-	return 0;
-}
-
-#define DUMMY (void *) newport_dummy
+static void newport_save_screen(struct vc_data *vc) { }
 
 const struct consw newport_con = {
 	.owner		  = THIS_MODULE,
@@ -731,21 +665,18 @@ const struct consw newport_con = {
 	.con_putcs	  = newport_putcs,
 	.con_cursor	  = newport_cursor,
 	.con_scroll	  = newport_scroll,
-	.con_bmove 	  = newport_bmove,
 	.con_switch	  = newport_switch,
 	.con_blank	  = newport_blank,
+	.con_unblank	  = newport_unblank,
 	.con_font_set	  = newport_font_set,
 	.con_font_default = newport_font_default,
-	.con_set_palette  = newport_set_palette,
-	.con_scrolldelta  = newport_scrolldelta,
-	.con_set_origin	  = DUMMY,
-	.con_save_screen  = DUMMY
+	.con_save_screen  = newport_save_screen
 };
 
 static int newport_probe(struct gio_device *dev,
 			 const struct gio_device_id *id)
 {
-	unsigned long newport_addr;
+	int err;
 
 	if (!dev->resource.start)
 		return -EINVAL;
@@ -754,19 +685,27 @@ static int newport_probe(struct gio_device *dev,
 		return -EBUSY; /* we only support one Newport as console */
 
 	newport_addr = dev->resource.start + 0xF0000;
-	if (!request_mem_region(newport_addr, 0x10000, "Newport"))
+	if (!request_mem_region(newport_addr, NEWPORT_LEN, "Newport"))
 		return -ENODEV;
 
 	npregs = (struct newport_regs *)/* ioremap cannot fail */
 		ioremap(newport_addr, sizeof(struct newport_regs));
+	console_lock();
+	err = do_take_over_console(&newport_con, 0, MAX_NR_CONSOLES - 1, 1);
+	console_unlock();
 
-	return take_over_console(&newport_con, 0, MAX_NR_CONSOLES - 1, 1);
+	if (err) {
+		iounmap((void *)npregs);
+		release_mem_region(newport_addr, NEWPORT_LEN);
+	}
+	return err;
 }
 
 static void newport_remove(struct gio_device *dev)
 {
 	give_up_console(&newport_con);
 	iounmap((void *)npregs);
+	release_mem_region(newport_addr, NEWPORT_LEN);
 }
 
 static struct gio_device_id newport_ids[] = {
@@ -782,18 +721,7 @@ static struct gio_driver newport_driver = {
 	.probe = newport_probe,
 	.remove = newport_remove,
 };
+module_driver(newport_driver, gio_register_driver, gio_unregister_driver);
 
-int __init newport_console_init(void)
-{
-	return gio_register_driver(&newport_driver);
-}
-
-void __exit newport_console_exit(void)
-{
-	gio_unregister_driver(&newport_driver);
-}
-
-module_init(newport_console_init);
-module_exit(newport_console_exit);
-
+MODULE_DESCRIPTION("SGI Newport console driver");
 MODULE_LICENSE("GPL");

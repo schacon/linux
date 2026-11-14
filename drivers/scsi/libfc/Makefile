@@ -1,4 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0
 # $Id: Makefile
+
+CONTEXT_ANALYSIS := y
 
 obj-$(CONFIG_LIBFC) += libfc.o
 

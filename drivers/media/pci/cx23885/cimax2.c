@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * cimax2.c
  *
@@ -6,26 +7,15 @@
  * Copyright (C) 2009 NetUP Inc.
  * Copyright (C) 2009 Igor M. Liplianin <liplianin@netup.ru>
  * Copyright (C) 2009 Abylay Ospan <aospan@netup.ru>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include "cx23885.h"
 #include "cimax2.h"
-#include "dvb_ca_en50221.h"
+#include <media/dvb_ca_en50221.h>
+
+/* Max transfer size done by I2C transfer functions */
+#define MAX_XFER_SIZE  64
+
 /**** Bit definitions for MC417_RWD and MC417_OEN registers  ***
   bits 31-16
 +-----------+
@@ -54,7 +44,7 @@
 #define NETUP_CI_CTL		0x04
 #define NETUP_CI_RD		1
 
-#define NETUP_IRQ_DETAM 	0x1
+#define NETUP_IRQ_DETAM		0x1
 #define NETUP_IRQ_IRQAM		0x4
 
 static unsigned int ci_dbg;
@@ -65,10 +55,11 @@ static unsigned int ci_irq_enable;
 module_param(ci_irq_enable, int, 0644);
 MODULE_PARM_DESC(ci_irq_enable, "Enable IRQ from CAM");
 
-#define ci_dbg_print(args...) \
+#define ci_dbg_print(fmt, args...) \
 	do { \
 		if (ci_dbg) \
-			printk(KERN_DEBUG args); \
+			printk(KERN_DEBUG pr_fmt("%s: " fmt), \
+			       __func__, ##args); \
 	} while (0)
 
 #define ci_irq_flags() (ci_irq_enable ? NETUP_IRQ_IRQAM : 0)
@@ -125,7 +116,7 @@ static int netup_write_i2c(struct i2c_adapter *i2c_adap, u8 addr, u8 reg,
 						u8 *buf, int len)
 {
 	int ret;
-	u8 buffer[len + 1];
+	u8 buffer[MAX_XFER_SIZE];
 
 	struct i2c_msg msg = {
 		.addr	= addr,
@@ -133,6 +124,12 @@ static int netup_write_i2c(struct i2c_adapter *i2c_adap, u8 addr, u8 reg,
 		.buf	= &buffer[0],
 		.len	= len + 1
 	};
+
+	if (1 + len > sizeof(buffer)) {
+		pr_warn("%s: i2c wr reg=%04x: len=%d is too big!\n",
+		       KBUILD_MODNAME, reg, len);
+		return -EINVAL;
+	}
 
 	buffer[0] = reg;
 	memcpy(&buffer[1], buf, len);
@@ -358,11 +355,8 @@ static void netup_read_ci_status(struct work_struct *work)
 		if (ret != 0)
 			return;
 
-		ci_dbg_print("%s: Slot Status Addr=[0x%04x], "
-				"Reg=[0x%02x], data=%02x, "
-				"TS config = %02x\n", __func__,
-				state->ci_i2c_addr, 0, buf[0],
-				buf[0]);
+		ci_dbg_print("%s: Slot Status Addr=[0x%04x], Reg=[0x%02x], data=%02x, TS config = %02x\n",
+			     __func__,	state->ci_i2c_addr, 0, buf[0], buf[0]);
 
 
 		if (buf[0] & 1)
@@ -457,7 +451,7 @@ int netup_ci_init(struct cx23885_tsport *port)
 	int ret;
 
 	ci_dbg_print("%s\n", __func__);
-	state = kzalloc(sizeof(struct netup_ci_state), GFP_KERNEL);
+	state = kzalloc_obj(struct netup_ci_state);
 	if (!state) {
 		ci_dbg_print("%s: Unable create CI structure!\n", __func__);
 		ret = -ENOMEM;
@@ -534,6 +528,7 @@ void netup_ci_exit(struct cx23885_tsport *port)
 	if (NULL == state->ca.data)
 		return;
 
+	cancel_work_sync(&state->work);
 	dvb_ca_en50221_release(&state->ca);
 	kfree(state);
 }

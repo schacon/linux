@@ -1,0 +1,35 @@
+Database Export
+===============
+
+perf tool's python module:
+
+	tools/perf/util/python.c
+
+supports standalone scripts:
+
+	tools/perf/python/export-to-sqlite.py
+	tools/perf/python/export-to-postgresql.py
+
+which export data to a SQLite3 or PostgreSQL database.
+
+The export process provides records with unique sequential ids which allows the
+data to be imported directly to a database and provides the relationships
+between tables.
+
+Over time it is possible to continue to expand the export while maintaining
+backward and forward compatibility, by following some simple rules:
+
+1. Because of the nature of SQL, existing tables and columns can continue to be
+used so long as the names and meanings (and to some extent data types) remain
+the same.
+
+2. New tables and columns can be added, without affecting existing SQL queries,
+so long as the new names are unique.
+
+3. Scripts that use a database (e.g. exported-sql-viewer.py) can maintain
+backward compatibility by testing for the presence of new tables and columns
+before using them. e.g. function IsSelectable() in exported-sql-viewer.py
+
+4. The export scripts themselves maintain forward compatibility (i.e. an existing
+script will continue to work with new versions of perf) by querying event and
+sample attributes dynamically from the perf Python module.

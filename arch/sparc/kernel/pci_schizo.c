@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* pci_schizo.c: SCHIZO/TOMATILLO specific PCI controller support.
  *
  * Copyright (C) 2001, 2002, 2003, 2007, 2008 David S. Miller (davem@davemloft.net)
@@ -10,7 +11,11 @@
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/interrupt.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
+#include <linux/property.h>
+#include <linux/numa.h>
 
 #include <asm/iommu.h>
 #include <asm/irq.h>
@@ -140,7 +145,7 @@ static void __schizo_check_stc_error_pbm(struct pci_pbm_info *pbm,
 
 	/* This is __REALLY__ dangerous.  When we put the
 	 * streaming buffer into diagnostic mode to probe
-	 * it's tags and error status, we _must_ clear all
+	 * its tags and error status, we _must_ clear all
 	 * of the line tag valid bits before re-enabling
 	 * the streaming buffer.  If any dirty data lives
 	 * in the STC when we do this, we will end up
@@ -270,7 +275,7 @@ static void schizo_check_iommu_error_pbm(struct pci_pbm_info *pbm,
 		       pbm->name, type_string);
 
 		/* Put the IOMMU into diagnostic mode and probe
-		 * it's TLB for entries with error status.
+		 * its TLB for entries with error status.
 		 *
 		 * It is very possible for another DVMA to occur
 		 * while we do this probe, and corrupt the system
@@ -581,7 +586,7 @@ static irqreturn_t schizo_pcierr_intr_other(struct pci_pbm_info *pbm)
 {
 	unsigned long csr_reg, csr, csr_error_bits;
 	irqreturn_t ret = IRQ_NONE;
-	u16 stat;
+	u32 stat;
 
 	csr_reg = pbm->pbm_regs + SCHIZO_PCI_CTRL;
 	csr = upa_readq(csr_reg);
@@ -617,7 +622,7 @@ static irqreturn_t schizo_pcierr_intr_other(struct pci_pbm_info *pbm)
 			       pbm->name);
 		ret = IRQ_HANDLED;
 	}
-	pci_read_config_word(pbm->pci_bus->self, PCI_STATUS, &stat);
+	pbm->pci_ops->read(pbm->pci_bus, 0, PCI_STATUS, 2, &stat);
 	if (stat & (PCI_STATUS_PARITY |
 		    PCI_STATUS_SIG_TARGET_ABORT |
 		    PCI_STATUS_REC_TARGET_ABORT |
@@ -625,7 +630,7 @@ static irqreturn_t schizo_pcierr_intr_other(struct pci_pbm_info *pbm)
 		    PCI_STATUS_SIG_SYSTEM_ERROR)) {
 		printk("%s: PCI bus error, PCI_STATUS[%04x]\n",
 		       pbm->name, stat);
-		pci_write_config_word(pbm->pci_bus->self, PCI_STATUS, 0xffff);
+		pbm->pci_ops->write(pbm->pci_bus, 0, PCI_STATUS, 2, 0xffff);
 		ret = IRQ_HANDLED;
 	}
 	return ret;
@@ -1268,7 +1273,7 @@ static void schizo_pbm_hw_init(struct pci_pbm_info *pbm)
 	    pbm->chip_version >= 0x2)
 		tmp |= 0x3UL << SCHIZO_PCICTRL_PTO_SHIFT;
 
-	if (!of_find_property(pbm->op->dev.of_node, "no-bus-parking", NULL))
+	if (!of_property_read_bool(pbm->op->dev.of_node, "no-bus-parking"))
 		tmp |= SCHIZO_PCICTRL_PARK;
 	else
 		tmp &= ~SCHIZO_PCICTRL_PARK;
@@ -1346,7 +1351,7 @@ static int schizo_pbm_init(struct pci_pbm_info *pbm,
 	pbm->next = pci_pbm_root;
 	pci_pbm_root = pbm;
 
-	pbm->numa_node = -1;
+	pbm->numa_node = NUMA_NO_NODE;
 
 	pbm->pci_ops = &sun4u_pci_ops;
 	pbm->config_space_reg_bits = 8;
@@ -1421,7 +1426,7 @@ static int __schizo_init(struct platform_device *op, unsigned long chip_type)
 	portid = of_getintprop_default(dp, "portid", 0xff);
 
 	err = -ENOMEM;
-	pbm = kzalloc(sizeof(*pbm), GFP_KERNEL);
+	pbm = kzalloc_obj(*pbm);
 	if (!pbm) {
 		printk(KERN_ERR PFX "Cannot allocate pci_pbm_info.\n");
 		goto out_err;
@@ -1429,7 +1434,7 @@ static int __schizo_init(struct platform_device *op, unsigned long chip_type)
 
 	pbm->sibling = schizo_find_sibling(portid, chip_type);
 
-	iommu = kzalloc(sizeof(struct iommu), GFP_KERNEL);
+	iommu = kzalloc_obj(struct iommu);
 	if (!iommu) {
 		printk(KERN_ERR PFX "Cannot allocate PBM A iommu.\n");
 		goto out_free_pbm;
@@ -1457,15 +1462,13 @@ out_err:
 	return err;
 }
 
-static const struct of_device_id schizo_match[];
 static int schizo_probe(struct platform_device *op)
 {
-	const struct of_device_id *match;
+	unsigned long chip_type = (unsigned long)device_get_match_data(&op->dev);
 
-	match = of_match_device(schizo_match, &op->dev);
-	if (!match)
+	if (!chip_type)
 		return -EINVAL;
-	return __schizo_init(op, (unsigned long)match->data);
+	return __schizo_init(op, chip_type);
 }
 
 /* The ordering of this table is very important.  Some Tomatillo
@@ -1495,7 +1498,6 @@ static const struct of_device_id schizo_match[] = {
 static struct platform_driver schizo_driver = {
 	.driver = {
 		.name = DRIVER_NAME,
-		.owner = THIS_MODULE,
 		.of_match_table = schizo_match,
 	},
 	.probe		= schizo_probe,

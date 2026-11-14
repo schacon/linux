@@ -1,10 +1,6 @@
-#
-# Generated files
-#
-gen_init_cpio
-initramfs_data.cpio
-initramfs_data.cpio.gz
-initramfs_data.cpio.bz2
-initramfs_data.cpio.lzma
-initramfs_list
-include
+# SPDX-License-Identifier: GPL-2.0-only
+/initramfs_data.cpio
+/initramfs_inc_data
+
+# Keep around until cleanup in scripts/remove-stale-files
+/gen_init_cpio

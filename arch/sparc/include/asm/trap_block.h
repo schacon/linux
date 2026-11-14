@@ -1,10 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _SPARC_TRAP_BLOCK_H
 #define _SPARC_TRAP_BLOCK_H
+
+#include <linux/threads.h>
 
 #include <asm/hypervisor.h>
 #include <asm/asi.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /* Trap handling code needs to get at a few critical values upon
  * trap entry and to process TSB misses.  These cannot be in the
@@ -51,11 +54,12 @@ struct trap_per_cpu {
 	unsigned long		__per_cpu_base;
 } __attribute__((aligned(64)));
 extern struct trap_per_cpu trap_block[NR_CPUS];
-extern void init_cur_cpu_trap(struct thread_info *);
-extern void setup_tba(void);
+void init_cur_cpu_trap(struct thread_info *);
+void setup_tba(void);
 extern int ncpus_probed;
+extern u64 cpu_mondo_counter[NR_CPUS];
 
-extern unsigned long real_hard_smp_processor_id(void);
+unsigned long real_hard_smp_processor_id(void);
 
 struct cpuid_patch_entry {
 	unsigned int	addr;
@@ -72,6 +76,10 @@ struct sun4v_1insn_patch_entry {
 };
 extern struct sun4v_1insn_patch_entry __sun4v_1insn_patch,
 	__sun4v_1insn_patch_end;
+extern struct sun4v_1insn_patch_entry __fast_win_ctrl_1insn_patch,
+	__fast_win_ctrl_1insn_patch_end;
+extern struct sun4v_1insn_patch_entry __sun_m7_1insn_patch,
+	__sun_m7_1insn_patch_end;
 
 struct sun4v_2insn_patch_entry {
 	unsigned int	addr;
@@ -79,9 +87,11 @@ struct sun4v_2insn_patch_entry {
 };
 extern struct sun4v_2insn_patch_entry __sun4v_2insn_patch,
 	__sun4v_2insn_patch_end;
+extern struct sun4v_2insn_patch_entry __sun_m7_2insn_patch,
+	__sun_m7_2insn_patch_end;
 
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* !(__ASSEMBLER__) */
 
 #define TRAP_PER_CPU_THREAD		0x00
 #define TRAP_PER_CPU_PGD_PADDR		0x08

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Freescale General-purpose Timers Module
  *
@@ -6,11 +7,6 @@
  *               Jerry Huang <Chang-Ming.Huang@freescale.com>
  * Copyright (c) MontaVista Software, Inc. 2008.
  *               Anton Vorontsov <avorontsov@ru.mvista.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -19,6 +15,8 @@
 #include <linux/list.h>
 #include <linux/io.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/spinlock.h>
 #include <linux/bitops.h>
 #include <linux/slab.h>
@@ -79,7 +77,7 @@ struct gtm {
 static LIST_HEAD(gtms);
 
 /**
- * gtm_get_timer - request GTM timer to use it with the rest of GTM API
+ * gtm_get_timer16 - request GTM timer to use it with the rest of GTM API
  * Context:	non-IRQ
  *
  * This function reserves GTM timer for later use. It returns gtm_timer
@@ -88,7 +86,7 @@ static LIST_HEAD(gtms);
  */
 struct gtm_timer *gtm_get_timer16(void)
 {
-	struct gtm *gtm = NULL;
+	struct gtm *gtm;
 	int i;
 
 	list_for_each_entry(gtm, &gtms, list_node) {
@@ -105,14 +103,14 @@ struct gtm_timer *gtm_get_timer16(void)
 		spin_unlock_irq(&gtm->lock);
 	}
 
-	if (gtm)
+	if (!list_empty(&gtms))
 		return ERR_PTR(-EBUSY);
 	return ERR_PTR(-ENODEV);
 }
 EXPORT_SYMBOL(gtm_get_timer16);
 
 /**
- * gtm_get_specific_timer - request specific GTM timer
+ * gtm_get_specific_timer16 - request specific GTM timer
  * @gtm:	specific GTM, pass here GTM's device_node->data
  * @timer:	specific timer number, Timer1 is 0.
  * Context:	non-IRQ
@@ -262,7 +260,7 @@ int gtm_set_timer16(struct gtm_timer *tmr, unsigned long usec, bool reload)
 EXPORT_SYMBOL(gtm_set_timer16);
 
 /**
- * gtm_set_exact_utimer16 - (re)set 16 bits timer
+ * gtm_set_exact_timer16 - (re)set 16 bits timer
  * @tmr:	pointer to the gtm_timer structure obtained from gtm_get_timer
  * @usec:	timer interval in microseconds
  * @reload:	if set, the timer will reset upon expiry rather than
@@ -384,10 +382,10 @@ static int __init fsl_gtm_init(void)
 		const u32 *clock;
 		int size;
 
-		gtm = kzalloc(sizeof(*gtm), GFP_KERNEL);
+		gtm = kzalloc_obj(*gtm);
 		if (!gtm) {
-			pr_err("%s: unable to allocate memory\n",
-				np->full_name);
+			pr_err("%pOF: unable to allocate memory\n",
+				np);
 			continue;
 		}
 
@@ -395,29 +393,28 @@ static int __init fsl_gtm_init(void)
 
 		clock = of_get_property(np, "clock-frequency", &size);
 		if (!clock || size != sizeof(*clock)) {
-			pr_err("%s: no clock-frequency\n", np->full_name);
+			pr_err("%pOF: no clock-frequency\n", np);
 			goto err;
 		}
 		gtm->clock = *clock;
 
 		for (i = 0; i < ARRAY_SIZE(gtm->timers); i++) {
-			int ret;
-			struct resource irq;
+			unsigned int irq;
 
-			ret = of_irq_to_resource(np, i, &irq);
-			if (ret == NO_IRQ) {
-				pr_err("%s: not enough interrupts specified\n",
-				       np->full_name);
+			irq = irq_of_parse_and_map(np, i);
+			if (!irq) {
+				pr_err("%pOF: not enough interrupts specified\n",
+				       np);
 				goto err;
 			}
-			gtm->timers[i].irq = irq.start;
+			gtm->timers[i].irq = irq;
 			gtm->timers[i].gtm = gtm;
 		}
 
 		gtm->regs = of_iomap(np, 0);
 		if (!gtm->regs) {
-			pr_err("%s: unable to iomap registers\n",
-			       np->full_name);
+			pr_err("%pOF: unable to iomap registers\n",
+			       np);
 			goto err;
 		}
 

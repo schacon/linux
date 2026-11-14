@@ -1,10 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
  *
  * Copyright (C) 2012 Thomas Langer <thomas.langer@lantiq.com>
- * Copyright (C) 2012 John Crispin <blogic@openwrt.org>
+ * Copyright (C) 2012 John Crispin <john@phrozen.org>
  */
 
 #include <linux/kernel.h>
@@ -38,14 +36,14 @@
 #define BOOT_NVEC	(BOOT_REG_BASE | 0x04)
 #define BOOT_EVEC	(BOOT_REG_BASE | 0x08)
 
-void __init ltq_soc_nmi_setup(void)
+static void __init ltq_soc_nmi_setup(void)
 {
 	extern void (*nmi_handler)(void);
 
 	ltq_w32((unsigned long)&nmi_handler, (void *)BOOT_NVEC);
 }
 
-void __init ltq_soc_ejtag_setup(void)
+static void __init ltq_soc_ejtag_setup(void)
 {
 	extern void (*ejtag_debug_handler)(void);
 

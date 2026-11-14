@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * turbosparc.h:  Defines specific to the TurboSparc module.
  *            This is SRMMU stuff.
@@ -56,7 +57,7 @@
 #define TURBOSPARC_WTENABLE 0x00000020	 /* Write thru for dcache */
 #define TURBOSPARC_SNENABLE 0x40000000	 /* DVMA snoop enable */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /* Bits [13:5] select one of 512 instruction cache tags */
 static inline void turbosparc_inv_insn_tag(unsigned long addr)
@@ -120,6 +121,6 @@ static inline unsigned long turbosparc_get_ccreg(void)
 	return regval;
 }
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* !(_SPARC_TURBOSPARC_H) */

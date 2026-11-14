@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ADXRS450/ADXRS453 Digital Output Gyroscope Driver
  *
  * Copyright 2011 Analog Devices Inc.
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/interrupt.h>
@@ -74,7 +73,7 @@ enum {
 struct adxrs450_state {
 	struct spi_device	*us;
 	struct mutex		buf_lock;
-	__be32			tx ____cacheline_aligned;
+	__be32			tx __aligned(IIO_DMA_MINALIGN);
 	__be32			rx;
 
 };
@@ -90,19 +89,16 @@ static int adxrs450_spi_read_reg_16(struct iio_dev *indio_dev,
 				    u8 reg_address,
 				    u16 *val)
 {
-	struct spi_message msg;
 	struct adxrs450_state *st = iio_priv(indio_dev);
 	u32 tx;
 	int ret;
 	struct spi_transfer xfers[] = {
 		{
 			.tx_buf = &st->tx,
-			.bits_per_word = 8,
 			.len = sizeof(st->tx),
 			.cs_change = 1,
 		}, {
 			.rx_buf = &st->rx,
-			.bits_per_word = 8,
 			.len = sizeof(st->rx),
 		},
 	};
@@ -114,10 +110,7 @@ static int adxrs450_spi_read_reg_16(struct iio_dev *indio_dev,
 		tx |= ADXRS450_P;
 
 	st->tx = cpu_to_be32(tx);
-	spi_message_init(&msg);
-	spi_message_add_tail(&xfers[0], &msg);
-	spi_message_add_tail(&xfers[1], &msg);
-	ret = spi_sync(st->us, &msg);
+	ret = spi_sync_transfer(st->us, xfers, ARRAY_SIZE(xfers));
 	if (ret) {
 		dev_err(&st->us->dev, "problem while reading 16 bit register 0x%02x\n",
 				reg_address);
@@ -169,18 +162,15 @@ static int adxrs450_spi_write_reg_16(struct iio_dev *indio_dev,
  **/
 static int adxrs450_spi_sensor_data(struct iio_dev *indio_dev, s16 *val)
 {
-	struct spi_message msg;
 	struct adxrs450_state *st = iio_priv(indio_dev);
 	int ret;
 	struct spi_transfer xfers[] = {
 		{
 			.tx_buf = &st->tx,
-			.bits_per_word = 8,
 			.len = sizeof(st->tx),
 			.cs_change = 1,
 		}, {
 			.rx_buf = &st->rx,
-			.bits_per_word = 8,
 			.len = sizeof(st->rx),
 		},
 	};
@@ -188,10 +178,7 @@ static int adxrs450_spi_sensor_data(struct iio_dev *indio_dev, s16 *val)
 	mutex_lock(&st->buf_lock);
 	st->tx = cpu_to_be32(ADXRS450_SENSOR_DATA);
 
-	spi_message_init(&msg);
-	spi_message_add_tail(&xfers[0], &msg);
-	spi_message_add_tail(&xfers[1], &msg);
-	ret = spi_sync(st->us, &msg);
+	ret = spi_sync_transfer(st->us, xfers, ARRAY_SIZE(xfers));
 	if (ret) {
 		dev_err(&st->us->dev, "Problem while reading sensor data\n");
 		goto error_ret;
@@ -218,7 +205,6 @@ static int adxrs450_spi_initial(struct adxrs450_state *st,
 	struct spi_transfer xfers = {
 		.tx_buf = &st->tx,
 		.rx_buf = &st->rx,
-		.bits_per_word = 8,
 		.len = sizeof(st->tx),
 	};
 
@@ -354,7 +340,6 @@ static int adxrs450_read_raw(struct iio_dev *indio_dev,
 		default:
 			return -EINVAL;
 		}
-		break;
 	case IIO_CHAN_INFO_QUADRATURE_CORRECTION_RAW:
 		ret = adxrs450_spi_read_reg_16(indio_dev, ADXRS450_QUAD1, &t);
 		if (ret)
@@ -414,7 +399,6 @@ static const struct iio_chan_spec adxrs450_channels[2][2] = {
 };
 
 static const struct iio_info adxrs450_info = {
-	.driver_module = THIS_MODULE,
 	.read_raw = &adxrs450_read_raw,
 	.write_raw = &adxrs450_write_raw,
 };
@@ -426,18 +410,15 @@ static int adxrs450_probe(struct spi_device *spi)
 	struct iio_dev *indio_dev;
 
 	/* setup the industrialio driver allocated elements */
-	indio_dev = iio_device_alloc(sizeof(*st));
-	if (indio_dev == NULL) {
-		ret = -ENOMEM;
-		goto error_ret;
-	}
+	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
+	if (!indio_dev)
+		return -ENOMEM;
 	st = iio_priv(indio_dev);
 	st->us = spi;
 	mutex_init(&st->buf_lock);
 	/* This is only used for removal purposes */
 	spi_set_drvdata(spi, indio_dev);
 
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->info = &adxrs450_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels =
@@ -445,46 +426,30 @@ static int adxrs450_probe(struct spi_device *spi)
 	indio_dev->num_channels = ARRAY_SIZE(adxrs450_channels);
 	indio_dev->name = spi->dev.driver->name;
 
-	ret = iio_device_register(indio_dev);
+	ret = devm_iio_device_register(&spi->dev, indio_dev);
 	if (ret)
-		goto error_free_dev;
+		return ret;
 
 	/* Get the device into a sane initial state */
 	ret = adxrs450_initial_setup(indio_dev);
 	if (ret)
-		goto error_initial;
-	return 0;
-error_initial:
-	iio_device_unregister(indio_dev);
-error_free_dev:
-	iio_device_free(indio_dev);
-
-error_ret:
-	return ret;
-}
-
-static int adxrs450_remove(struct spi_device *spi)
-{
-	iio_device_unregister(spi_get_drvdata(spi));
-	iio_device_free(spi_get_drvdata(spi));
+		return ret;
 
 	return 0;
 }
 
 static const struct spi_device_id adxrs450_id[] = {
-	{"adxrs450", ID_ADXRS450},
-	{"adxrs453", ID_ADXRS453},
-	{}
+	{ .name = "adxrs450", .driver_data = ID_ADXRS450 },
+	{ .name = "adxrs453", .driver_data = ID_ADXRS453 },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, adxrs450_id);
 
 static struct spi_driver adxrs450_driver = {
 	.driver = {
 		.name = "adxrs450",
-		.owner = THIS_MODULE,
 	},
 	.probe = adxrs450_probe,
-	.remove = adxrs450_remove,
 	.id_table	= adxrs450_id,
 };
 module_spi_driver(adxrs450_driver);

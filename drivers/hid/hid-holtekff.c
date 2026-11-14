@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Force feedback support for Holtek On Line Grip based gamepads
  *
@@ -8,19 +9,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/hid.h>
@@ -31,10 +19,6 @@
 #include "hid-ids.h"
 
 #ifdef CONFIG_HOLTEK_FF
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Anssi Hannula <anssi.hannula@iki.fi>");
-MODULE_DESCRIPTION("Force feedback support for Holtek On Line Grip based devices");
 
 /*
  * These commands and parameters are currently known:
@@ -98,7 +82,7 @@ static void holtekff_send(struct holtekff_device *holtekff,
 		holtekff->field->value[i] = data[i];
 	}
 
-	dbg_hid("sending %*ph\n", 7, data);
+	dbg_hid("sending %7ph\n", data);
 
 	hid_hw_request(hid, holtekff->field->report, HID_REQ_SET_REPORT);
 }
@@ -136,30 +120,30 @@ static int holtekff_play(struct input_dev *dev, void *data,
 	return 0;
 }
 
-static int holtekff_init(struct hid_device *hid)
+static int holtek_input_configured(struct hid_device *hid, struct hid_input *hidinput)
 {
 	struct holtekff_device *holtekff;
 	struct hid_report *report;
-	struct hid_input *hidinput = list_entry(hid->inputs.next,
-						struct hid_input, list);
 	struct list_head *report_list =
 			&hid->report_enum[HID_OUTPUT_REPORT].report_list;
 	struct input_dev *dev = hidinput->input;
 	int error;
 
-	if (list_empty(report_list)) {
+	if (!list_is_first(&hidinput->list, &hid->inputs))
+		return 0;
+
+	report = list_first_entry_or_null(report_list, struct hid_report, list);
+	if (!report) {
 		hid_err(hid, "no output report found\n");
 		return -ENODEV;
 	}
-
-	report = list_entry(report_list->next, struct hid_report, list);
 
 	if (report->maxfield < 1 || report->field[0]->report_count != 7) {
 		hid_err(hid, "unexpected output report layout\n");
 		return -ENODEV;
 	}
 
-	holtekff = kzalloc(sizeof(*holtekff), GFP_KERNEL);
+	holtekff = kzalloc_obj(*holtekff);
 	if (!holtekff)
 		return -ENOMEM;
 
@@ -182,34 +166,12 @@ static int holtekff_init(struct hid_device *hid)
 	return 0;
 }
 #else
-static inline int holtekff_init(struct hid_device *hid)
+static inline int holtek_input_configured(struct hid_device *hid,
+					  struct hid_input *hidinput)
 {
 	return 0;
 }
 #endif
-
-static int holtek_probe(struct hid_device *hdev, const struct hid_device_id *id)
-{
-	int ret;
-
-	ret = hid_parse(hdev);
-	if (ret) {
-		hid_err(hdev, "parse failed\n");
-		goto err;
-	}
-
-	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT & ~HID_CONNECT_FF);
-	if (ret) {
-		hid_err(hdev, "hw start failed\n");
-		goto err;
-	}
-
-	holtekff_init(hdev);
-
-	return 0;
-err:
-	return ret;
-}
 
 static const struct hid_device_id holtek_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_HOLTEK, USB_DEVICE_ID_HOLTEK_ON_LINE_GRIP) },
@@ -220,6 +182,10 @@ MODULE_DEVICE_TABLE(hid, holtek_devices);
 static struct hid_driver holtek_driver = {
 	.name = "holtek",
 	.id_table = holtek_devices,
-	.probe = holtek_probe,
+	.input_configured = holtek_input_configured,
 };
 module_hid_driver(holtek_driver);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Anssi Hannula <anssi.hannula@iki.fi>");
+MODULE_DESCRIPTION("Force feedback support for Holtek On Line Grip based devices");

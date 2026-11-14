@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * The USB Monitor, inspired by Dave Harding's USBMon.
  *
@@ -80,15 +81,12 @@ void mon_reader_del(struct mon_bus *mbus, struct mon_reader *r)
 static void mon_bus_submit(struct mon_bus *mbus, struct urb *urb)
 {
 	unsigned long flags;
-	struct list_head *pos;
 	struct mon_reader *r;
 
 	spin_lock_irqsave(&mbus->lock, flags);
 	mbus->cnt_events++;
-	list_for_each (pos, &mbus->r_list) {
-		r = list_entry(pos, struct mon_reader, r_link);
+	list_for_each_entry(r, &mbus->r_list, r_link)
 		r->rnf_submit(r->r_data, urb);
-	}
 	spin_unlock_irqrestore(&mbus->lock, flags);
 }
 
@@ -96,7 +94,8 @@ static void mon_submit(struct usb_bus *ubus, struct urb *urb)
 {
 	struct mon_bus *mbus;
 
-	if ((mbus = ubus->mon_bus) != NULL)
+	mbus = ubus->mon_bus;
+	if (mbus != NULL)
 		mon_bus_submit(mbus, urb);
 	mon_bus_submit(&mon_bus0, urb);
 }
@@ -106,15 +105,12 @@ static void mon_submit(struct usb_bus *ubus, struct urb *urb)
 static void mon_bus_submit_error(struct mon_bus *mbus, struct urb *urb, int error)
 {
 	unsigned long flags;
-	struct list_head *pos;
 	struct mon_reader *r;
 
 	spin_lock_irqsave(&mbus->lock, flags);
 	mbus->cnt_events++;
-	list_for_each (pos, &mbus->r_list) {
-		r = list_entry(pos, struct mon_reader, r_link);
+	list_for_each_entry(r, &mbus->r_list, r_link)
 		r->rnf_error(r->r_data, urb, error);
-	}
 	spin_unlock_irqrestore(&mbus->lock, flags);
 }
 
@@ -122,7 +118,8 @@ static void mon_submit_error(struct usb_bus *ubus, struct urb *urb, int error)
 {
 	struct mon_bus *mbus;
 
-	if ((mbus = ubus->mon_bus) != NULL)
+	mbus = ubus->mon_bus;
+	if (mbus != NULL)
 		mon_bus_submit_error(mbus, urb, error);
 	mon_bus_submit_error(&mon_bus0, urb, error);
 }
@@ -132,15 +129,12 @@ static void mon_submit_error(struct usb_bus *ubus, struct urb *urb, int error)
 static void mon_bus_complete(struct mon_bus *mbus, struct urb *urb, int status)
 {
 	unsigned long flags;
-	struct list_head *pos;
 	struct mon_reader *r;
 
 	spin_lock_irqsave(&mbus->lock, flags);
 	mbus->cnt_events++;
-	list_for_each (pos, &mbus->r_list) {
-		r = list_entry(pos, struct mon_reader, r_link);
+	list_for_each_entry(r, &mbus->r_list, r_link)
 		r->rnf_complete(r->r_data, urb, status);
-	}
 	spin_unlock_irqrestore(&mbus->lock, flags);
 }
 
@@ -148,7 +142,8 @@ static void mon_complete(struct usb_bus *ubus, struct urb *urb, int status)
 {
 	struct mon_bus *mbus;
 
-	if ((mbus = ubus->mon_bus) != NULL)
+	mbus = ubus->mon_bus;
+	if (mbus != NULL)
 		mon_bus_complete(mbus, urb, status);
 	mon_bus_complete(&mon_bus0, urb, status);
 }
@@ -161,11 +156,9 @@ static void mon_complete(struct usb_bus *ubus, struct urb *urb, int status)
 static void mon_stop(struct mon_bus *mbus)
 {
 	struct usb_bus *ubus;
-	struct list_head *p;
 
 	if (mbus == &mon_bus0) {
-		list_for_each (p, &mon_buses) {
-			mbus = list_entry(p, struct mon_bus, bus_link);
+		list_for_each_entry(mbus, &mon_buses, bus_link) {
 			/*
 			 * We do not change nreaders here, so rely on mon_lock.
 			 */
@@ -206,6 +199,9 @@ static void mon_bus_remove(struct usb_bus *ubus)
 {
 	struct mon_bus *mbus = ubus->mon_bus;
 
+	if (mbus == NULL)
+		return;
+
 	mutex_lock(&mon_lock);
 	list_del(&mbus->bus_link);
 	if (mbus->text_inited)
@@ -238,7 +234,7 @@ static struct notifier_block mon_nb = {
 /*
  * Ops
  */
-static struct usb_mon_operations mon_ops_0 = {
+static const struct usb_mon_operations mon_ops_0 = {
 	.urb_submit =	mon_submit,
 	.urb_submit_error = mon_submit_error,
 	.urb_complete =	mon_complete,
@@ -280,7 +276,8 @@ static void mon_bus_init(struct usb_bus *ubus)
 {
 	struct mon_bus *mbus;
 
-	if ((mbus = kzalloc(sizeof(struct mon_bus), GFP_KERNEL)) == NULL)
+	mbus = kzalloc_obj(struct mon_bus);
+	if (mbus == NULL)
 		goto err_alloc;
 	kref_init(&mbus->ref);
 	spin_lock_init(&mbus->lock);
@@ -327,14 +324,12 @@ static void mon_bus0_init(void)
  */
 struct mon_bus *mon_bus_lookup(unsigned int num)
 {
-	struct list_head *p;
 	struct mon_bus *mbus;
 
 	if (num == 0) {
 		return &mon_bus0;
 	}
-	list_for_each (p, &mon_buses) {
-		mbus = list_entry(p, struct mon_bus, bus_link);
+	list_for_each_entry(mbus, &mon_buses, bus_link) {
 		if (mbus->u_bus->busnum == num) {
 			return mbus;
 		}
@@ -345,7 +340,7 @@ struct mon_bus *mon_bus_lookup(unsigned int num)
 static int __init mon_init(void)
 {
 	struct usb_bus *ubus;
-	int rc;
+	int rc, id;
 
 	if ((rc = mon_text_init()) != 0)
 		goto err_text;
@@ -361,12 +356,11 @@ static int __init mon_init(void)
 	}
 	// MOD_INC_USE_COUNT(which_module?);
 
-	mutex_lock(&usb_bus_list_lock);
-	list_for_each_entry (ubus, &usb_bus_list, bus_list) {
+	mutex_lock(&usb_bus_idr_lock);
+	idr_for_each_entry(&usb_bus_idr, ubus, id)
 		mon_bus_init(ubus);
-	}
 	usb_register_notify(&mon_nb);
-	mutex_unlock(&usb_bus_list_lock);
+	mutex_unlock(&usb_bus_idr_lock);
 	return 0;
 
 err_reg:
@@ -406,7 +400,7 @@ static void __exit mon_exit(void)
 			printk(KERN_ERR TAG
 			    ": Outstanding opens (%d) on usb%d, leaking...\n",
 			    mbus->nreaders, mbus->u_bus->busnum);
-			atomic_set(&mbus->ref.refcount, 2);	/* Force leak */
+			kref_get(&mbus->ref); /* Force leak */
 		}
 
 		mon_dissolve(mbus, mbus->u_bus);
@@ -428,4 +422,5 @@ static void __exit mon_exit(void)
 module_init(mon_init);
 module_exit(mon_exit);
 
+MODULE_DESCRIPTION("USB Monitor");
 MODULE_LICENSE("GPL");

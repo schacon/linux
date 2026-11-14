@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * QNX6 file system, Linux implementation.
  *
@@ -10,6 +11,12 @@
  *
  */
 
+#ifdef pr_fmt
+#undef pr_fmt
+#endif
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/fs.h>
 #include <linux/pagemap.h>
 
@@ -18,12 +25,6 @@ typedef __u32 __bitwise __fs32;
 typedef __u64 __bitwise __fs64;
 
 #include <linux/qnx6_fs.h>
-
-#ifdef CONFIG_QNX6FS_DEBUG
-#define QNX6DEBUG(X) printk X
-#else
-#define QNX6DEBUG(X) (void) 0
-#endif
 
 struct qnx6_sb_info {
 	struct buffer_head	*sb_buf;	/* superblock buffer */
@@ -125,11 +126,4 @@ static inline __fs16 cpu_to_fs16(struct qnx6_sb_info *sbi, __u16 n)
 extern struct qnx6_super_block *qnx6_mmi_fill_super(struct super_block *s,
 						    int silent);
 
-static inline void qnx6_put_page(struct page *page)
-{
-	kunmap(page);
-	page_cache_release(page);
-}
-
-extern unsigned qnx6_find_entry(int len, struct inode *dir, const char *name,
-				struct page **res_page);
+unsigned qnx6_find_ino(int len, struct inode *dir, const char *name);

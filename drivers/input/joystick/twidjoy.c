@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 2001 Arndt Schoenewald
  *  Copyright (c) 2000-2001 Vojtech Pavlik
@@ -31,28 +32,11 @@
  * Arndt Schoenewald <arndt@quelltext.com>
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- */
-
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/serio.h>
-#include <linux/init.h>
 
 #define DRIVER_DESC	"Handykey Twiddler keyboard as a joystick driver"
 
@@ -187,7 +171,7 @@ static int twidjoy_connect(struct serio *serio, struct serio_driver *drv)
 	int err = -ENOMEM;
 	int i;
 
-	twidjoy = kzalloc(sizeof(struct twidjoy), GFP_KERNEL);
+	twidjoy = kzalloc_obj(*twidjoy);
 	input_dev = input_allocate_device();
 	if (!twidjoy || !input_dev)
 		goto fail1;
@@ -234,7 +218,7 @@ static int twidjoy_connect(struct serio *serio, struct serio_driver *drv)
  * The serio driver structure.
  */
 
-static struct serio_device_id twidjoy_serio_ids[] = {
+static const struct serio_device_id twidjoy_serio_ids[] = {
 	{
 		.type	= SERIO_RS232,
 		.proto	= SERIO_TWIDJOY,

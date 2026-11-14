@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * mdio.c: Generic support for MDIO-compatible transceivers
  * Copyright 2006-2009 Solarflare Communications Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation, incorporated herein by reference.
  */
 
 #include <linux/kernel.h>
@@ -86,7 +83,7 @@ int mdio_set_flag(const struct mdio_if_info *mdio,
 EXPORT_SYMBOL(mdio_set_flag);
 
 /**
- * mdio_link_ok - is link status up/OK
+ * mdio45_links_ok - is link status up/OK
  * @mdio: MDIO interface
  * @mmd_mask: Mask for MMDs to check
  *
@@ -170,32 +167,31 @@ static u32 mdio45_get_an(const struct mdio_if_info *mdio, u16 addr)
 }
 
 /**
- * mdio45_ethtool_gset_npage - get settings for ETHTOOL_GSET
+ * mdio45_ethtool_ksettings_get_npage - get settings for ETHTOOL_GLINKSETTINGS
  * @mdio: MDIO interface
- * @ecmd: Ethtool request structure
+ * @cmd: Ethtool request structure
  * @npage_adv: Modes currently advertised on next pages
  * @npage_lpa: Modes advertised by link partner on next pages
  *
- * The @ecmd parameter is expected to have been cleared before calling
- * mdio45_ethtool_gset_npage().
+ * The @cmd parameter is expected to have been cleared before calling
+ * mdio45_ethtool_ksettings_get_npage().
  *
  * Since the CSRs for auto-negotiation using next pages are not fully
  * standardised, this function does not attempt to decode them.  The
  * caller must pass them in.
  */
-void mdio45_ethtool_gset_npage(const struct mdio_if_info *mdio,
-			       struct ethtool_cmd *ecmd,
-			       u32 npage_adv, u32 npage_lpa)
+void mdio45_ethtool_ksettings_get_npage(const struct mdio_if_info *mdio,
+					struct ethtool_link_ksettings *cmd,
+					u32 npage_adv, u32 npage_lpa)
 {
 	int reg;
-	u32 speed;
+	u32 speed, supported = 0, advertising = 0, lp_advertising = 0;
 
 	BUILD_BUG_ON(MDIO_SUPPORTS_C22 != ETH_MDIO_SUPPORTS_C22);
 	BUILD_BUG_ON(MDIO_SUPPORTS_C45 != ETH_MDIO_SUPPORTS_C45);
 
-	ecmd->transceiver = XCVR_INTERNAL;
-	ecmd->phy_address = mdio->prtad;
-	ecmd->mdio_support =
+	cmd->base.phy_address = mdio->prtad;
+	cmd->base.mdio_support =
 		mdio->mode_support & (MDIO_SUPPORTS_C45 | MDIO_SUPPORTS_C22);
 
 	reg = mdio->mdio_read(mdio->dev, mdio->prtad, MDIO_MMD_PMAPMD,
@@ -205,109 +201,110 @@ void mdio45_ethtool_gset_npage(const struct mdio_if_info *mdio,
 	case MDIO_PMA_CTRL2_1000BT:
 	case MDIO_PMA_CTRL2_100BTX:
 	case MDIO_PMA_CTRL2_10BT:
-		ecmd->port = PORT_TP;
-		ecmd->supported = SUPPORTED_TP;
+		cmd->base.port = PORT_TP;
+		supported = SUPPORTED_TP;
 		reg = mdio->mdio_read(mdio->dev, mdio->prtad, MDIO_MMD_PMAPMD,
 				      MDIO_SPEED);
 		if (reg & MDIO_SPEED_10G)
-			ecmd->supported |= SUPPORTED_10000baseT_Full;
+			supported |= SUPPORTED_10000baseT_Full;
 		if (reg & MDIO_PMA_SPEED_1000)
-			ecmd->supported |= (SUPPORTED_1000baseT_Full |
+			supported |= (SUPPORTED_1000baseT_Full |
 					    SUPPORTED_1000baseT_Half);
 		if (reg & MDIO_PMA_SPEED_100)
-			ecmd->supported |= (SUPPORTED_100baseT_Full |
+			supported |= (SUPPORTED_100baseT_Full |
 					    SUPPORTED_100baseT_Half);
 		if (reg & MDIO_PMA_SPEED_10)
-			ecmd->supported |= (SUPPORTED_10baseT_Full |
+			supported |= (SUPPORTED_10baseT_Full |
 					    SUPPORTED_10baseT_Half);
-		ecmd->advertising = ADVERTISED_TP;
+		advertising = ADVERTISED_TP;
 		break;
 
 	case MDIO_PMA_CTRL2_10GBCX4:
-		ecmd->port = PORT_OTHER;
-		ecmd->supported = 0;
-		ecmd->advertising = 0;
+		cmd->base.port = PORT_OTHER;
+		supported = 0;
+		advertising = 0;
 		break;
 
 	case MDIO_PMA_CTRL2_10GBKX4:
 	case MDIO_PMA_CTRL2_10GBKR:
 	case MDIO_PMA_CTRL2_1000BKX:
-		ecmd->port = PORT_OTHER;
-		ecmd->supported = SUPPORTED_Backplane;
+		cmd->base.port = PORT_OTHER;
+		supported = SUPPORTED_Backplane;
 		reg = mdio->mdio_read(mdio->dev, mdio->prtad, MDIO_MMD_PMAPMD,
 				      MDIO_PMA_EXTABLE);
 		if (reg & MDIO_PMA_EXTABLE_10GBKX4)
-			ecmd->supported |= SUPPORTED_10000baseKX4_Full;
+			supported |= SUPPORTED_10000baseKX4_Full;
 		if (reg & MDIO_PMA_EXTABLE_10GBKR)
-			ecmd->supported |= SUPPORTED_10000baseKR_Full;
+			supported |= SUPPORTED_10000baseKR_Full;
 		if (reg & MDIO_PMA_EXTABLE_1000BKX)
-			ecmd->supported |= SUPPORTED_1000baseKX_Full;
+			supported |= SUPPORTED_1000baseKX_Full;
 		reg = mdio->mdio_read(mdio->dev, mdio->prtad, MDIO_MMD_PMAPMD,
 				      MDIO_PMA_10GBR_FECABLE);
 		if (reg & MDIO_PMA_10GBR_FECABLE_ABLE)
-			ecmd->supported |= SUPPORTED_10000baseR_FEC;
-		ecmd->advertising = ADVERTISED_Backplane;
+			supported |= SUPPORTED_10000baseR_FEC;
+		advertising = ADVERTISED_Backplane;
 		break;
 
 	/* All the other defined modes are flavours of optical */
 	default:
-		ecmd->port = PORT_FIBRE;
-		ecmd->supported = SUPPORTED_FIBRE;
-		ecmd->advertising = ADVERTISED_FIBRE;
+		cmd->base.port = PORT_FIBRE;
+		supported = SUPPORTED_FIBRE;
+		advertising = ADVERTISED_FIBRE;
 		break;
 	}
 
 	if (mdio->mmds & MDIO_DEVS_AN) {
-		ecmd->supported |= SUPPORTED_Autoneg;
+		supported |= SUPPORTED_Autoneg;
 		reg = mdio->mdio_read(mdio->dev, mdio->prtad, MDIO_MMD_AN,
 				      MDIO_CTRL1);
 		if (reg & MDIO_AN_CTRL1_ENABLE) {
-			ecmd->autoneg = AUTONEG_ENABLE;
-			ecmd->advertising |=
+			cmd->base.autoneg = AUTONEG_ENABLE;
+			advertising |=
 				ADVERTISED_Autoneg |
 				mdio45_get_an(mdio, MDIO_AN_ADVERTISE) |
 				npage_adv;
 		} else {
-			ecmd->autoneg = AUTONEG_DISABLE;
+			cmd->base.autoneg = AUTONEG_DISABLE;
 		}
 	} else {
-		ecmd->autoneg = AUTONEG_DISABLE;
+		cmd->base.autoneg = AUTONEG_DISABLE;
 	}
 
-	if (ecmd->autoneg) {
+	if (cmd->base.autoneg) {
 		u32 modes = 0;
 		int an_stat = mdio->mdio_read(mdio->dev, mdio->prtad,
 					      MDIO_MMD_AN, MDIO_STAT1);
 
 		/* If AN is complete and successful, report best common
-		 * mode, otherwise report best advertised mode. */
+		 * mode, otherwise report best advertised mode.
+		 */
 		if (an_stat & MDIO_AN_STAT1_COMPLETE) {
-			ecmd->lp_advertising =
+			lp_advertising =
 				mdio45_get_an(mdio, MDIO_AN_LPA) | npage_lpa;
 			if (an_stat & MDIO_AN_STAT1_LPABLE)
-				ecmd->lp_advertising |= ADVERTISED_Autoneg;
-			modes = ecmd->advertising & ecmd->lp_advertising;
+				lp_advertising |= ADVERTISED_Autoneg;
+			modes = advertising & lp_advertising;
 		}
 		if ((modes & ~ADVERTISED_Autoneg) == 0)
-			modes = ecmd->advertising;
+			modes = advertising;
 
 		if (modes & (ADVERTISED_10000baseT_Full |
 			     ADVERTISED_10000baseKX4_Full |
 			     ADVERTISED_10000baseKR_Full)) {
 			speed = SPEED_10000;
-			ecmd->duplex = DUPLEX_FULL;
+			cmd->base.duplex = DUPLEX_FULL;
 		} else if (modes & (ADVERTISED_1000baseT_Full |
 				    ADVERTISED_1000baseT_Half |
 				    ADVERTISED_1000baseKX_Full)) {
 			speed = SPEED_1000;
-			ecmd->duplex = !(modes & ADVERTISED_1000baseT_Half);
+			cmd->base.duplex = !(modes & ADVERTISED_1000baseT_Half);
 		} else if (modes & (ADVERTISED_100baseT_Full |
 				    ADVERTISED_100baseT_Half)) {
 			speed = SPEED_100;
-			ecmd->duplex = !!(modes & ADVERTISED_100baseT_Full);
+			cmd->base.duplex = !!(modes & ADVERTISED_100baseT_Full);
 		} else {
 			speed = SPEED_10;
-			ecmd->duplex = !!(modes & ADVERTISED_10baseT_Full);
+			cmd->base.duplex = !!(modes & ADVERTISED_10baseT_Full);
 		}
 	} else {
 		/* Report forced settings */
@@ -315,59 +312,37 @@ void mdio45_ethtool_gset_npage(const struct mdio_if_info *mdio,
 				      MDIO_CTRL1);
 		speed = (((reg & MDIO_PMA_CTRL1_SPEED1000) ? 100 : 1)
 			 * ((reg & MDIO_PMA_CTRL1_SPEED100) ? 100 : 10));
-		ecmd->duplex = (reg & MDIO_CTRL1_FULLDPLX ||
-				speed == SPEED_10000);
+		cmd->base.duplex = (reg & MDIO_CTRL1_FULLDPLX ||
+				    speed == SPEED_10000);
 	}
 
-	ethtool_cmd_speed_set(ecmd, speed);
+	cmd->base.speed = speed;
+
+	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.supported,
+						supported);
+	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.advertising,
+						advertising);
+	ethtool_convert_legacy_u32_to_link_mode(cmd->link_modes.lp_advertising,
+						lp_advertising);
 
 	/* 10GBASE-T MDI/MDI-X */
-	if (ecmd->port == PORT_TP
-	    && (ethtool_cmd_speed(ecmd) == SPEED_10000)) {
+	if (cmd->base.port == PORT_TP && (cmd->base.speed == SPEED_10000)) {
 		switch (mdio->mdio_read(mdio->dev, mdio->prtad, MDIO_MMD_PMAPMD,
 					MDIO_PMA_10GBT_SWAPPOL)) {
 		case MDIO_PMA_10GBT_SWAPPOL_ABNX | MDIO_PMA_10GBT_SWAPPOL_CDNX:
-			ecmd->eth_tp_mdix = ETH_TP_MDI;
+			cmd->base.eth_tp_mdix = ETH_TP_MDI;
 			break;
 		case 0:
-			ecmd->eth_tp_mdix = ETH_TP_MDI_X;
+			cmd->base.eth_tp_mdix = ETH_TP_MDI_X;
 			break;
 		default:
 			/* It's complicated... */
-			ecmd->eth_tp_mdix = ETH_TP_MDI_INVALID;
+			cmd->base.eth_tp_mdix = ETH_TP_MDI_INVALID;
 			break;
 		}
 	}
 }
-EXPORT_SYMBOL(mdio45_ethtool_gset_npage);
-
-/**
- * mdio45_ethtool_spauseparam_an - set auto-negotiated pause parameters
- * @mdio: MDIO interface
- * @ecmd: Ethtool request structure
- *
- * This function assumes that the PHY has an auto-negotiation MMD.  It
- * will enable and disable advertising of flow control as appropriate.
- */
-void mdio45_ethtool_spauseparam_an(const struct mdio_if_info *mdio,
-				   const struct ethtool_pauseparam *ecmd)
-{
-	int adv, old_adv;
-
-	WARN_ON(!(mdio->mmds & MDIO_DEVS_AN));
-
-	old_adv = mdio->mdio_read(mdio->dev, mdio->prtad, MDIO_MMD_AN,
-				  MDIO_AN_ADVERTISE);
-	adv = ((old_adv & ~(ADVERTISE_PAUSE_CAP | ADVERTISE_PAUSE_ASYM)) |
-	       mii_advertise_flowctrl((ecmd->rx_pause ? FLOW_CTRL_RX : 0) |
-				      (ecmd->tx_pause ? FLOW_CTRL_TX : 0)));
-	if (adv != old_adv) {
-		mdio->mdio_write(mdio->dev, mdio->prtad, MDIO_MMD_AN,
-				 MDIO_AN_ADVERTISE, adv);
-		mdio45_nway_restart(mdio);
-	}
-}
-EXPORT_SYMBOL(mdio45_ethtool_spauseparam_an);
+EXPORT_SYMBOL(mdio45_ethtool_ksettings_get_npage);
 
 /**
  * mdio_mii_ioctl - MII ioctl interface for MDIO (clause 22 or 45) PHYs

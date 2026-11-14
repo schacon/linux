@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * GSPCA Endpoints (formerly known as AOX) se401 USB Camera sub Driver
  *
@@ -6,21 +7,6 @@
  * Based on the v4l1 se401 driver which is:
  *
  * Copyright (c) 2000 Jeroen B. Vreeken (pe1rxq@amsat.org)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -115,6 +101,11 @@ static void se401_read_req(struct gspca_dev *gspca_dev, u16 req, int silent)
 			pr_err("read req failed req %#04x error %d\n",
 			       req, err);
 		gspca_dev->usb_err = err;
+		/*
+		 * Make sure the buffer is zeroed to avoid uninitialized
+		 * values.
+		 */
+		memset(gspca_dev->usb_buf, 0, READ_REQ_SIZE);
 	}
 }
 
@@ -354,9 +345,9 @@ static int sd_start(struct gspca_dev *gspca_dev)
 
 	/* set size + mode */
 	se401_write_req(gspca_dev, SE401_REQ_SET_WIDTH,
-			gspca_dev->width * mult, 0);
+			gspca_dev->pixfmt.width * mult, 0);
 	se401_write_req(gspca_dev, SE401_REQ_SET_HEIGHT,
-			gspca_dev->height * mult, 0);
+			gspca_dev->pixfmt.height * mult, 0);
 	/*
 	 * HDG: disabled this as it does not seem to do anything
 	 * se401_write_req(gspca_dev, SE401_REQ_SET_OUTPUT_MODE,
@@ -480,7 +471,7 @@ static void sd_complete_frame(struct gspca_dev *gspca_dev, u8 *data, int len)
 static void sd_pkt_scan_janggu(struct gspca_dev *gspca_dev, u8 *data, int len)
 {
 	struct sd *sd = (struct sd *)gspca_dev;
-	int imagesize = gspca_dev->width * gspca_dev->height;
+	int imagesize = gspca_dev->pixfmt.width * gspca_dev->pixfmt.height;
 	int i, plen, bits, pixels, info, count;
 
 	if (sd->restart_stream)

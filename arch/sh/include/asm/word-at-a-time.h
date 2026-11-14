@@ -1,9 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_SH_WORD_AT_A_TIME_H
 #define __ASM_SH_WORD_AT_A_TIME_H
 
 #ifdef CONFIG_CPU_BIG_ENDIAN
 # include <asm-generic/word-at-a-time.h>
 #else
+#include <linux/bitops.h>
+#include <linux/wordpart.h>
 /*
  * Little-endian version cribbed from x86.
  */

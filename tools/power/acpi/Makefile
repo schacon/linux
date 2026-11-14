@@ -1,18 +1,26 @@
-PROG= acpidump
-SRCS=	acpidump.c
-KERNEL_INCLUDE := ../../../include
-CFLAGS += -Wall -Wstrict-prototypes -Wdeclaration-after-statement -Os -s -D_LINUX -DDEFINE_ALTERNATE_TYPES -I$(KERNEL_INCLUDE) 
+# SPDX-License-Identifier: GPL-2.0-only
+# tools/power/acpi/Makefile - ACPI tool Makefile
+#
+# Copyright (c) 2013, Intel Corporation
+#   Author: Lv Zheng <lv.zheng@intel.com>
+#
 
-all: acpidump
-$(PROG) : $(SRCS)
-	$(CC) $(CFLAGS) $(SRCS) -o $(PROG)
+include ../../scripts/Makefile.include
 
-CLEANFILES= $(PROG)
+.NOTPARALLEL:
 
-clean : 
-	rm -f $(CLEANFILES) $(patsubst %.c,%.o, $(SRCS)) *~
+all: acpidbg acpidump ec pfrut
+clean: acpidbg_clean acpidump_clean ec_clean pfrut_clean
+install: acpidbg_install acpidump_install ec_install pfrut_install
+uninstall: acpidbg_uninstall acpidump_uninstall ec_uninstall pfrut_uninstall
 
-install :
-	install acpidump /usr/sbin/acpidump
-	install acpidump.8 /usr/share/man/man8
+acpidbg acpidump ec pfrut: FORCE
+	$(call descend,tools/$@,all)
+acpidbg_clean acpidump_clean ec_clean pfrut_clean:
+	$(call descend,tools/$(@:_clean=),clean)
+acpidbg_install acpidump_install ec_install pfrut_install:
+	$(call descend,tools/$(@:_install=),install)
+acpidbg_uninstall acpidump_uninstall ec_uninstall pfrut_uninstall:
+	$(call descend,tools/$(@:_uninstall=),uninstall)
 
+.PHONY: FORCE

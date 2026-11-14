@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Linux driver for digital TV devices equipped with B2C2 FlexcopII(b)/III
  * flexcop-misc.c - miscellaneous functions
@@ -23,18 +24,15 @@ void flexcop_determine_revision(struct flexcop_device *fc)
 		fc->rev = FLEXCOP_III;
 		break;
 	default:
-		err("unknown FlexCop Revision: %x. Please report this to "
-				"linux-dvb@linuxtv.org.",
+		err("unknown FlexCop Revision: %x. Please report this to linux-dvb@linuxtv.org.",
 				v.misc_204.Rev_N_sig_revision_hi);
 		break;
 	}
 
 	if ((fc->has_32_hw_pid_filter = v.misc_204.Rev_N_sig_caps))
-		deb_info("this FlexCop has "
-				"the additional 32 hardware pid filter.\n");
+		deb_info("this FlexCop has the additional 32 hardware pid filter.\n");
 	else
-		deb_info("this FlexCop has "
-				"the 6 basic main hardware pid filter.\n");
+		deb_info("this FlexCop has the 6 basic main hardware pid filter.\n");
 	/* bus parts have to decide if hw pid filtering is used or not. */
 }
 
@@ -56,6 +54,7 @@ static const char *flexcop_device_names[] = {
 	[FC_SKY_REV26]	= "Sky2PC/SkyStar 2 DVB-S rev 2.6",
 	[FC_SKY_REV27]	= "Sky2PC/SkyStar 2 DVB-S rev 2.7a/u",
 	[FC_SKY_REV28]	= "Sky2PC/SkyStar 2 DVB-S rev 2.8",
+	[FC_SKYS2_REV33] = "Sky2PC/SkyStar S2 DVB-S/S2 rev 3.3",
 };
 
 static const char *flexcop_bus_names[] = {
@@ -71,16 +70,3 @@ void flexcop_device_name(struct flexcop_device *fc,
 			flexcop_bus_names[fc->bus_type],
 			flexcop_revision_names[fc->rev], suffix);
 }
-
-void flexcop_dump_reg(struct flexcop_device *fc,
-		flexcop_ibi_register reg, int num)
-{
-	flexcop_ibi_value v;
-	int i;
-	for (i = 0; i < num; i++) {
-		v = fc->read_ibi_reg(fc, reg+4*i);
-		deb_rdump("0x%03x: %08x, ", reg+4*i, v.raw);
-	}
-	deb_rdump("\n");
-}
-EXPORT_SYMBOL(flexcop_dump_reg);

@@ -1,27 +1,13 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *   ALSA sequencer Ports 
  *   Copyright (c) 1998 by Frank van de Pol <fvdpol@coil.demon.nl>
- *
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 #ifndef __SND_SEQ_PORTS_H
 #define __SND_SEQ_PORTS_H
 
 #include <sound/seq_kernel.h>
+#include <sound/ump_convert.h>
 #include "seq_lock.h"
 
 /* list of 'exported' ports */
@@ -42,17 +28,17 @@
 
 struct snd_seq_subscribers {
 	struct snd_seq_port_subscribe info;	/* additional info */
-	struct list_head src_list;	/* link of sources */
-	struct list_head dest_list;	/* link of destinations */
+	struct hlist_node src_list;	/* link of sources */
+	struct hlist_node dest_list;	/* link of destinations */
 	atomic_t ref_count;
+	struct rcu_head rcu;		/* for deferred free */
 };
 
 struct snd_seq_port_subs_info {
-	struct list_head list_head;	/* list of subscribed ports */
+	struct hlist_head list_head;	/* list of subscribed ports */
 	unsigned int count;		/* count of subscribers */
 	unsigned int exclusive: 1;	/* exclusive mode */
 	struct rw_semaphore list_mutex;
-	rwlock_t list_lock;
 	int (*open)(void *private_data, struct snd_seq_port_subscribe *info);
 	int (*close)(void *private_data, struct snd_seq_port_subscribe *info);
 };
@@ -63,6 +49,7 @@ struct snd_seq_client_port {
 	struct module *owner;		/* owner of this port */
 	char name[64];			/* port name */	
 	struct list_head list;		/* port list */
+	struct list_head delete_list;	/* used by snd_seq_delete_all_ports() */
 	snd_use_lock_t use_lock;
 
 	/* subscribers */
@@ -73,7 +60,6 @@ struct snd_seq_client_port {
 			   int atomic, int hop);
 	void (*private_free)(void *private_data);
 	void *private_data;
-	unsigned int callback_all : 1;
 	unsigned int closing : 1;
 	unsigned int timestamping: 1;
 	unsigned int time_real: 1;
@@ -88,6 +74,15 @@ struct snd_seq_client_port {
 	int midi_voices;
 	int synth_voices;
 		
+	/* UMP direction and group */
+	unsigned char direction;
+	unsigned char ump_group;
+
+	bool is_midi1;	/* keep MIDI 1.0 protocol */
+
+#if IS_ENABLED(CONFIG_SND_SEQ_UMP)
+	struct ump_cvt_to_ump_bank midi2_bank[16]; /* per channel */
+#endif
 };
 
 struct snd_seq_client;
@@ -102,8 +97,15 @@ struct snd_seq_client_port *snd_seq_port_query_nearest(struct snd_seq_client *cl
 /* unlock the port */
 #define snd_seq_port_unlock(port) snd_use_lock_free(&(port)->use_lock)
 
-/* create a port, port number is returned (-1 on failure) */
-struct snd_seq_client_port *snd_seq_create_port(struct snd_seq_client *client, int port_index);
+DEFINE_FREE(snd_seq_port, struct snd_seq_client_port *, if (!IS_ERR_OR_NULL(_T)) snd_seq_port_unlock(_T))
+
+/* create a port, 0 on success or a negative error code is returned */
+int snd_seq_create_port(struct snd_seq_client *client,
+			struct snd_seq_client_port **port_ret);
+
+/* insert the port; return the port address or a negative error code */
+int snd_seq_insert_port(struct snd_seq_client *client, int port,
+			struct snd_seq_client_port *new_port);
 
 /* delete a port */
 int snd_seq_delete_port(struct snd_seq_client *client, int port);
@@ -136,7 +138,8 @@ int snd_seq_port_subscribe(struct snd_seq_client_port *port,
 			   struct snd_seq_port_subscribe *info);
 
 /* get matched subscriber */
-struct snd_seq_subscribers *snd_seq_port_get_subscription(struct snd_seq_port_subs_info *src_grp,
-							  struct snd_seq_addr *dest_addr);
+int snd_seq_port_get_subscription(struct snd_seq_port_subs_info *src_grp,
+				  struct snd_seq_addr *dest_addr,
+				  struct snd_seq_port_subscribe *subs);
 
 #endif

@@ -1,0 +1,406 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2012 MIPS Technologies, Inc.  All rights reserved.
+
+#define pr_fmt(fmt) "mips-gic-timer: " fmt
+
+#include <linux/clk.h>
+#include <linux/clockchips.h>
+#include <linux/cpu.h>
+#include <linux/delay.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/notifier.h>
+#include <linux/of_irq.h>
+#include <linux/percpu.h>
+#include <linux/sched_clock.h>
+#include <linux/smp.h>
+#include <linux/time.h>
+#include <asm/mips-cps.h>
+
+static DEFINE_PER_CPU(struct clock_event_device, gic_clockevent_device);
+static int gic_timer_irq;
+static unsigned int gic_frequency;
+static unsigned int gic_count_width;
+static bool __read_mostly gic_clock_unstable;
+static bool __read_mostly gic_use_local_counter = true;
+static unsigned long *gic_synced_cl_map;
+static struct work_struct gic_promote_work;
+
+static void gic_clocksource_unstable(char *reason);
+
+static u64 notrace gic_read_count_2x32(void)
+{
+	unsigned int hi, hi2, lo;
+
+	do {
+		hi = read_gic_counter_32h();
+		lo = read_gic_counter_32l();
+		hi2 = read_gic_counter_32h();
+	} while (hi2 != hi);
+
+	return (((u64) hi) << 32) + lo;
+}
+
+static u64 notrace gic_read_count_64(void)
+{
+	return read_gic_counter();
+}
+
+static u64 notrace gic_read_count(void)
+{
+	if (mips_cm_is64)
+		return gic_read_count_64();
+
+	return gic_read_count_2x32();
+}
+
+static int gic_next_event(unsigned long delta, struct clock_event_device *evt)
+{
+	u64 cnt;
+	int res;
+
+	cnt = gic_read_count();
+	cnt += (u64)delta;
+	write_gic_vl_compare(cnt);
+
+	res = ((int)(gic_read_count() - cnt) >= 0) ? -ETIME : 0;
+	return res;
+}
+
+static irqreturn_t gic_compare_interrupt(int irq, void *dev_id)
+{
+	struct clock_event_device *cd = dev_id;
+
+	write_gic_vl_compare(read_gic_vl_compare());
+	cd->event_handler(cd);
+	return IRQ_HANDLED;
+}
+
+static void gic_clockevent_cpu_init(unsigned int cpu,
+				    struct clock_event_device *cd)
+{
+	cd->name		= "MIPS GIC";
+	cd->features		= CLOCK_EVT_FEAT_ONESHOT |
+				  CLOCK_EVT_FEAT_PERCPU |
+				  CLOCK_EVT_FEAT_C3STOP;
+
+	cd->rating		= 350;
+	cd->irq			= gic_timer_irq;
+	cd->cpumask		= cpumask_of(cpu);
+	cd->set_next_event	= gic_next_event;
+
+	clockevents_config_and_register(cd, gic_frequency, 0x300, 0x7fffffff);
+
+	enable_percpu_irq(gic_timer_irq, IRQ_TYPE_NONE);
+}
+
+static void gic_clockevent_cpu_exit(struct clock_event_device *cd)
+{
+	disable_percpu_irq(gic_timer_irq);
+}
+
+static void gic_update_frequency(void *data)
+{
+	unsigned long rate = (unsigned long)data;
+
+	clockevents_update_freq(this_cpu_ptr(&gic_clockevent_device), rate);
+}
+
+/* Number of iterations to synchronize the local GIC counter */
+#define GIC_SYNC_ITERATIONS 4
+
+/* Delay in us to check if the local GIC counter is still in sync with cluster 0 */
+#define GIC_SYNC_CHECK_DELAY 100
+
+static void gic_sync_counter_64(unsigned int cluster)
+{
+	unsigned int config = read_gic_config();
+	u64 t0, t1, t2;
+	s64 offset = 0;
+
+	mips_cm_lock_other(0, 0, 0, CM_GCR_Cx_OTHER_BLOCK_GLOBAL);
+
+	for (int i = 0; i < GIC_SYNC_ITERATIONS; i++) {
+		write_gic_config(config | GIC_CONFIG_COUNTSTOP);
+		write_gic_counter(read_gic_redir_counter() + offset);
+		write_gic_config(config & ~GIC_CONFIG_COUNTSTOP);
+
+		t0 = read_gic_counter();
+		t1 = read_gic_redir_counter();
+		t2 = read_gic_counter();
+
+		if (time_in_range64(t1, t0, t2))
+			break;
+
+		/*
+		 * Compute the offset to apply to the local counter
+		 * so that (t1 - t0) equals (t2 - t1).
+		 */
+		offset += (s64)(2 * t1 - t0 - t2) / 2;
+	}
+
+	mips_cm_unlock_other();
+
+	if (!time_in_range64(t1, t0, t2))
+		return;
+
+	udelay(GIC_SYNC_CHECK_DELAY);
+
+	mips_cm_lock_other(0, 0, 0, CM_GCR_Cx_OTHER_BLOCK_GLOBAL);
+	t0 = read_gic_counter();
+	t1 = read_gic_redir_counter();
+	t2 = read_gic_counter();
+	mips_cm_unlock_other();
+
+	/* If so, mark the cluster as synchronized */
+	if (time_in_range64(t1, t0, t2) && gic_synced_cl_map)
+		bitmap_set(gic_synced_cl_map, cluster, 1);
+}
+
+static int gic_starting_cpu(unsigned int cpu)
+{
+	unsigned int cluster = cpu_cluster(&cpu_data[cpu]);
+
+	if (read_gic_config() & GIC_CONFIG_COUNTSTOP) {
+		clear_gic_config(GIC_CONFIG_COUNTSTOP);
+
+		if (cluster && mips_cm_is64 && !gic_clock_unstable)
+			gic_sync_counter_64(cluster);
+
+		if (gic_synced_cl_map &&
+		    bitmap_full(gic_synced_cl_map, mips_cps_numclusters()))
+			schedule_work(&gic_promote_work);
+	}
+
+	gic_clockevent_cpu_init(cpu, this_cpu_ptr(&gic_clockevent_device));
+	return 0;
+}
+
+static int gic_clk_notifier(struct notifier_block *nb, unsigned long action,
+			    void *data)
+{
+	struct clk_notifier_data *cnd = data;
+
+	if (action == POST_RATE_CHANGE) {
+		gic_clocksource_unstable("ref clock rate change");
+		on_each_cpu(gic_update_frequency, (void *)cnd->new_rate, 1);
+	}
+
+	return NOTIFY_OK;
+}
+
+static int gic_dying_cpu(unsigned int cpu)
+{
+	gic_clockevent_cpu_exit(this_cpu_ptr(&gic_clockevent_device));
+	return 0;
+}
+
+static struct notifier_block gic_clk_nb = {
+	.notifier_call = gic_clk_notifier,
+};
+
+static int gic_clockevent_init(void)
+{
+	int ret;
+
+	if (!gic_frequency)
+		return -ENXIO;
+
+	ret = request_percpu_irq(gic_timer_irq, gic_compare_interrupt,
+				 "timer", &gic_clockevent_device);
+	if (ret < 0) {
+		pr_err("IRQ %d setup failed (%d)\n", gic_timer_irq, ret);
+		return ret;
+	}
+
+	cpuhp_setup_state(CPUHP_AP_MIPS_GIC_TIMER_STARTING,
+			  "clockevents/mips/gic/timer:starting",
+			  gic_starting_cpu, gic_dying_cpu);
+	return 0;
+}
+
+static u64 gic_hpt_read_multicluster(struct clocksource *cs)
+{
+	unsigned int hi, hi2, lo;
+	u64 count;
+
+	mips_cm_lock_other(0, 0, 0, CM_GCR_Cx_OTHER_BLOCK_GLOBAL);
+
+	if (mips_cm_is64) {
+		count = read_gic_redir_counter();
+		goto out;
+	}
+
+	hi = read_gic_redir_counter_32h();
+	while (true) {
+		lo = read_gic_redir_counter_32l();
+
+		/* If hi didn't change then lo didn't wrap & we're done */
+		hi2 = read_gic_redir_counter_32h();
+		if (hi2 == hi)
+			break;
+
+		/* Otherwise, repeat with the latest hi value */
+		hi = hi2;
+	}
+
+	count = (((u64)hi) << 32) + lo;
+out:
+	mips_cm_unlock_other();
+	return count;
+}
+
+static u64 gic_hpt_read(struct clocksource *cs)
+{
+	if (unlikely(!READ_ONCE(gic_use_local_counter)))
+		return gic_hpt_read_multicluster(cs);
+
+	return gic_read_count();
+}
+
+static struct clocksource gic_clocksource = {
+	.name			= "GIC",
+	.read			= gic_hpt_read,
+	.flags			= CLOCK_SOURCE_IS_CONTINUOUS,
+	.vdso_clock_mode	= VDSO_CLOCKMODE_GIC,
+};
+
+static void gic_clocksource_unstable(char *reason)
+{
+	if (gic_clock_unstable)
+		return;
+
+	gic_clock_unstable = true;
+
+	pr_info("GIC timer is unstable due to %s\n", reason);
+
+	clocksource_mark_unstable(&gic_clocksource);
+}
+
+static void gic_clocksource_promote(struct work_struct *work)
+{
+	if (gic_clock_unstable || READ_ONCE(gic_use_local_counter))
+		return;
+
+	WRITE_ONCE(gic_use_local_counter, true);
+
+#ifdef CONFIG_GENERIC_GETTIMEOFDAY
+	gic_clocksource.vdso_clock_mode = VDSO_CLOCKMODE_GIC;
+#endif
+
+	if (mips_cm_revision() >= CM_REV_CM3 || !IS_ENABLED(CONFIG_CPU_FREQ)) {
+		sched_clock_register(mips_cm_is64 ?
+				     gic_read_count_64 : gic_read_count_2x32,
+				     gic_count_width, gic_frequency);
+	}
+}
+
+static int __init __gic_clocksource_init(void)
+{
+	unsigned int numclusters;
+	bool synced = false;
+	int ret;
+
+	/* Set clocksource mask. */
+	gic_count_width = read_gic_config() & GIC_CONFIG_COUNTBITS;
+	gic_count_width >>= __ffs(GIC_CONFIG_COUNTBITS);
+	gic_count_width *= 4;
+	gic_count_width += 32;
+	gic_clocksource.mask = CLOCKSOURCE_MASK(gic_count_width);
+
+	/* Calculate a somewhat reasonable rating value. */
+	if (mips_cm_revision() >= CM_REV_CM3 || !IS_ENABLED(CONFIG_CPU_FREQ))
+		gic_clocksource.rating = 300; /* Good when frequency is stable */
+	else
+		gic_clocksource.rating = 200;
+	gic_clocksource.rating += clamp(gic_frequency / 10000000, 0, 99);
+
+	numclusters = mips_cps_numclusters();
+	if (numclusters > 1)
+		gic_synced_cl_map = bitmap_zalloc(numclusters, GFP_KERNEL);
+
+	/*
+	 * Mark cluster 0 as synchronized (with itself), and all clusters
+	 * without cores since there is no local GIC counter access on those.
+	 */
+	if (gic_synced_cl_map) {
+		bitmap_set(gic_synced_cl_map, 0, 1);
+		for (unsigned int cl = 0; cl < numclusters; cl++) {
+			if (!mips_cps_numcores(cl))
+				bitmap_set(gic_synced_cl_map, cl, 1);
+		}
+		synced = bitmap_full(gic_synced_cl_map, numclusters);
+	}
+
+	if (numclusters > 1 && !synced) {
+		WRITE_ONCE(gic_use_local_counter, false);
+		gic_clocksource.vdso_clock_mode = VDSO_CLOCKMODE_NONE;
+		INIT_WORK(&gic_promote_work, gic_clocksource_promote);
+	}
+
+	ret = clocksource_register_hz(&gic_clocksource, gic_frequency);
+	if (ret < 0)
+		pr_warn("Unable to register clocksource\n");
+
+	return ret;
+}
+
+static int __init gic_clocksource_of_init(struct device_node *node)
+{
+	struct clk *clk;
+	int ret;
+
+	if (!mips_gic_present() || !node->parent ||
+	    !of_device_is_compatible(node->parent, "mti,gic")) {
+		pr_warn("No DT definition\n");
+		return -ENXIO;
+	}
+
+	clk = of_clk_get(node, 0);
+	if (!IS_ERR(clk)) {
+		ret = clk_prepare_enable(clk);
+		if (ret < 0) {
+			pr_err("Failed to enable clock\n");
+			clk_put(clk);
+			return ret;
+		}
+
+		gic_frequency = clk_get_rate(clk);
+	} else if (of_property_read_u32(node, "clock-frequency",
+					&gic_frequency)) {
+		pr_err("Frequency not specified\n");
+		return -EINVAL;
+	}
+	gic_timer_irq = irq_of_parse_and_map(node, 0);
+	if (!gic_timer_irq) {
+		pr_err("IRQ not specified\n");
+		return -EINVAL;
+	}
+
+	ret = __gic_clocksource_init();
+	if (ret)
+		return ret;
+
+	ret = gic_clockevent_init();
+	if (!ret && !IS_ERR(clk)) {
+		if (clk_notifier_register(clk, &gic_clk_nb) < 0)
+			pr_warn("Unable to register clock notifier\n");
+	}
+
+	/*
+	 * It's safe to use the MIPS GIC timer as a sched clock source only if
+	 * its ticks are stable, which is true on either the platforms with
+	 * stable CPU frequency or on the platforms with CM3 and CPU frequency
+	 * change performed by the CPC core clocks divider.
+	 */
+	if ((mips_cm_revision() >= CM_REV_CM3 || !IS_ENABLED(CONFIG_CPU_FREQ)) &&
+	     READ_ONCE(gic_use_local_counter)) {
+		sched_clock_register(mips_cm_is64 ?
+				     gic_read_count_64 : gic_read_count_2x32,
+				     gic_count_width, gic_frequency);
+	}
+
+	return 0;
+}
+TIMER_OF_DECLARE(mips_gic_timer, "mti,gic-timer",
+		       gic_clocksource_of_init);

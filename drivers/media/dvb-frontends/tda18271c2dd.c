@@ -1,38 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * tda18271c2dd: Driver for the TDA18271C2 tuner
  *
  * Copyright (C) 2010 Digital Devices GmbH
- *
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 only, as published by the Free Software Foundation.
- *
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
- * Or, point your browser to http://www.gnu.org/copyleft/gpl.html
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/i2c.h>
 #include <asm/div64.h>
 
-#include "dvb_frontend.h"
+#include <media/dvb_frontend.h>
 #include "tda18271c2dd.h"
+
+/* Max transfer size done by I2C transfer functions */
+#define MAX_XFER_SIZE  64
 
 struct SStandardParam {
 	s32   m_IFFrequency;
@@ -107,7 +92,7 @@ struct tda_state {
 	s32   m_RF_B2[7];
 	u32   m_RF3[7];
 
-	u8    m_TMValue_RFCal;    /* Calibration temperatur */
+	u8    m_TMValue_RFCal;    /* Calibration temperature */
 
 	bool  m_bFMInput;         /* true to use Pin 8 for FM Radio */
 
@@ -139,11 +124,18 @@ static int i2c_write(struct i2c_adapter *adap, u8 adr, u8 *data, int len)
 static int WriteRegs(struct tda_state *state,
 		     u8 SubAddr, u8 *Regs, u16 nRegs)
 {
-	u8 data[nRegs+1];
+	u8 data[MAX_XFER_SIZE];
+
+	if (1 + nRegs > sizeof(data)) {
+		printk(KERN_WARNING
+		       "%s: i2c wr: len=%d is too big!\n",
+		       KBUILD_MODNAME, nRegs);
+		return -EINVAL;
+	}
 
 	data[0] = SubAddr;
 	memcpy(data + 1, Regs, nRegs);
-	return i2c_write(state->i2c, state->adr, data, nRegs+1);
+	return i2c_write(state->i2c, state->adr, data, nRegs + 1);
 }
 
 static int WriteReg(struct tda_state *state, u8 SubAddr, u8 Reg)
@@ -206,58 +198,55 @@ static void reset(struct tda_state *state)
 	state->m_bFMInput = (ulFMInput == 2);
 }
 
-static bool SearchMap1(struct SMap Map[],
-		       u32 Frequency, u8 *pParam)
+static bool SearchMap1(const struct SMap map[], u32 frequency, u8 *param)
 {
 	int i = 0;
 
-	while ((Map[i].m_Frequency != 0) && (Frequency > Map[i].m_Frequency))
+	while ((map[i].m_Frequency != 0) && (frequency > map[i].m_Frequency))
 		i += 1;
-	if (Map[i].m_Frequency == 0)
+	if (map[i].m_Frequency == 0)
 		return false;
-	*pParam = Map[i].m_Param;
+	*param = map[i].m_Param;
 	return true;
 }
 
-static bool SearchMap2(struct SMapI Map[],
-		       u32 Frequency, s32 *pParam)
+static bool SearchMap2(const struct SMapI map[], u32 frequency, s32 *param)
 {
 	int i = 0;
 
-	while ((Map[i].m_Frequency != 0) &&
-	       (Frequency > Map[i].m_Frequency))
+	while ((map[i].m_Frequency != 0) &&
+	       (frequency > map[i].m_Frequency))
 		i += 1;
-	if (Map[i].m_Frequency == 0)
+	if (map[i].m_Frequency == 0)
 		return false;
-	*pParam = Map[i].m_Param;
+	*param = map[i].m_Param;
 	return true;
 }
 
-static bool SearchMap3(struct SMap2 Map[], u32 Frequency,
-		       u8 *pParam1, u8 *pParam2)
+static bool SearchMap3(const struct SMap2 map[], u32 frequency, u8 *param1,
+		       u8 *param2)
 {
 	int i = 0;
 
-	while ((Map[i].m_Frequency != 0) &&
-	       (Frequency > Map[i].m_Frequency))
+	while ((map[i].m_Frequency != 0) &&
+	       (frequency > map[i].m_Frequency))
 		i += 1;
-	if (Map[i].m_Frequency == 0)
+	if (map[i].m_Frequency == 0)
 		return false;
-	*pParam1 = Map[i].m_Param1;
-	*pParam2 = Map[i].m_Param2;
+	*param1 = map[i].m_Param1;
+	*param2 = map[i].m_Param2;
 	return true;
 }
 
-static bool SearchMap4(struct SRFBandMap Map[],
-		       u32 Frequency, u8 *pRFBand)
+static bool SearchMap4(const struct SRFBandMap map[], u32 frequency, u8 *rfband)
 {
 	int i = 0;
 
-	while (i < 7 && (Frequency > Map[i].m_RF_max))
+	while (i < 7 && (frequency > map[i].m_RF_max))
 		i += 1;
 	if (i == 7)
 		return false;
-	*pRFBand = i;
+	*rfband = i;
 	return true;
 }
 
@@ -339,7 +328,7 @@ static int CalcMainPLL(struct tda_state *state, u32 freq)
 
 	OscFreq = (u64) freq * (u64) Div;
 	OscFreq *= (u64) 16384;
-	do_div(OscFreq, (u64)16000000);
+	do_div(OscFreq, 16000000);
 	MainDiv = OscFreq;
 
 	state->m_Regs[MPD] = PostDiv & 0x77;
@@ -363,7 +352,7 @@ static int CalcCalPLL(struct tda_state *state, u32 freq)
 	OscFreq = (u64)freq * (u64)Div;
 	/* CalDiv = u32( OscFreq * 16384 / 16000000 ); */
 	OscFreq *= (u64)16384;
-	do_div(OscFreq, (u64)16000000);
+	do_div(OscFreq, 16000000);
 	CalDiv = OscFreq;
 
 	state->m_Regs[CPD] = PostDiv;
@@ -395,7 +384,7 @@ static int CalibrateRF(struct tda_state *state,
 			break;
 
 		/* Switching off LT (as datasheet says) causes calibration on C1 to fail */
-		/* (Readout of Cprog is allways 255) */
+		/* (Readout of Cprog is always 255) */
 		if (state->m_Regs[ID] != 0x83)    /* C1: ID == 83, C2: ID == 84 */
 			state->m_Regs[EP3] |= 0x40; /* SM_LT = 1 */
 
@@ -639,7 +628,7 @@ static int PowerScan(struct tda_state *state,
 		if (status < 0)
 			break;
 		CID_Gain = Regs[EB10] & 0x3F;
-		state->m_Regs[ID] = Regs[ID];  /* Chip version, (needed for C1 workarround in CalibrateRF) */
+		state->m_Regs[ID] = Regs[ID];  /* Chip version, (needed for C1 workaround in CalibrateRF) */
 
 		*pRF_Out = RF_in;
 
@@ -668,7 +657,6 @@ static int PowerScan(struct tda_state *state,
 			Count = 200000;
 			wait = true;
 		}
-		status = status;
 		if (status < 0)
 			break;
 		if (CID_Gain >= CID_Target) {
@@ -966,7 +954,7 @@ static int RFTrackingFiltersCorrection(struct tda_state *state,
 			Capprox = 255;
 
 
-		/* TODO Temperature compensation. There is defenitely a scale factor */
+		/* TODO Temperature compensation. There is definitely a scale factor */
 		/*      missing in the datasheet, so leave it out for now.           */
 		state->m_Regs[EB14] = Capprox;
 
@@ -1020,7 +1008,7 @@ static int ChannelConfiguration(struct tda_state *state,
 			state->m_Regs[EP4] = state->m_EP4 | state->m_IFLevelDigital;
 
 		if ((Standard == HF_FM_Radio) && state->m_bFMInput)
-			state->m_Regs[EP4] |= 80;
+			state->m_Regs[EP4] |= 0x80;
 
 		state->m_Regs[MPD] &= ~0x80;
 		if (Standard > HF_AnalogMax)
@@ -1116,11 +1104,10 @@ static int init(struct dvb_frontend *fe)
 	return 0;
 }
 
-static int release(struct dvb_frontend *fe)
+static void release(struct dvb_frontend *fe)
 {
 	kfree(fe->tuner_priv);
 	fe->tuner_priv = NULL;
-	return 0;
 }
 
 
@@ -1150,6 +1137,7 @@ static int set_params(struct dvb_frontend *fe)
 		default:
 			return -EINVAL;
 		}
+		break;
 	case SYS_DVBC_ANNEX_A:
 	case SYS_DVBC_ANNEX_C:
 		if (bw <= 6000000)
@@ -1207,12 +1195,12 @@ static int get_bandwidth(struct dvb_frontend *fe, u32 *bandwidth)
 }
 
 
-static struct dvb_tuner_ops tuner_ops = {
+static const struct dvb_tuner_ops tuner_ops = {
 	.info = {
 		.name = "NXP TDA18271C2D",
-		.frequency_min  =  47125000,
-		.frequency_max  = 865000000,
-		.frequency_step =     62500
+		.frequency_min_hz  =  47125 * kHz,
+		.frequency_max_hz  =    865 * MHz,
+		.frequency_step_hz =  62500
 	},
 	.init              = init,
 	.sleep             = sleep,
@@ -1227,7 +1215,7 @@ struct dvb_frontend *tda18271c2dd_attach(struct dvb_frontend *fe,
 {
 	struct tda_state *state;
 
-	state = kzalloc(sizeof(struct tda_state), GFP_KERNEL);
+	state = kzalloc_obj(struct tda_state);
 	if (!state)
 		return NULL;
 

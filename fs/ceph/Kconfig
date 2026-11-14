@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
 config CEPH_FS
 	tristate "Ceph distributed file system"
 	depends on INET
 	select CEPH_LIB
-	select LIBCRC32C
-	select CRYPTO_AES
-	select CRYPTO
+	select NETFS_SUPPORT
+	select NETFS_PGPRIV2
+	select FS_ENCRYPTION_ALGS if FS_ENCRYPTION
 	default n
 	help
 	  Choose Y or M here to include support for mounting the
@@ -12,7 +13,51 @@ config CEPH_FS
 	  scalable file system designed to provide high performance,
 	  reliable access to petabytes of storage.
 
-	  More information at http://ceph.newdream.net/.
+	  More information at https://ceph.io/.
 
 	  If unsure, say N.
 
+if CEPH_FS
+
+config CEPH_FS_INLINE_DATA
+	bool "Enable CephFS inline data support (deprecated)"
+	depends on CEPH_FS
+	default n
+	help
+	  Inline data support has been deprecated in the CephFS MDS
+	  and is being formally removed.  Existing inline data can be
+	  migrated to data pool objects via MDS scrub.  Choose N
+	  unless you have a legacy filesystem that requires it,
+	  and ensure all inline data has been migrated (see
+	  ceph fs set <fs> inline_data false) before enabling.
+
+config CEPH_FSCACHE
+	bool "Enable Ceph client caching support"
+	depends on CEPH_FS=m && FSCACHE || CEPH_FS=y && FSCACHE=y
+	help
+	  Choose Y here to enable persistent, read-only local
+	  caching support for Ceph clients using FS-Cache
+
+endif
+
+config CEPH_FS_POSIX_ACL
+	bool "Ceph POSIX Access Control Lists"
+	depends on CEPH_FS
+	select FS_POSIX_ACL
+	help
+	  POSIX Access Control Lists (ACLs) support permissions for users and
+	  groups beyond the owner/group/world scheme.
+
+	  If you don't know what Access Control Lists are, say N
+
+config CEPH_FS_SECURITY_LABEL
+	bool "CephFS Security Labels"
+	depends on CEPH_FS && SECURITY
+	help
+	  Security labels support alternative access control models
+	  implemented by security modules like SELinux. This option
+	  enables an extended attribute handler for file security
+	  labels in the Ceph filesystem.
+
+	  If you are not using a security module that requires using
+	  extended attributes for file security labels, say N.

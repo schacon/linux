@@ -1,5 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_CPU_SH3_DAC_H
 #define __ASM_CPU_SH3_DAC_H
+
+#include <linux/io.h>
 
 /*
  * Copyright (C) 2003  Andriy Skulysh

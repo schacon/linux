@@ -1,8 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #include <linux/fs.h>
 #include <linux/buffer_head.h>
 #include <linux/exportfs.h>
 #include <linux/iso_fs.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 enum isofs_file_format {
 	isofs_file_normal = 0,
@@ -34,13 +35,17 @@ struct isofs_sb_info {
 	unsigned long s_firstdatazone;
 	unsigned long s_log_zone_size;
 	unsigned long s_max_size;
+	/* Session start in filesystem block units. */
+	sector_t s_session_start;
 	
 	int           s_rock_offset; /* offset of SUSP fields within SU area */
+	s32           s_sbsector;
 	unsigned char s_joliet_level;
 	unsigned char s_mapping;
+	unsigned char s_check;
+	unsigned char s_session;
 	unsigned int  s_high_sierra:1;
 	unsigned int  s_rock:2;
-	unsigned int  s_utf8:1;
 	unsigned int  s_cruft:1; /* Broken disks with high byte of length
 				  * containing junk */
 	unsigned int  s_nocompress:1;
@@ -69,58 +74,88 @@ static inline struct iso_inode_info *ISOFS_I(struct inode *inode)
 	return container_of(inode, struct iso_inode_info, vfs_inode);
 }
 
-static inline int isonum_711(char *p)
+static inline int isonum_711(u8 *p)
 {
-	return *(u8 *)p;
+	return *p;
 }
-static inline int isonum_712(char *p)
+static inline int isonum_712(s8 *p)
 {
-	return *(s8 *)p;
+	return *p;
 }
-static inline unsigned int isonum_721(char *p)
+static inline unsigned int isonum_721(u8 *p)
 {
 	return get_unaligned_le16(p);
 }
-static inline unsigned int isonum_722(char *p)
+static inline unsigned int isonum_722(u8 *p)
 {
 	return get_unaligned_be16(p);
 }
-static inline unsigned int isonum_723(char *p)
+static inline unsigned int isonum_723(u8 *p)
 {
 	/* Ignore bigendian datum due to broken mastering programs */
 	return get_unaligned_le16(p);
 }
-static inline unsigned int isonum_731(char *p)
+static inline unsigned int isonum_731(u8 *p)
 {
 	return get_unaligned_le32(p);
 }
-static inline unsigned int isonum_732(char *p)
+static inline unsigned int isonum_732(u8 *p)
 {
 	return get_unaligned_be32(p);
 }
-static inline unsigned int isonum_733(char *p)
+static inline unsigned int isonum_733(u8 *p)
 {
 	/* Ignore bigendian datum due to broken mastering programs */
 	return get_unaligned_le32(p);
 }
-extern int iso_date(char *, int);
+#define ISO_DATE_HIGH_SIERRA (1 << 0)
+#define ISO_DATE_LONG_FORM (1 << 1)
+struct timespec64 iso_date(u8 *p, int flags);
 
 struct inode;		/* To make gcc happy */
 
-extern int parse_rock_ridge_inode(struct iso_directory_record *, struct inode *);
-extern int get_rock_ridge_filename(struct iso_directory_record *, char *, struct inode *);
+extern int parse_rock_ridge_inode(struct iso_directory_record *, struct inode *, int relocated);
+int get_rock_ridge_filename(struct iso_directory_record *de, char *retname,
+			    int retnamesize, struct inode *inode);
 extern int isofs_name_translate(struct iso_directory_record *, char *, struct inode *);
+bool isofs_dir_record_valid(struct iso_directory_record *de,
+			    unsigned long offset,
+			    unsigned long bufsize);
 
-int get_joliet_filename(struct iso_directory_record *, unsigned char *, struct inode *);
+/*
+ * The longest name the Joliet converter returns, in bytes.  A directory
+ * record is at most 255 bytes long, which leaves room for 111 UTF-16 units
+ * of name, and no character set needs more than three bytes for one unit.
+ */
+#define JOLIET_NAME_MAX \
+	((255 - sizeof(struct iso_directory_record)) / 2 * 3)
+
+int get_joliet_filename(struct iso_directory_record *de, unsigned char *outname,
+			int outsize, struct inode *inode);
 int get_acorn_filename(struct iso_directory_record *, char *, struct inode *);
 
 extern struct dentry *isofs_lookup(struct inode *, struct dentry *, unsigned int flags);
 extern struct buffer_head *isofs_bread(struct inode *, sector_t);
 extern int isofs_get_blocks(struct inode *, sector_t, struct buffer_head **, unsigned long);
 
-extern struct inode *isofs_iget(struct super_block *sb,
-                                unsigned long block,
-                                unsigned long offset);
+struct inode *__isofs_iget(struct super_block *sb,
+			   unsigned long block,
+			   unsigned long offset,
+			   int relocated);
+
+static inline struct inode *isofs_iget(struct super_block *sb,
+				       unsigned long block,
+				       unsigned long offset)
+{
+	return __isofs_iget(sb, block, offset, 0);
+}
+
+static inline struct inode *isofs_iget_reloc(struct super_block *sb,
+					     unsigned long block,
+					     unsigned long offset)
+{
+	return __isofs_iget(sb, block, offset, 1);
+}
 
 /* Because the inode number is no longer relevant to finding the
  * underlying meta-data for an inode, we are free to choose a more
@@ -176,6 +211,9 @@ isofs_normalize_block_and_offset(struct iso_directory_record* de,
 			+ (unsigned long)isonum_711(de->ext_attr_length);
 	}
 }
+
+struct file_kattr;
+int isofs_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
 
 extern const struct inode_operations isofs_dir_inode_operations;
 extern const struct file_operations isofs_dir_operations;

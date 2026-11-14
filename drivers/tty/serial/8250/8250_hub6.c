@@ -1,16 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 2005 Russell King.
  *  Data taken from include/asm-i386/serial.h
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/serial_8250.h>
 
-#define HUB6(card,port)							\
+#include "8250.h"
+
+#define HUB6(card, port)						\
 	{								\
 		.iobase		= 0x302,				\
 		.irq		= 3,					\
@@ -44,13 +43,18 @@ static struct platform_device hub6_device = {
 	},
 };
 
-static int __init hub6_init(void)
+bool hub6_match_port(const struct uart_port *port1, const struct uart_port *port2)
+{
+	return port1->iobase == port2->iobase && port1->hub6 == port2->hub6;
+}
+EXPORT_SYMBOL_GPL(hub6_match_port);
+
+int __init serial8250_hub6_init(void)
 {
 	return platform_device_register(&hub6_device);
 }
 
-module_init(hub6_init);
-
-MODULE_AUTHOR("Russell King");
-MODULE_DESCRIPTION("8250 serial probe module for Hub6 cards");
-MODULE_LICENSE("GPL");
+void serial8250_hub6_exit(void)
+{
+	platform_device_unregister(&hub6_device);
+}

@@ -8,79 +8,8 @@
  */
 
 #include <linux/init.h>
-#include <linux/of_platform.h>
-#include <asm/prom.h>
-
-/* Trigger specific functions */
-#ifdef CONFIG_GPIOLIB
-
-#include <linux/of_gpio.h>
-
-static int handle; /* reset pin handle */
-static unsigned int reset_val;
-
-void of_platform_reset_gpio_probe(void)
-{
-	int ret;
-	handle = of_get_named_gpio(of_find_node_by_path("/"),
-				   "hard-reset-gpios", 0);
-
-	if (!gpio_is_valid(handle)) {
-		pr_info("Skipping unavailable RESET gpio %d (%s)\n",
-				handle, "reset");
-		return;
-	}
-
-	ret = gpio_request(handle, "reset");
-	if (ret < 0) {
-		pr_info("GPIO pin is already allocated\n");
-		return;
-	}
-
-	/* get current setup value */
-	reset_val = gpio_get_value(handle);
-	/* FIXME maybe worth to perform any action */
-	pr_debug("Reset: Gpio output state: 0x%x\n", reset_val);
-
-	/* Setup GPIO as output */
-	ret = gpio_direction_output(handle, 0);
-	if (ret < 0)
-		goto err;
-
-	/* Setup output direction */
-	gpio_set_value(handle, 0);
-
-	pr_info("RESET: Registered gpio device: %d, current val: %d\n",
-							handle, reset_val);
-	return;
-err:
-	gpio_free(handle);
-	return;
-}
-
-
-static void gpio_system_reset(void)
-{
-	if (gpio_is_valid(handle))
-		gpio_set_value(handle, 1 - reset_val);
-	else
-		pr_notice("Reset GPIO unavailable - halting!\n");
-}
-#else
-#define gpio_system_reset() do {} while (0)
-void of_platform_reset_gpio_probe(void)
-{
-	return;
-}
-#endif
-
-void machine_restart(char *cmd)
-{
-	pr_notice("Machine restart...\n");
-	gpio_system_reset();
-	while (1)
-		;
-}
+#include <linux/delay.h>
+#include <linux/reboot.h>
 
 void machine_shutdown(void)
 {
@@ -99,6 +28,37 @@ void machine_halt(void)
 void machine_power_off(void)
 {
 	pr_notice("Machine power off...\n");
+	do_kernel_power_off();
 	while (1)
 		;
 }
+
+void machine_restart(char *cmd)
+{
+	do_kernel_restart(cmd);
+	/* Give the restart hook 1 s to take us down */
+	mdelay(1000);
+	pr_emerg("Reboot failed -- System halted\n");
+	while (1);
+}
+
+#ifdef CONFIG_MB_POWER_OFF_THROUGH_UNALIGNED_PC
+static int unaligned_pc_sys_off(struct sys_off_data *data)
+{
+	__asm__(
+		"bri 1\n"
+	);
+
+	return NOTIFY_DONE;
+}
+
+static int __init register_unaligned_pc_sys_off(void)
+{
+	struct sys_off_handler *sys_off;
+
+	sys_off = register_sys_off_handler(SYS_OFF_MODE_POWER_OFF, SYS_OFF_PRIO_LOW,
+					   unaligned_pc_sys_off, NULL);
+	return PTR_ERR_OR_ZERO(sys_off);
+}
+device_initcall(register_unaligned_pc_sys_off);
+#endif /* CONFIG_MB_POWER_OFF_THROUGH_UNALIGNED_PC */

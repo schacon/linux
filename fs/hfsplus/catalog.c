@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/hfsplus/catalog.c
  *
@@ -38,21 +39,30 @@ int hfsplus_cat_bin_cmp_key(const hfsplus_btree_key *k1,
 	return hfsplus_strcmp(&k1->cat.name, &k2->cat.name);
 }
 
-void hfsplus_cat_build_key(struct super_block *sb, hfsplus_btree_key *key,
-			   u32 parent, struct qstr *str)
+/* Generates key for catalog file/folders record. */
+int hfsplus_cat_build_key(struct super_block *sb,
+		hfsplus_btree_key *key, u32 parent, const struct qstr *str)
 {
-	int len;
+	int len, err;
 
 	key->cat.parent = cpu_to_be32(parent);
-	if (str) {
-		hfsplus_asc2uni(sb, &key->cat.name, HFSPLUS_MAX_STRLEN,
-					str->name, str->len);
-		len = be16_to_cpu(key->cat.name.length);
-	} else {
-		key->cat.name.length = 0;
-		len = 0;
-	}
+	err = hfsplus_asc2uni(sb, &key->cat.name, HFSPLUS_MAX_STRLEN,
+			      str->name, str->len, HFS_REGULAR_NAME);
+	if (unlikely(err < 0))
+		return err;
+
+	len = be16_to_cpu(key->cat.name.length);
 	key->key_len = cpu_to_be16(6 + 2 * len);
+	return 0;
+}
+
+/* Generates key for catalog thread record. */
+void hfsplus_cat_build_key_with_cnid(struct super_block *sb,
+			hfsplus_btree_key *key, u32 parent)
+{
+	key->cat.parent = cpu_to_be32(parent);
+	key->cat.name.length = 0;
+	key->key_len = cpu_to_be16(6);
 }
 
 static void hfsplus_cat_build_key_uni(hfsplus_btree_key *key, u32 parent,
@@ -103,6 +113,8 @@ static int hfsplus_cat_build_record(hfsplus_cat_entry *entry,
 		folder = &entry->folder;
 		memset(folder, 0, sizeof(*folder));
 		folder->type = cpu_to_be16(HFSPLUS_FOLDER);
+		if (test_bit(HFSPLUS_SB_HFSX, &sbi->flags))
+			folder->flags |= cpu_to_be16(HFSPLUS_HAS_FOLDER_COUNT);
 		folder->id = cpu_to_be32(inode->i_ino);
 		HFSPLUS_I(inode)->create_date =
 			folder->create_date =
@@ -163,13 +175,18 @@ static int hfsplus_cat_build_record(hfsplus_cat_entry *entry,
 
 static int hfsplus_fill_cat_thread(struct super_block *sb,
 				   hfsplus_cat_entry *entry, int type,
-				   u32 parentid, struct qstr *str)
+				   u32 parentid, const struct qstr *str)
 {
+	int err;
+
 	entry->type = cpu_to_be16(type);
 	entry->thread.reserved = 0;
 	entry->thread.parentID = cpu_to_be32(parentid);
-	hfsplus_asc2uni(sb, &entry->thread.nodeName, HFSPLUS_MAX_STRLEN,
-				str->name, str->len);
+	err = hfsplus_asc2uni(sb, &entry->thread.nodeName, HFSPLUS_MAX_STRLEN,
+				str->name, str->len, HFS_REGULAR_NAME);
+	if (unlikely(err < 0))
+		return err;
+
 	return 10 + be16_to_cpu(entry->thread.nodeName.length) * 2;
 }
 
@@ -177,17 +194,17 @@ static int hfsplus_fill_cat_thread(struct super_block *sb,
 int hfsplus_find_cat(struct super_block *sb, u32 cnid,
 		     struct hfs_find_data *fd)
 {
-	hfsplus_cat_entry tmp;
+	hfsplus_cat_entry tmp = {0};
 	int err;
 	u16 type;
 
-	hfsplus_cat_build_key(sb, fd->search_key, cnid, NULL);
-	err = hfs_brec_read(fd, &tmp, sizeof(hfsplus_cat_entry));
+	hfsplus_cat_build_key_with_cnid(sb, fd->search_key, cnid);
+	err = hfsplus_brec_read_cat(fd, &tmp);
 	if (err)
 		return err;
 
 	type = be16_to_cpu(tmp.type);
-	if (type != HFSPLUS_FOLDER_THREAD && type != HFSPLUS_FILE_THREAD) {
+	if (!is_hfs_thread_record_type(type)) {
 		pr_err("found bad thread record in catalog\n");
 		return -EIO;
 	}
@@ -203,8 +220,38 @@ int hfsplus_find_cat(struct super_block *sb, u32 cnid,
 	return hfs_brec_find(fd, hfs_find_rec_by_key);
 }
 
+static void hfsplus_subfolders_inc(struct inode *dir)
+{
+	struct hfsplus_sb_info *sbi = HFSPLUS_SB(dir->i_sb);
+
+	if (test_bit(HFSPLUS_SB_HFSX, &sbi->flags)) {
+		/*
+		 * Increment subfolder count. Note, the value is only meaningful
+		 * for folders with HFSPLUS_HAS_FOLDER_COUNT flag set.
+		 */
+		HFSPLUS_I(dir)->subfolders++;
+	}
+}
+
+static void hfsplus_subfolders_dec(struct inode *dir)
+{
+	struct hfsplus_sb_info *sbi = HFSPLUS_SB(dir->i_sb);
+
+	if (test_bit(HFSPLUS_SB_HFSX, &sbi->flags)) {
+		/*
+		 * Decrement subfolder count. Note, the value is only meaningful
+		 * for folders with HFSPLUS_HAS_FOLDER_COUNT flag set.
+		 *
+		 * Check for zero. Some subfolders may have been created
+		 * by an implementation ignorant of this counter.
+		 */
+		if (HFSPLUS_I(dir)->subfolders)
+			HFSPLUS_I(dir)->subfolders--;
+	}
+}
+
 int hfsplus_create_cat(u32 cnid, struct inode *dir,
-		struct qstr *str, struct inode *inode)
+		const struct qstr *str, struct inode *inode)
 {
 	struct super_block *sb = dir->i_sb;
 	struct hfs_find_data fd;
@@ -212,17 +259,30 @@ int hfsplus_create_cat(u32 cnid, struct inode *dir,
 	int entry_size;
 	int err;
 
-	hfs_dbg(CAT_MOD, "create_cat: %s,%u(%d)\n",
+	hfs_dbg("name %s, cnid %u, i_nlink %d\n",
 		str->name, cnid, inode->i_nlink);
 	err = hfs_find_init(HFSPLUS_SB(sb)->cat_tree, &fd);
 	if (err)
 		return err;
 
-	hfsplus_cat_build_key(sb, fd.search_key, cnid, NULL);
+	/*
+	 * Fail early and avoid ENOSPC during the btree operations. We may
+	 * have to split the root node at most once.
+	 */
+	err = hfs_bmap_reserve(fd.tree, 2 * fd.tree->depth);
+	if (err)
+		goto err2;
+
+	hfsplus_cat_build_key_with_cnid(sb, fd.search_key, cnid);
 	entry_size = hfsplus_fill_cat_thread(sb, &entry,
 		S_ISDIR(inode->i_mode) ?
 			HFSPLUS_FOLDER_THREAD : HFSPLUS_FILE_THREAD,
 		dir->i_ino, str);
+	if (unlikely(entry_size < 0)) {
+		err = entry_size;
+		goto err2;
+	}
+
 	err = hfs_brec_find(&fd, hfs_find_rec_by_key);
 	if (err != -ENOENT) {
 		if (!err)
@@ -233,7 +293,10 @@ int hfsplus_create_cat(u32 cnid, struct inode *dir,
 	if (err)
 		goto err2;
 
-	hfsplus_cat_build_key(sb, fd.search_key, dir->i_ino, str);
+	err = hfsplus_cat_build_key(sb, fd.search_key, dir->i_ino, str);
+	if (unlikely(err))
+		goto err1;
+
 	entry_size = hfsplus_cat_build_record(&entry, cnid, inode);
 	err = hfs_brec_find(&fd, hfs_find_rec_by_key);
 	if (err != -ENOENT) {
@@ -247,14 +310,17 @@ int hfsplus_create_cat(u32 cnid, struct inode *dir,
 		goto err1;
 
 	dir->i_size++;
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME_SEC;
+	if (S_ISDIR(inode->i_mode))
+		hfsplus_subfolders_inc(dir);
+	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
+	hfsplus_mark_inode_dirty(HFSPLUS_CAT_TREE_I(sb), HFSPLUS_I_CAT_DIRTY);
 	hfsplus_mark_inode_dirty(dir, HFSPLUS_I_CAT_DIRTY);
 
 	hfs_find_exit(&fd);
 	return 0;
 
 err1:
-	hfsplus_cat_build_key(sb, fd.search_key, cnid, NULL);
+	hfsplus_cat_build_key_with_cnid(sb, fd.search_key, cnid);
 	if (!hfs_brec_find(&fd, hfs_find_rec_by_key))
 		hfs_brec_remove(&fd);
 err2:
@@ -262,40 +328,49 @@ err2:
 	return err;
 }
 
-int hfsplus_delete_cat(u32 cnid, struct inode *dir, struct qstr *str)
+int hfsplus_delete_cat(u32 cnid, struct inode *dir, const struct qstr *str)
 {
 	struct super_block *sb = dir->i_sb;
 	struct hfs_find_data fd;
 	struct hfsplus_fork_raw fork;
-	struct list_head *pos;
 	int err, off;
 	u16 type;
 
-	hfs_dbg(CAT_MOD, "delete_cat: %s,%u\n", str ? str->name : NULL, cnid);
+	hfs_dbg("name %s, cnid %u\n", str ? str->name : NULL, cnid);
 	err = hfs_find_init(HFSPLUS_SB(sb)->cat_tree, &fd);
 	if (err)
 		return err;
 
-	if (!str) {
-		int len;
+	/*
+	 * Fail early and avoid ENOSPC during the btree operations. We may
+	 * have to split the root node at most once.
+	 */
+	err = hfs_bmap_reserve(fd.tree, 2 * (int)fd.tree->depth - 2);
+	if (err)
+		goto out;
 
-		hfsplus_cat_build_key(sb, fd.search_key, cnid, NULL);
-		err = hfs_brec_find(&fd, hfs_find_rec_by_key);
+	if (!str) {
+		hfsplus_cat_entry entry = {0};
+
+		hfsplus_cat_build_key_with_cnid(sb, fd.search_key, cnid);
+		err = hfsplus_brec_read_cat(&fd, &entry);
 		if (err)
 			goto out;
 
-		off = fd.entryoffset +
-			offsetof(struct hfsplus_cat_thread, nodeName);
-		fd.search_key->cat.parent = cpu_to_be32(dir->i_ino);
-		hfs_bnode_read(fd.bnode,
-			&fd.search_key->cat.name.length, off, 2);
-		len = be16_to_cpu(fd.search_key->cat.name.length) * 2;
-		hfs_bnode_read(fd.bnode,
-			&fd.search_key->cat.name.unicode,
-			off + 2, len);
-		fd.search_key->key_len = cpu_to_be16(6 + len);
-	} else
-		hfsplus_cat_build_key(sb, fd.search_key, dir->i_ino, str);
+		type = be16_to_cpu(entry.type);
+		if (!is_hfs_thread_record_type(type)) {
+			pr_err("found bad thread record in catalog\n");
+			err = -EIO;
+			goto out;
+		}
+
+		hfsplus_cat_build_key_uni(fd.search_key, dir->i_ino,
+					  &entry.thread.nodeName);
+	} else {
+		err = hfsplus_cat_build_key(sb, fd.search_key, dir->i_ino, str);
+		if (unlikely(err))
+			goto out;
+	}
 
 	err = hfs_brec_find(&fd, hfs_find_rec_by_key);
 	if (err)
@@ -315,18 +390,11 @@ int hfsplus_delete_cat(u32 cnid, struct inode *dir, struct qstr *str)
 		hfsplus_free_fork(sb, cnid, &fork, HFSPLUS_TYPE_RSRC);
 	}
 
-	list_for_each(pos, &HFSPLUS_I(dir)->open_dir_list) {
-		struct hfsplus_readdir_data *rd =
-			list_entry(pos, struct hfsplus_readdir_data, list);
-		if (fd.tree->keycmp(fd.search_key, (void *)&rd->key) < 0)
-			rd->file->f_pos--;
-	}
-
 	err = hfs_brec_remove(&fd);
 	if (err)
 		goto out;
 
-	hfsplus_cat_build_key(sb, fd.search_key, cnid, NULL);
+	hfsplus_cat_build_key_with_cnid(sb, fd.search_key, cnid);
 	err = hfs_brec_find(&fd, hfs_find_rec_by_key);
 	if (err)
 		goto out;
@@ -336,7 +404,10 @@ int hfsplus_delete_cat(u32 cnid, struct inode *dir, struct qstr *str)
 		goto out;
 
 	dir->i_size--;
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME_SEC;
+	if (type == HFSPLUS_FOLDER)
+		hfsplus_subfolders_dec(dir);
+	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
+	hfsplus_mark_inode_dirty(HFSPLUS_CAT_TREE_I(sb), HFSPLUS_I_CAT_DIRTY);
 	hfsplus_mark_inode_dirty(dir, HFSPLUS_I_CAT_DIRTY);
 
 	if (type == HFSPLUS_FILE || type == HFSPLUS_FOLDER) {
@@ -351,8 +422,8 @@ out:
 }
 
 int hfsplus_rename_cat(u32 cnid,
-		       struct inode *src_dir, struct qstr *src_name,
-		       struct inode *dst_dir, struct qstr *dst_name)
+		       struct inode *src_dir, const struct qstr *src_name,
+		       struct inode *dst_dir, const struct qstr *dst_name)
 {
 	struct super_block *sb = src_dir->i_sb;
 	struct hfs_find_data src_fd, dst_fd;
@@ -360,7 +431,7 @@ int hfsplus_rename_cat(u32 cnid,
 	int entry_size, type;
 	int err;
 
-	hfs_dbg(CAT_MOD, "rename_cat: %u - %lu,%s - %lu,%s\n",
+	hfs_dbg("cnid %u - ino %llu, name %s - ino %llu, name %s\n",
 		cnid, src_dir->i_ino, src_name->name,
 		dst_dir->i_ino, dst_name->name);
 	err = hfs_find_init(HFSPLUS_SB(sb)->cat_tree, &src_fd);
@@ -368,8 +439,20 @@ int hfsplus_rename_cat(u32 cnid,
 		return err;
 	dst_fd = src_fd;
 
+	/*
+	 * Fail early and avoid ENOSPC during the btree operations. We may
+	 * have to split the root node at most twice.
+	 */
+	err = hfs_bmap_reserve(src_fd.tree, 4 * (int)src_fd.tree->depth - 1);
+	if (err)
+		goto out;
+
 	/* find the old dir entry and read the data */
-	hfsplus_cat_build_key(sb, src_fd.search_key, src_dir->i_ino, src_name);
+	err = hfsplus_cat_build_key(sb, src_fd.search_key,
+			src_dir->i_ino, src_name);
+	if (unlikely(err))
+		goto out;
+
 	err = hfs_brec_find(&src_fd, hfs_find_rec_by_key);
 	if (err)
 		goto out;
@@ -380,9 +463,14 @@ int hfsplus_rename_cat(u32 cnid,
 
 	hfs_bnode_read(src_fd.bnode, &entry, src_fd.entryoffset,
 				src_fd.entrylength);
+	type = be16_to_cpu(entry.type);
 
 	/* create new dir entry with the data from the old entry */
-	hfsplus_cat_build_key(sb, dst_fd.search_key, dst_dir->i_ino, dst_name);
+	err = hfsplus_cat_build_key(sb, dst_fd.search_key,
+			dst_dir->i_ino, dst_name);
+	if (unlikely(err))
+		goto out;
+
 	err = hfs_brec_find(&dst_fd, hfs_find_rec_by_key);
 	if (err != -ENOENT) {
 		if (!err)
@@ -394,10 +482,16 @@ int hfsplus_rename_cat(u32 cnid,
 	if (err)
 		goto out;
 	dst_dir->i_size++;
-	dst_dir->i_mtime = dst_dir->i_ctime = CURRENT_TIME_SEC;
+	if (type == HFSPLUS_FOLDER)
+		hfsplus_subfolders_inc(dst_dir);
+	inode_set_mtime_to_ts(dst_dir, inode_set_ctime_current(dst_dir));
 
 	/* finally remove the old entry */
-	hfsplus_cat_build_key(sb, src_fd.search_key, src_dir->i_ino, src_name);
+	err = hfsplus_cat_build_key(sb, src_fd.search_key,
+			src_dir->i_ino, src_name);
+	if (unlikely(err))
+		goto out;
+
 	err = hfs_brec_find(&src_fd, hfs_find_rec_by_key);
 	if (err)
 		goto out;
@@ -405,10 +499,12 @@ int hfsplus_rename_cat(u32 cnid,
 	if (err)
 		goto out;
 	src_dir->i_size--;
-	src_dir->i_mtime = src_dir->i_ctime = CURRENT_TIME_SEC;
+	if (type == HFSPLUS_FOLDER)
+		hfsplus_subfolders_dec(src_dir);
+	inode_set_mtime_to_ts(src_dir, inode_set_ctime_current(src_dir));
 
 	/* remove old thread entry */
-	hfsplus_cat_build_key(sb, src_fd.search_key, cnid, NULL);
+	hfsplus_cat_build_key_with_cnid(sb, src_fd.search_key, cnid);
 	err = hfs_brec_find(&src_fd, hfs_find_rec_by_key);
 	if (err)
 		goto out;
@@ -418,9 +514,14 @@ int hfsplus_rename_cat(u32 cnid,
 		goto out;
 
 	/* create new thread entry */
-	hfsplus_cat_build_key(sb, dst_fd.search_key, cnid, NULL);
+	hfsplus_cat_build_key_with_cnid(sb, dst_fd.search_key, cnid);
 	entry_size = hfsplus_fill_cat_thread(sb, &entry, type,
 		dst_dir->i_ino, dst_name);
+	if (unlikely(entry_size < 0)) {
+		err = entry_size;
+		goto out;
+	}
+
 	err = hfs_brec_find(&dst_fd, hfs_find_rec_by_key);
 	if (err != -ENOENT) {
 		if (!err)
@@ -429,6 +530,7 @@ int hfsplus_rename_cat(u32 cnid,
 	}
 	err = hfs_brec_insert(&dst_fd, &entry, entry_size);
 
+	hfsplus_mark_inode_dirty(HFSPLUS_CAT_TREE_I(sb), HFSPLUS_I_CAT_DIRTY);
 	hfsplus_mark_inode_dirty(dst_dir, HFSPLUS_I_CAT_DIRTY);
 	hfsplus_mark_inode_dirty(src_dir, HFSPLUS_I_CAT_DIRTY);
 out:

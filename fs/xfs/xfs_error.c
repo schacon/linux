@@ -1,150 +1,238 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2000-2001,2005 Silicon Graphics, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-#include "xfs.h"
+#include "xfs_platform.h"
+#include "xfs_shared.h"
+#include "xfs_format.h"
 #include "xfs_fs.h"
-#include "xfs_types.h"
-#include "xfs_log.h"
-#include "xfs_trans.h"
-#include "xfs_sb.h"
-#include "xfs_ag.h"
+#include "xfs_log_format.h"
+#include "xfs_trans_resv.h"
 #include "xfs_mount.h"
-#include "xfs_bmap_btree.h"
-#include "xfs_dinode.h"
-#include "xfs_inode.h"
-#include "xfs_utils.h"
 #include "xfs_error.h"
+#include "xfs_sysfs.h"
+#include "xfs_inode.h"
 
 #ifdef DEBUG
 
-int	xfs_etrap[XFS_ERROR_NTRAP] = {
-	0,
+#define XFS_ERRTAG(_tag, _name, _default) \
+	[XFS_ERRTAG_##_tag]	= (_default),
+#include "xfs_errortag.h"
+static const unsigned int xfs_errortag_random_default[] = { XFS_ERRTAGS };
+#undef XFS_ERRTAG
+
+#define XFS_ERRTAG(_tag, _name, _default) \
+        [XFS_ERRTAG_##_tag]	=  __stringify(_name),
+#include "xfs_errortag.h"
+static const char *xfs_errortag_names[] = { XFS_ERRTAGS };
+#undef XFS_ERRTAG
+
+struct xfs_errortag_attr {
+	struct attribute	attr;
+	unsigned int		tag;
+};
+
+static inline struct xfs_errortag_attr *
+to_attr(struct attribute *attr)
+{
+	return container_of(attr, struct xfs_errortag_attr, attr);
+}
+
+static inline struct xfs_mount *
+to_mp(struct kobject *kobject)
+{
+	struct xfs_kobj *kobj = to_kobj(kobject);
+
+	return container_of(kobj, struct xfs_mount, m_errortag_kobj);
+}
+
+STATIC ssize_t
+xfs_errortag_attr_store(
+	struct kobject		*kobject,
+	struct attribute	*attr,
+	const char		*buf,
+	size_t			count)
+{
+	struct xfs_mount	*mp = to_mp(kobject);
+	unsigned int		error_tag = to_attr(attr)->tag;
+	unsigned int		val;
+	int			ret;
+
+	if (strcmp(buf, "default") == 0) {
+		val = xfs_errortag_random_default[error_tag];
+	} else {
+		ret = kstrtouint(buf, 0, &val);
+		if (ret)
+			return ret;
+	}
+
+	WRITE_ONCE(mp->m_errortag[error_tag], val);
+	return count;
+}
+
+STATIC ssize_t
+xfs_errortag_attr_show(
+	struct kobject		*kobject,
+	struct attribute	*attr,
+	char			*buf)
+{
+	struct xfs_mount	*mp = to_mp(kobject);
+
+	return snprintf(buf, PAGE_SIZE, "%u\n",
+			READ_ONCE(mp->m_errortag[to_attr(attr)->tag]));
+}
+
+static const struct sysfs_ops xfs_errortag_sysfs_ops = {
+	.show = xfs_errortag_attr_show,
+	.store = xfs_errortag_attr_store,
+};
+
+#define XFS_ERRTAG(_tag, _name, _default)				\
+static struct xfs_errortag_attr xfs_errortag_attr_##_name = {		\
+	.attr = {.name = __stringify(_name),				\
+		 .mode = VERIFY_OCTAL_PERMISSIONS(S_IWUSR | S_IRUGO) },	\
+	.tag	= XFS_ERRTAG_##_tag,					\
+};
+#include "xfs_errortag.h"
+XFS_ERRTAGS
+#undef XFS_ERRTAG
+
+#define XFS_ERRTAG(_tag, _name, _default) \
+	&xfs_errortag_attr_##_name.attr,
+#include "xfs_errortag.h"
+static struct attribute *xfs_errortag_attrs[] = {
+	XFS_ERRTAGS
+	NULL
+};
+ATTRIBUTE_GROUPS(xfs_errortag);
+#undef XFS_ERRTAG
+
+/* -1 because XFS_ERRTAG_DROP_WRITES got removed, + 1 for NULL termination */
+static_assert(ARRAY_SIZE(xfs_errortag_attrs) == XFS_ERRTAG_MAX);
+
+static const struct kobj_type xfs_errortag_ktype = {
+	.release = xfs_sysfs_release,
+	.sysfs_ops = &xfs_errortag_sysfs_ops,
+	.default_groups = xfs_errortag_groups,
 };
 
 int
-xfs_error_trap(int e)
+xfs_errortag_init(
+	struct xfs_mount	*mp)
 {
-	int i;
-
-	if (!e)
-		return 0;
-	for (i = 0; i < XFS_ERROR_NTRAP; i++) {
-		if (xfs_etrap[i] == 0)
-			break;
-		if (e != xfs_etrap[i])
-			continue;
-		xfs_notice(NULL, "%s: error %d", __func__, e);
-		BUG();
-		break;
-	}
-	return e;
+	return xfs_sysfs_init(&mp->m_errortag_kobj, &xfs_errortag_ktype,
+				&mp->m_kobj, "errortag");
 }
 
-int	xfs_etest[XFS_NUM_INJECT_ERROR];
-int64_t	xfs_etest_fsid[XFS_NUM_INJECT_ERROR];
-char *	xfs_etest_fsname[XFS_NUM_INJECT_ERROR];
-int	xfs_error_test_active;
+void
+xfs_errortag_del(
+	struct xfs_mount	*mp)
+{
+	xfs_sysfs_del(&mp->m_errortag_kobj);
+}
+
+bool
+xfs_errortag_test(
+	struct xfs_mount	*mp,
+	const char		*file,
+	int			line,
+	unsigned int		error_tag)
+{
+	unsigned int		randfactor;
+
+	randfactor = READ_ONCE(mp->m_errortag[error_tag]);
+	if (!randfactor || get_random_u32_below(randfactor))
+		return false;
+
+	xfs_warn_ratelimited(mp,
+"Injecting error at file %s, line %d, on filesystem \"%s\"",
+			file, line, mp->m_super->s_id);
+	return true;
+}
+
+void
+xfs_errortag_delay(
+	struct xfs_mount	*mp,
+	const char		*file,
+	int			line,
+	unsigned int		error_tag)
+{
+	unsigned int		delay = READ_ONCE(mp->m_errortag[error_tag]);
+
+	might_sleep();
+
+	if (!delay)
+		return;
+
+	xfs_warn_ratelimited(mp,
+"Injecting %ums delay at file %s, line %d, on filesystem \"%s\"",
+		delay, file, line,
+		mp->m_super->s_id);
+	mdelay(delay);
+}
 
 int
-xfs_error_test(int error_tag, int *fsidp, char *expression,
-	       int line, char *file, unsigned long randfactor)
+xfs_errortag_add(
+	struct xfs_mount	*mp,
+	unsigned int		error_tag)
 {
-	int i;
-	int64_t fsid;
+	BUILD_BUG_ON(ARRAY_SIZE(xfs_errortag_random_default) != XFS_ERRTAG_MAX);
 
-	if (prandom_u32() % randfactor)
-		return 0;
+	if (error_tag >= XFS_ERRTAG_MAX)
+		return -EINVAL;
 
-	memcpy(&fsid, fsidp, sizeof(xfs_fsid_t));
-
-	for (i = 0; i < XFS_NUM_INJECT_ERROR; i++)  {
-		if (xfs_etest[i] == error_tag && xfs_etest_fsid[i] == fsid) {
-			xfs_warn(NULL,
-	"Injecting error (%s) at file %s, line %d, on filesystem \"%s\"",
-				expression, file, line, xfs_etest_fsname[i]);
-			return 1;
-		}
+	/* Error out removed injection types */
+	switch (error_tag) {
+	case XFS_ERRTAG_DROP_WRITES:
+		return -EINVAL;
+	default:
+		break;
 	}
 
+	WRITE_ONCE(mp->m_errortag[error_tag],
+		   xfs_errortag_random_default[error_tag]);
 	return 0;
 }
 
 int
-xfs_errortag_add(int error_tag, xfs_mount_t *mp)
+xfs_errortag_add_name(
+	struct xfs_mount	*mp,
+	const char		*tag_name)
 {
-	int i;
-	int len;
-	int64_t fsid;
+	unsigned int		i;
 
-	memcpy(&fsid, mp->m_fixedfsid, sizeof(xfs_fsid_t));
-
-	for (i = 0; i < XFS_NUM_INJECT_ERROR; i++)  {
-		if (xfs_etest_fsid[i] == fsid && xfs_etest[i] == error_tag) {
-			xfs_warn(mp, "error tag #%d on", error_tag);
-			return 0;
-		}
+	for (i = 0; i < XFS_ERRTAG_MAX; i++) {
+		if (xfs_errortag_names[i] &&
+		    !strcmp(xfs_errortag_names[i], tag_name))
+			return xfs_errortag_add(mp, i);
 	}
 
-	for (i = 0; i < XFS_NUM_INJECT_ERROR; i++)  {
-		if (xfs_etest[i] == 0) {
-			xfs_warn(mp, "Turned on XFS error tag #%d",
-				error_tag);
-			xfs_etest[i] = error_tag;
-			xfs_etest_fsid[i] = fsid;
-			len = strlen(mp->m_fsname);
-			xfs_etest_fsname[i] = kmem_alloc(len + 1, KM_SLEEP);
-			strcpy(xfs_etest_fsname[i], mp->m_fsname);
-			xfs_error_test_active++;
-			return 0;
-		}
+	return -EINVAL;
+}
+
+void
+xfs_errortag_copy(
+	struct xfs_mount	*dst_mp,
+	struct xfs_mount	*src_mp)
+{
+	unsigned int		val, i;
+
+	for (i = 0; i < XFS_ERRTAG_MAX; i++) {
+		val = READ_ONCE(src_mp->m_errortag[i]);
+		if (val)
+			WRITE_ONCE(dst_mp->m_errortag[i], val);
 	}
-
-	xfs_warn(mp, "error tag overflow, too many turned on");
-
-	return 1;
 }
 
 int
-xfs_errortag_clearall(xfs_mount_t *mp, int loud)
+xfs_errortag_clearall(
+	struct xfs_mount	*mp)
 {
-	int64_t fsid;
-	int cleared = 0;
-	int i;
+	unsigned int		i;
 
-	memcpy(&fsid, mp->m_fixedfsid, sizeof(xfs_fsid_t));
-
-
-	for (i = 0; i < XFS_NUM_INJECT_ERROR; i++) {
-		if ((fsid == 0LL || xfs_etest_fsid[i] == fsid) &&
-		     xfs_etest[i] != 0) {
-			cleared = 1;
-			xfs_warn(mp, "Clearing XFS error tag #%d",
-				xfs_etest[i]);
-			xfs_etest[i] = 0;
-			xfs_etest_fsid[i] = 0LL;
-			kmem_free(xfs_etest_fsname[i]);
-			xfs_etest_fsname[i] = NULL;
-			xfs_error_test_active--;
-		}
-	}
-
-	if (loud || cleared)
-		xfs_warn(mp, "Cleared all XFS error tags for filesystem");
-
+	for (i = 0; i < XFS_ERRTAG_MAX; i++)
+		WRITE_ONCE(mp->m_errortag[i], 0);
 	return 0;
 }
 #endif /* DEBUG */
@@ -153,16 +241,21 @@ void
 xfs_error_report(
 	const char		*tag,
 	int			level,
+	int			error,
 	struct xfs_mount	*mp,
 	const char		*filename,
 	int			linenum,
-	inst_t			*ra)
+	xfs_failaddr_t		failaddr)
 {
 	if (level <= xfs_error_level) {
-		xfs_alert_tag(mp, XFS_PTAG_ERROR_REPORT,
-		"Internal error %s at line %d of file %s.  Caller 0x%p\n",
-			    tag, linenum, filename, ra);
-
+		if (error)
+			xfs_alert_tag(mp, XFS_PTAG_ERROR_REPORT,
+"Internal error %s (%d) at line %d of file %s.  Caller %pS",
+				tag, error, linenum, filename, failaddr);
+		else
+			xfs_alert_tag(mp, XFS_PTAG_ERROR_REPORT,
+"Internal error %s at line %d of file %s.  Caller %pS",
+				tag, linenum, filename, failaddr);
 		xfs_stack_trace();
 	}
 }
@@ -172,13 +265,127 @@ xfs_corruption_error(
 	const char		*tag,
 	int			level,
 	struct xfs_mount	*mp,
-	void			*p,
+	const void		*buf,
+	size_t			bufsize,
 	const char		*filename,
 	int			linenum,
-	inst_t			*ra)
+	xfs_failaddr_t		failaddr)
 {
-	if (level <= xfs_error_level)
-		xfs_hex_dump(p, 64);
-	xfs_error_report(tag, level, mp, filename, linenum, ra);
+	if (buf && level <= xfs_error_level)
+		xfs_hex_dump(buf, bufsize);
+	xfs_error_report(tag, level, -EFSCORRUPTED, mp,
+			 filename, linenum, failaddr);
 	xfs_alert(mp, "Corruption detected. Unmount and run xfs_repair");
+}
+
+/*
+ * Complain about the kinds of metadata corruption that we can't detect from a
+ * verifier, such as incorrect inter-block relationship data.  Does not set
+ * bp->b_error.
+ *
+ * Call xfs_buf_mark_corrupt, not this function.
+ */
+void
+xfs_buf_corruption_error(
+	struct xfs_buf		*bp,
+	xfs_failaddr_t		fa)
+{
+	struct xfs_mount	*mp = bp->b_mount;
+
+	xfs_alert_tag(mp, XFS_PTAG_VERIFIER_ERROR,
+		  "Metadata corruption detected at %pS, %s block 0x%llx",
+		  fa, bp->b_ops->name, xfs_buf_daddr(bp));
+
+	xfs_alert(mp, "Unmount and run xfs_repair");
+
+	if (xfs_error_level >= XFS_ERRLEVEL_HIGH)
+		xfs_stack_trace();
+}
+
+/*
+ * Warnings specifically for verifier errors.  Differentiate CRC vs. invalid
+ * values, and omit the stack trace unless the error level is tuned high.
+ */
+void
+xfs_buf_verifier_error(
+	struct xfs_buf		*bp,
+	int			error,
+	const char		*name,
+	const void		*buf,
+	size_t			bufsz,
+	xfs_failaddr_t		failaddr)
+{
+	struct xfs_mount	*mp = bp->b_mount;
+	xfs_failaddr_t		fa;
+	int			sz;
+
+	fa = failaddr ? failaddr : __return_address;
+	__xfs_buf_ioerror(bp, error, fa);
+
+	xfs_alert_tag(mp, XFS_PTAG_VERIFIER_ERROR,
+		  "Metadata %s detected at %pS, %s block 0x%llx %s",
+		  bp->b_error == -EFSBADCRC ? "CRC error" : "corruption",
+		  fa, bp->b_ops->name, xfs_buf_daddr(bp), name);
+
+	xfs_alert(mp, "Unmount and run xfs_repair");
+
+	if (xfs_error_level >= XFS_ERRLEVEL_LOW) {
+		sz = min_t(size_t, XFS_CORRUPTION_DUMP_LEN, bufsz);
+		xfs_alert(mp, "First %d bytes of corrupted metadata buffer:",
+				sz);
+		xfs_hex_dump(buf, sz);
+	}
+
+	if (xfs_error_level >= XFS_ERRLEVEL_HIGH)
+		xfs_stack_trace();
+}
+
+/*
+ * Warnings specifically for verifier errors.  Differentiate CRC vs. invalid
+ * values, and omit the stack trace unless the error level is tuned high.
+ */
+void
+xfs_verifier_error(
+	struct xfs_buf		*bp,
+	int			error,
+	xfs_failaddr_t		failaddr)
+{
+	return xfs_buf_verifier_error(bp, error, "", xfs_buf_offset(bp, 0),
+			XFS_CORRUPTION_DUMP_LEN, failaddr);
+}
+
+/*
+ * Warnings for inode corruption problems.  Don't bother with the stack
+ * trace unless the error level is turned up high.
+ */
+void
+xfs_inode_verifier_error(
+	struct xfs_inode	*ip,
+	int			error,
+	const char		*name,
+	const void		*buf,
+	size_t			bufsz,
+	xfs_failaddr_t		failaddr)
+{
+	struct xfs_mount	*mp = ip->i_mount;
+	xfs_failaddr_t		fa;
+	int			sz;
+
+	fa = failaddr ? failaddr : __return_address;
+
+	xfs_alert(mp, "Metadata %s detected at %pS, inode 0x%llx %s",
+		  error == -EFSBADCRC ? "CRC error" : "corruption",
+		  fa, I_INO(ip), name);
+
+	xfs_alert(mp, "Unmount and run xfs_repair");
+
+	if (buf && xfs_error_level >= XFS_ERRLEVEL_LOW) {
+		sz = min_t(size_t, XFS_CORRUPTION_DUMP_LEN, bufsz);
+		xfs_alert(mp, "First %d bytes of corrupted metadata buffer:",
+				sz);
+		xfs_hex_dump(buf, sz);
+	}
+
+	if (xfs_error_level >= XFS_ERRLEVEL_HIGH)
+		xfs_stack_trace();
 }

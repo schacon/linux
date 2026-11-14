@@ -27,16 +27,13 @@
  */
 
 #include <linux/stddef.h>
-#include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/irq.h>
+#include <linux/irqdomain.h>
 
 #include <asm/immap_cpm2.h>
-#include <asm/mpc8260.h>
 #include <asm/io.h>
-#include <asm/prom.h>
-#include <asm/fs_pd.h>
 
 #include "cpm2_pic.h"
 
@@ -156,9 +153,9 @@ static int cpm2_set_irq_type(struct irq_data *d, unsigned int flow_type)
 
 	irqd_set_trigger_type(d, flow_type);
 	if (flow_type & IRQ_TYPE_LEVEL_LOW)
-		__irq_set_handler_locked(d->irq, handle_level_irq);
+		irq_set_handler_locked(d, handle_level_irq);
 	else
-		__irq_set_handler_locked(d->irq, handle_edge_irq);
+		irq_set_handler_locked(d, handle_edge_irq);
 
 	/* internal IRQ senses are LEVEL_LOW
 	 * EXT IRQ and Port C IRQ senses are programmable
@@ -210,7 +207,7 @@ unsigned int cpm2_get_irq(void)
 
 	if (irq == 0)
 		return(-1);
-	return irq_linear_revmap(cpm2_pic_host, irq);
+	return irq_find_mapping(cpm2_pic_host, irq);
 }
 
 static int cpm2_pic_host_map(struct irq_domain *h, unsigned int virq,
@@ -232,7 +229,7 @@ void cpm2_pic_init(struct device_node *node)
 {
 	int i;
 
-	cpm2_intctl = cpm2_map(im_intctl);
+	cpm2_intctl = &cpm2_immr->im_intctl;
 
 	/* Clear the CPM IRQ controller, in case it has any bits set
 	 * from the bootloader
@@ -262,7 +259,8 @@ void cpm2_pic_init(struct device_node *node)
 	out_be32(&cpm2_intctl->ic_scprrl, 0x05309770);
 
 	/* create a legacy host */
-	cpm2_pic_host = irq_domain_add_linear(node, 64, &cpm2_pic_host_ops, NULL);
+	cpm2_pic_host = irq_domain_create_linear(of_fwnode_handle(node), 64,
+						 &cpm2_pic_host_ops, NULL);
 	if (cpm2_pic_host == NULL) {
 		printk(KERN_ERR "CPM2 PIC: failed to allocate irq host!\n");
 		return;

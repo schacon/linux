@@ -1,7 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef ARCH_X86_REALMODE_RM_REALMODE_H
 #define ARCH_X86_REALMODE_RM_REALMODE_H
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 
 /*
  * 16-bit ljmpw to the real_mode_seg
@@ -11,7 +12,7 @@
  */
 #define LJMPW_RM(to)	.byte 0xea ; .word (to), real_mode_seg
 
-#endif /* __ASSEMBLY__ */
+#endif /* __ASSEMBLER__ */
 
 /*
  * Signature at the end of the realmode region

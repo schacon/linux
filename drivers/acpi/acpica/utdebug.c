@@ -1,61 +1,25 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
- * Module Name: utdebug - Debug print routines
+ * Module Name: utdebug - Debug print/trace routines
+ *
+ * Copyright (C) 2000 - 2026, Intel Corp.
  *
  *****************************************************************************/
 
-/*
- * Copyright (C) 2000 - 2013, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
+#define EXPORT_ACPI_INTERFACES
 
-#include <linux/export.h>
 #include <acpi/acpi.h>
 #include "accommon.h"
+#include "acinterp.h"
 
 #define _COMPONENT          ACPI_UTILITIES
 ACPI_MODULE_NAME("utdebug")
 
 #ifdef ACPI_DEBUG_OUTPUT
-static acpi_thread_id acpi_gbl_prev_thread_id = (acpi_thread_id) 0xFFFFFFFF;
-static char *acpi_gbl_fn_entry_str = "----Entry";
-static char *acpi_gbl_fn_exit_str = "----Exit-";
-
-/* Local prototypes */
-
-static const char *acpi_ut_trim_function_name(const char *function_name);
+static acpi_thread_id acpi_gbl_previous_thread_id = (acpi_thread_id) 0xFFFFFFFF;
+static const char *acpi_gbl_function_entry_prefix = "----Entry";
+static const char *acpi_gbl_function_exit_prefix = "----Exit-";
 
 /*******************************************************************************
  *
@@ -73,7 +37,12 @@ void acpi_ut_init_stack_ptr_trace(void)
 {
 	acpi_size current_sp;
 
+#pragma GCC diagnostic push
+#if defined(__GNUC__) && __GNUC__ >= 12
+#pragma GCC diagnostic ignored "-Wdangling-pointer="
+#endif
 	acpi_gbl_entry_stack_pointer = &current_sp;
+#pragma GCC diagnostic pop
 }
 
 /*******************************************************************************
@@ -93,7 +62,12 @@ void acpi_ut_track_stack_ptr(void)
 	acpi_size current_sp;
 
 	if (&current_sp < acpi_gbl_lowest_stack_pointer) {
+#pragma GCC diagnostic push
+#if defined(__GNUC__) && __GNUC__ >= 12
+#pragma GCC diagnostic ignored "-Wdangling-pointer="
+#endif
 		acpi_gbl_lowest_stack_pointer = &current_sp;
+#pragma GCC diagnostic pop
 	}
 
 	if (acpi_gbl_nesting_level > acpi_gbl_deepest_nesting) {
@@ -110,7 +84,7 @@ void acpi_ut_track_stack_ptr(void)
  * RETURN:      Updated pointer to the function name
  *
  * DESCRIPTION: Remove the "Acpi" prefix from the function name, if present.
- *              This allows compiler macros such as __FUNCTION__ to be used
+ *              This allows compiler macros such as __func__ to be used
  *              with no change to the debug output.
  *
  ******************************************************************************/
@@ -165,6 +139,9 @@ acpi_debug_print(u32 requested_debug_level,
 {
 	acpi_thread_id thread_id;
 	va_list args;
+#ifdef ACPI_APPLICATION
+	int fill_count;
+#endif
 
 	/* Check if debug output enabled */
 
@@ -176,29 +153,49 @@ acpi_debug_print(u32 requested_debug_level,
 	 * Thread tracking and context switch notification
 	 */
 	thread_id = acpi_os_get_thread_id();
-	if (thread_id != acpi_gbl_prev_thread_id) {
+	if (thread_id != acpi_gbl_previous_thread_id) {
 		if (ACPI_LV_THREADS & acpi_dbg_level) {
 			acpi_os_printf
 			    ("\n**** Context Switch from TID %u to TID %u ****\n\n",
-			     (u32)acpi_gbl_prev_thread_id, (u32)thread_id);
+			     (u32)acpi_gbl_previous_thread_id, (u32)thread_id);
 		}
 
-		acpi_gbl_prev_thread_id = thread_id;
+		acpi_gbl_previous_thread_id = thread_id;
+		acpi_gbl_nesting_level = 0;
 	}
 
 	/*
 	 * Display the module name, current line number, thread ID (if requested),
 	 * current procedure nesting level, and the current procedure name
 	 */
-	acpi_os_printf("%8s-%04ld ", module_name, line_number);
+	acpi_os_printf("%9s-%04d ", module_name, line_number);
 
+#ifdef ACPI_APPLICATION
+	/*
+	 * For acpi_exec/iASL only, emit the thread ID and nesting level.
+	 * Note: nesting level is really only useful during a single-thread
+	 * execution. Otherwise, multiple threads will keep resetting the
+	 * level.
+	 */
 	if (ACPI_LV_THREADS & acpi_dbg_level) {
 		acpi_os_printf("[%u] ", (u32)thread_id);
 	}
 
-	acpi_os_printf("[%02ld] %-22.22s: ",
-		       acpi_gbl_nesting_level,
-		       acpi_ut_trim_function_name(function_name));
+	fill_count = 48 - acpi_gbl_nesting_level -
+	    strlen(acpi_ut_trim_function_name(function_name));
+	if (fill_count < 0) {
+		fill_count = 0;
+	}
+
+	acpi_os_printf("[%02d] %*s",
+		       acpi_gbl_nesting_level, acpi_gbl_nesting_level + 1, " ");
+	acpi_os_printf("%s%*s: ",
+		       acpi_ut_trim_function_name(function_name), fill_count,
+		       " ");
+
+#else
+	acpi_os_printf("%-22.22s: ", acpi_ut_trim_function_name(function_name));
+#endif
 
 	va_start(args, format);
 	acpi_os_vprintf(format, args);
@@ -276,7 +273,8 @@ acpi_ut_trace(u32 line_number,
 	if (ACPI_IS_DEBUG_ENABLED(ACPI_LV_FUNCTIONS, component_id)) {
 		acpi_debug_print(ACPI_LV_FUNCTIONS,
 				 line_number, function_name, module_name,
-				 component_id, "%s\n", acpi_gbl_fn_entry_str);
+				 component_id, "%s\n",
+				 acpi_gbl_function_entry_prefix);
 	}
 }
 
@@ -301,7 +299,8 @@ ACPI_EXPORT_SYMBOL(acpi_ut_trace)
 void
 acpi_ut_trace_ptr(u32 line_number,
 		  const char *function_name,
-		  const char *module_name, u32 component_id, void *pointer)
+		  const char *module_name,
+		  u32 component_id, const void *pointer)
 {
 
 	acpi_gbl_nesting_level++;
@@ -312,8 +311,8 @@ acpi_ut_trace_ptr(u32 line_number,
 	if (ACPI_IS_DEBUG_ENABLED(ACPI_LV_FUNCTIONS, component_id)) {
 		acpi_debug_print(ACPI_LV_FUNCTIONS,
 				 line_number, function_name, module_name,
-				 component_id, "%s %p\n", acpi_gbl_fn_entry_str,
-				 pointer);
+				 component_id, "%s %p\n",
+				 acpi_gbl_function_entry_prefix, pointer);
 	}
 }
 
@@ -337,7 +336,7 @@ acpi_ut_trace_ptr(u32 line_number,
 void
 acpi_ut_trace_str(u32 line_number,
 		  const char *function_name,
-		  const char *module_name, u32 component_id, char *string)
+		  const char *module_name, u32 component_id, const char *string)
 {
 
 	acpi_gbl_nesting_level++;
@@ -348,8 +347,8 @@ acpi_ut_trace_str(u32 line_number,
 	if (ACPI_IS_DEBUG_ENABLED(ACPI_LV_FUNCTIONS, component_id)) {
 		acpi_debug_print(ACPI_LV_FUNCTIONS,
 				 line_number, function_name, module_name,
-				 component_id, "%s %s\n", acpi_gbl_fn_entry_str,
-				 string);
+				 component_id, "%s %s\n",
+				 acpi_gbl_function_entry_prefix, string);
 	}
 }
 
@@ -385,7 +384,7 @@ acpi_ut_trace_u32(u32 line_number,
 		acpi_debug_print(ACPI_LV_FUNCTIONS,
 				 line_number, function_name, module_name,
 				 component_id, "%s %08X\n",
-				 acpi_gbl_fn_entry_str, integer);
+				 acpi_gbl_function_entry_prefix, integer);
 	}
 }
 
@@ -416,10 +415,13 @@ acpi_ut_exit(u32 line_number,
 	if (ACPI_IS_DEBUG_ENABLED(ACPI_LV_FUNCTIONS, component_id)) {
 		acpi_debug_print(ACPI_LV_FUNCTIONS,
 				 line_number, function_name, module_name,
-				 component_id, "%s\n", acpi_gbl_fn_exit_str);
+				 component_id, "%s\n",
+				 acpi_gbl_function_exit_prefix);
 	}
 
-	acpi_gbl_nesting_level--;
+	if (acpi_gbl_nesting_level) {
+		acpi_gbl_nesting_level--;
+	}
 }
 
 ACPI_EXPORT_SYMBOL(acpi_ut_exit)
@@ -454,19 +456,21 @@ acpi_ut_status_exit(u32 line_number,
 			acpi_debug_print(ACPI_LV_FUNCTIONS,
 					 line_number, function_name,
 					 module_name, component_id, "%s %s\n",
-					 acpi_gbl_fn_exit_str,
+					 acpi_gbl_function_exit_prefix,
 					 acpi_format_exception(status));
 		} else {
 			acpi_debug_print(ACPI_LV_FUNCTIONS,
 					 line_number, function_name,
 					 module_name, component_id,
 					 "%s ****Exception****: %s\n",
-					 acpi_gbl_fn_exit_str,
+					 acpi_gbl_function_exit_prefix,
 					 acpi_format_exception(status));
 		}
 	}
 
-	acpi_gbl_nesting_level--;
+	if (acpi_gbl_nesting_level) {
+		acpi_gbl_nesting_level--;
+	}
 }
 
 ACPI_EXPORT_SYMBOL(acpi_ut_status_exit)
@@ -499,11 +503,13 @@ acpi_ut_value_exit(u32 line_number,
 		acpi_debug_print(ACPI_LV_FUNCTIONS,
 				 line_number, function_name, module_name,
 				 component_id, "%s %8.8X%8.8X\n",
-				 acpi_gbl_fn_exit_str,
+				 acpi_gbl_function_exit_prefix,
 				 ACPI_FORMAT_UINT64(value));
 	}
 
-	acpi_gbl_nesting_level--;
+	if (acpi_gbl_nesting_level) {
+		acpi_gbl_nesting_level--;
+	}
 }
 
 ACPI_EXPORT_SYMBOL(acpi_ut_value_exit)
@@ -535,157 +541,81 @@ acpi_ut_ptr_exit(u32 line_number,
 	if (ACPI_IS_DEBUG_ENABLED(ACPI_LV_FUNCTIONS, component_id)) {
 		acpi_debug_print(ACPI_LV_FUNCTIONS,
 				 line_number, function_name, module_name,
-				 component_id, "%s %p\n", acpi_gbl_fn_exit_str,
-				 ptr);
+				 component_id, "%s %p\n",
+				 acpi_gbl_function_exit_prefix, ptr);
 	}
 
-	acpi_gbl_nesting_level--;
-}
-
-#endif
-
-/*******************************************************************************
- *
- * FUNCTION:    acpi_ut_dump_buffer
- *
- * PARAMETERS:  buffer              - Buffer to dump
- *              count               - Amount to dump, in bytes
- *              display             - BYTE, WORD, DWORD, or QWORD display
- *              offset              - Beginning buffer offset (display only)
- *
- * RETURN:      None
- *
- * DESCRIPTION: Generic dump buffer in both hex and ascii.
- *
- ******************************************************************************/
-
-void acpi_ut_dump_buffer(u8 *buffer, u32 count, u32 display, u32 base_offset)
-{
-	u32 i = 0;
-	u32 j;
-	u32 temp32;
-	u8 buf_char;
-
-	if (!buffer) {
-		acpi_os_printf("Null Buffer Pointer in DumpBuffer!\n");
-		return;
+	if (acpi_gbl_nesting_level) {
+		acpi_gbl_nesting_level--;
 	}
-
-	if ((count < 4) || (count & 0x01)) {
-		display = DB_BYTE_DISPLAY;
-	}
-
-	/* Nasty little dump buffer routine! */
-
-	while (i < count) {
-
-		/* Print current offset */
-
-		acpi_os_printf("%6.4X: ", (base_offset + i));
-
-		/* Print 16 hex chars */
-
-		for (j = 0; j < 16;) {
-			if (i + j >= count) {
-
-				/* Dump fill spaces */
-
-				acpi_os_printf("%*s", ((display * 2) + 1), " ");
-				j += display;
-				continue;
-			}
-
-			switch (display) {
-			case DB_BYTE_DISPLAY:
-			default:	/* Default is BYTE display */
-
-				acpi_os_printf("%02X ",
-					       buffer[(acpi_size) i + j]);
-				break;
-
-			case DB_WORD_DISPLAY:
-
-				ACPI_MOVE_16_TO_32(&temp32,
-						   &buffer[(acpi_size) i + j]);
-				acpi_os_printf("%04X ", temp32);
-				break;
-
-			case DB_DWORD_DISPLAY:
-
-				ACPI_MOVE_32_TO_32(&temp32,
-						   &buffer[(acpi_size) i + j]);
-				acpi_os_printf("%08X ", temp32);
-				break;
-
-			case DB_QWORD_DISPLAY:
-
-				ACPI_MOVE_32_TO_32(&temp32,
-						   &buffer[(acpi_size) i + j]);
-				acpi_os_printf("%08X", temp32);
-
-				ACPI_MOVE_32_TO_32(&temp32,
-						   &buffer[(acpi_size) i + j +
-							   4]);
-				acpi_os_printf("%08X ", temp32);
-				break;
-			}
-
-			j += display;
-		}
-
-		/*
-		 * Print the ASCII equivalent characters but watch out for the bad
-		 * unprintable ones (printable chars are 0x20 through 0x7E)
-		 */
-		acpi_os_printf(" ");
-		for (j = 0; j < 16; j++) {
-			if (i + j >= count) {
-				acpi_os_printf("\n");
-				return;
-			}
-
-			buf_char = buffer[(acpi_size) i + j];
-			if (ACPI_IS_PRINT(buf_char)) {
-				acpi_os_printf("%c", buf_char);
-			} else {
-				acpi_os_printf(".");
-			}
-		}
-
-		/* Done with that line. */
-
-		acpi_os_printf("\n");
-		i += 16;
-	}
-
-	return;
 }
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ut_debug_dump_buffer
+ * FUNCTION:    acpi_ut_str_exit
  *
- * PARAMETERS:  buffer              - Buffer to dump
- *              count               - Amount to dump, in bytes
- *              display             - BYTE, WORD, DWORD, or QWORD display
- *              component_ID        - Caller's component ID
+ * PARAMETERS:  line_number         - Caller's line number
+ *              function_name       - Caller's procedure name
+ *              module_name         - Caller's module name
+ *              component_id        - Caller's component ID
+ *              string              - String to display
  *
  * RETURN:      None
  *
- * DESCRIPTION: Generic dump buffer in both hex and ascii.
+ * DESCRIPTION: Function exit trace. Prints only if TRACE_FUNCTIONS bit is
+ *              set in debug_level. Prints exit value also.
  *
  ******************************************************************************/
 
 void
-acpi_ut_debug_dump_buffer(u8 *buffer, u32 count, u32 display, u32 component_id)
+acpi_ut_str_exit(u32 line_number,
+		 const char *function_name,
+		 const char *module_name, u32 component_id, const char *string)
 {
 
-	/* Only dump the buffer if tracing is enabled */
+	/* Check if enabled up-front for performance */
 
-	if (!((ACPI_LV_TABLES & acpi_dbg_level) &&
-	      (component_id & acpi_dbg_layer))) {
-		return;
+	if (ACPI_IS_DEBUG_ENABLED(ACPI_LV_FUNCTIONS, component_id)) {
+		acpi_debug_print(ACPI_LV_FUNCTIONS,
+				 line_number, function_name, module_name,
+				 component_id, "%s %s\n",
+				 acpi_gbl_function_exit_prefix, string);
 	}
 
-	acpi_ut_dump_buffer(buffer, count, display, 0);
+	if (acpi_gbl_nesting_level) {
+		acpi_gbl_nesting_level--;
+	}
 }
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_trace_point
+ *
+ * PARAMETERS:  type                - Trace event type
+ *              begin               - TRUE if before execution
+ *              aml                 - Executed AML address
+ *              pathname            - Object path
+ *              pointer             - Pointer to the related object
+ *
+ * RETURN:      None
+ *
+ * DESCRIPTION: Interpreter execution trace.
+ *
+ ******************************************************************************/
+
+void
+acpi_trace_point(acpi_trace_event_type type, u8 begin, u8 *aml, char *pathname)
+{
+
+	ACPI_FUNCTION_ENTRY();
+
+	acpi_ex_trace_point(type, begin, aml, pathname);
+
+#ifdef ACPI_USE_SYSTEM_TRACER
+	acpi_os_trace_point(type, begin, aml, pathname);
+#endif
+}
+
+ACPI_EXPORT_SYMBOL(acpi_trace_point)
+
+#endif

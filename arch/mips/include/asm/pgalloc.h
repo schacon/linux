@@ -13,6 +13,10 @@
 #include <linux/mm.h>
 #include <linux/sched.h>
 
+#define __HAVE_ARCH_PMD_ALLOC_ONE
+#define __HAVE_ARCH_PUD_ALLOC_ONE
+#include <asm-generic/pgalloc.h>
+
 static inline void pmd_populate_kernel(struct mm_struct *mm, pmd_t *pmd,
 	pte_t *pte)
 {
@@ -24,12 +28,11 @@ static inline void pmd_populate(struct mm_struct *mm, pmd_t *pmd,
 {
 	set_pmd(pmd, __pmd((unsigned long)page_address(pte)));
 }
-#define pmd_pgtable(pmd) pmd_page(pmd)
 
 /*
  * Initialize a new pmd table with invalid pointers.
  */
-extern void pmd_init(unsigned long page, unsigned long pagetable);
+extern void pmd_init(void *addr);
 
 #ifndef __PAGETABLE_PMD_FOLDED
 
@@ -40,93 +43,61 @@ static inline void pud_populate(struct mm_struct *mm, pud_t *pud, pmd_t *pmd)
 #endif
 
 /*
- * Initialize a new pgd / pmd table with invalid pointers.
+ * Initialize a new pgd table with invalid pointers.
  */
-extern void pgd_init(unsigned long page);
+extern void pgd_init(void *addr);
+extern pgd_t *pgd_alloc(struct mm_struct *mm);
 
-static inline pgd_t *pgd_alloc(struct mm_struct *mm)
-{
-	pgd_t *ret, *init;
-
-	ret = (pgd_t *) __get_free_pages(GFP_KERNEL, PGD_ORDER);
-	if (ret) {
-		init = pgd_offset(&init_mm, 0UL);
-		pgd_init((unsigned long)ret);
-		memcpy(ret + USER_PTRS_PER_PGD, init + USER_PTRS_PER_PGD,
-		       (PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
-	}
-
-	return ret;
-}
-
-static inline void pgd_free(struct mm_struct *mm, pgd_t *pgd)
-{
-	free_pages((unsigned long)pgd, PGD_ORDER);
-}
-
-static inline pte_t *pte_alloc_one_kernel(struct mm_struct *mm,
-	unsigned long address)
-{
-	pte_t *pte;
-
-	pte = (pte_t *) __get_free_pages(GFP_KERNEL|__GFP_REPEAT|__GFP_ZERO, PTE_ORDER);
-
-	return pte;
-}
-
-static inline struct page *pte_alloc_one(struct mm_struct *mm,
-	unsigned long address)
-{
-	struct page *pte;
-
-	pte = alloc_pages(GFP_KERNEL | __GFP_REPEAT, PTE_ORDER);
-	if (pte) {
-		clear_highpage(pte);
-		pgtable_page_ctor(pte);
-	}
-	return pte;
-}
-
-static inline void pte_free_kernel(struct mm_struct *mm, pte_t *pte)
-{
-	free_pages((unsigned long)pte, PTE_ORDER);
-}
-
-static inline void pte_free(struct mm_struct *mm, pgtable_t pte)
-{
-	pgtable_page_dtor(pte);
-	__free_pages(pte, PTE_ORDER);
-}
-
-#define __pte_free_tlb(tlb,pte,address)			\
-do {							\
-	pgtable_page_dtor(pte);				\
-	tlb_remove_page((tlb), pte);			\
-} while (0)
+#define __pte_free_tlb(tlb, pte, address)	tlb_remove_ptdesc((tlb), page_ptdesc(pte))
 
 #ifndef __PAGETABLE_PMD_FOLDED
 
 static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long address)
 {
 	pmd_t *pmd;
+	struct ptdesc *ptdesc;
 
-	pmd = (pmd_t *) __get_free_pages(GFP_KERNEL|__GFP_REPEAT, PMD_ORDER);
-	if (pmd)
-		pmd_init((unsigned long)pmd, (unsigned long)invalid_pte_table);
+	ptdesc = pagetable_alloc(GFP_KERNEL_ACCOUNT, PMD_TABLE_ORDER);
+	if (!ptdesc)
+		return NULL;
+
+	if (!pagetable_pmd_ctor(mm, ptdesc)) {
+		pagetable_free(ptdesc);
+		return NULL;
+	}
+
+	pmd = ptdesc_address(ptdesc);
+	pmd_init(pmd);
 	return pmd;
 }
 
-static inline void pmd_free(struct mm_struct *mm, pmd_t *pmd)
-{
-	free_pages((unsigned long)pmd, PMD_ORDER);
-}
-
-#define __pmd_free_tlb(tlb, x, addr)	pmd_free((tlb)->mm, x)
+#define __pmd_free_tlb(tlb, x, addr)	tlb_remove_ptdesc((tlb), virt_to_ptdesc(x))
 
 #endif
 
-#define check_pgt_cache()	do { } while (0)
+#ifndef __PAGETABLE_PUD_FOLDED
 
-extern void pagetable_init(void);
+static inline pud_t *pud_alloc_one(struct mm_struct *mm, unsigned long address)
+{
+	pud_t *pud;
+	struct ptdesc *ptdesc = pagetable_alloc(GFP_KERNEL, PUD_TABLE_ORDER);
+
+	if (!ptdesc)
+		return NULL;
+	pagetable_pud_ctor(ptdesc);
+	pud = ptdesc_address(ptdesc);
+
+	pud_init(pud);
+	return pud;
+}
+
+static inline void p4d_populate(struct mm_struct *mm, p4d_t *p4d, pud_t *pud)
+{
+	set_p4d(p4d, __p4d((unsigned long)pud));
+}
+
+#define __pud_free_tlb(tlb, x, addr)	tlb_remove_ptdesc((tlb), virt_to_ptdesc(x))
+
+#endif /* __PAGETABLE_PUD_FOLDED */
 
 #endif /* _ASM_PGALLOC_H */

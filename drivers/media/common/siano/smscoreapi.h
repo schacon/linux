@@ -1,26 +1,17 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /****************************************************************
 
 Siano Mobile Silicon, Inc.
 MDTV receiver kernel modules.
 Copyright (C) 2006-2008, Uri Shkolnik, Anatoly Greenblat
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 2 of the License, or
-(at your option) any later version.
-
- This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 ****************************************************************/
 
 #ifndef __SMS_CORE_API_H__
 #define __SMS_CORE_API_H__
+
+#define pr_fmt(fmt) "%s:%s: " fmt, KBUILD_MODNAME, __func__
 
 #include <linux/device.h>
 #include <linux/list.h>
@@ -31,14 +22,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <linux/wait.h>
 #include <linux/timer.h>
 
+#include <media/media-device.h>
+
 #include <asm/page.h>
 
 #include "smsir.h"
-
-#define kmutex_init(_p_) mutex_init(_p_)
-#define kmutex_lock(_p_) mutex_lock(_p_)
-#define kmutex_trylock(_p_) mutex_trylock(_p_)
-#define kmutex_unlock(_p_) mutex_unlock(_p_)
 
 /*
  * Define the firmware names used by the driver.
@@ -109,7 +97,6 @@ typedef int (*hotplug_t)(struct smscore_device_t *coredev,
 typedef int (*setmode_t)(void *context, int mode);
 typedef void (*detectmode_t)(void *context, int *mode);
 typedef int (*sendrequest_t)(void *context, void *buffer, size_t size);
-typedef int (*loadfirmware_t)(void *context, void *buffer, size_t size);
 typedef int (*preload_t)(void *context);
 typedef int (*postload_t)(void *context);
 
@@ -130,6 +117,7 @@ struct smscore_buffer_t {
 
 struct smsdevice_params_t {
 	struct device	*device;
+	struct usb_device	*usb_device;
 
 	int				buffer_size;
 	int				num_buffers;
@@ -172,6 +160,7 @@ struct smscore_device_t {
 
 	void *context;
 	struct device *device;
+	struct usb_device *usb_device;
 
 	char devpath[32];
 	unsigned long device_flags;
@@ -183,6 +172,8 @@ struct smscore_device_t {
 	postload_t postload_handler;
 
 	int mode, modes_supported;
+
+	gfp_t gfp_buf_flags;
 
 	/* host <--> device messages */
 	struct completion version_ex_done, data_download_done, trigger_done;
@@ -215,6 +206,10 @@ struct smscore_device_t {
 	bool is_usb_device;
 
 	int led_state;
+
+#if defined(CONFIG_MEDIA_CONTROLLER_DVB)
+	struct media_device *media_dev;
+#endif
 };
 
 /* GPIO definitions for antenna frequency domain control (SMS8021) */
@@ -433,8 +428,8 @@ enum msg_types {
 	MSG_SMS_FLASH_DL_REQ = 732,
 	MSG_SMS_EXEC_TEST_1_REQ = 734,
 	MSG_SMS_EXEC_TEST_1_RES = 735,
-	MSG_SMS_ENBALE_TS_INTERFACE_REQ = 736,
-	MSG_SMS_ENBALE_TS_INTERFACE_RES = 737,
+	MSG_SMS_ENABLE_TS_INTERFACE_REQ = 736,
+	MSG_SMS_ENABLE_TS_INTERFACE_RES = 737,
 	MSG_SMS_SPI_SET_BUS_WIDTH_REQ = 738,
 	MSG_SMS_SPI_SET_BUS_WIDTH_RES = 739,
 	MSG_SMS_SEND_EMM_REQ = 740,
@@ -620,7 +615,7 @@ struct sms_msg_hdr {
 
 struct sms_msg_data {
 	struct sms_msg_hdr x_msg_header;
-	u32 msg_data[1];
+	u32 msg_data;
 };
 
 struct sms_msg_data2 {
@@ -628,9 +623,9 @@ struct sms_msg_data2 {
 	u32 msg_data[2];
 };
 
-struct sms_msg_data4 {
+struct sms_msg_data5 {
 	struct sms_msg_hdr x_msg_header;
-	u32 msg_data[4];
+	u32 msg_data[5];
 };
 
 struct sms_data_download {
@@ -670,7 +665,7 @@ struct sms_firmware {
 	u32			check_sum;
 	u32			length;
 	u32			start_address;
-	u8			payload[1];
+	u8			payload[];
 };
 
 /* statistics information returned as response for
@@ -738,7 +733,7 @@ struct sms_stats {
 	u32 num_of_corrected_mpe_tlbs;/* Number of MPE tables which were
 	corrected by MPE RS decoding */
 	/* Common params */
-	u32 ber_error_count;	/* Number of errornous SYNC bits. */
+	u32 ber_error_count;	/* Number of erroneous SYNC bits. */
 	u32 ber_bit_count;	/* Total number of SYNC bits. */
 
 	/* Interface information */
@@ -955,7 +950,7 @@ struct sms_rx_stats {
 	u32 modem_state;		/* from SMSHOSTLIB_DVB_MODEM_STATE_ET */
 	s32 SNR;		/* dB */
 	u32 ber;		/* Post Viterbi ber [1E-5] */
-	u32 ber_error_count;	/* Number of erronous SYNC bits. */
+	u32 ber_error_count;	/* Number of erroneous SYNC bits. */
 	u32 ber_bit_count;	/* Total number of SYNC bits. */
 	u32 ts_per;		/* Transport stream PER,
 	0xFFFFFFFF indicate N/A */
@@ -981,7 +976,7 @@ struct sms_rx_stats_ex {
 	u32 modem_state;		/* from SMSHOSTLIB_DVB_MODEM_STATE_ET */
 	s32 SNR;		/* dB */
 	u32 ber;		/* Post Viterbi ber [1E-5] */
-	u32 ber_error_count;	/* Number of erronous SYNC bits. */
+	u32 ber_error_count;	/* Number of erroneous SYNC bits. */
 	u32 ber_bit_count;	/* Total number of SYNC bits. */
 	u32 ts_per;		/* Transport stream PER,
 	0xFFFFFFFF indicate N/A */
@@ -1002,6 +997,7 @@ struct sms_rx_stats_ex {
 	s32 mrc_in_band_pwr;	/* In band power in dBM */
 };
 
+#define	SRVM_MAX_PID_FILTERS 8
 
 /* statistics information returned as response for
  * SmsHostApiGetstatisticsEx_Req for DVB applications, SMS1100 and up */
@@ -1013,7 +1009,6 @@ struct sms_stats_dvb {
 	struct sms_tx_stats transmission_data;
 
 	/* Burst parameters, valid only for DVB-H */
-#define	SRVM_MAX_PID_FILTERS 8
 	struct sms_pid_data pid_data[SRVM_MAX_PID_FILTERS];
 };
 
@@ -1027,7 +1022,6 @@ struct sms_stats_dvb_ex {
 	struct sms_tx_stats transmission_data;
 
 	/* Burst parameters, valid only for DVB-H */
-#define	SRVM_MAX_PID_FILTERS 8
 	struct sms_pid_data pid_data[SRVM_MAX_PID_FILTERS];
 };
 
@@ -1046,20 +1040,6 @@ struct sms_srvm_signal_status {
 	s32 in_band_power;
 	u32 request_id;
 };
-
-struct sms_i2c_req {
-	u32	device_address; /* I2c device address */
-	u32	write_count; /* number of bytes to write */
-	u32	read_count; /* number of bytes to read */
-	u8	Data[1];
-};
-
-struct sms_i2c_res {
-	u32	status; /* non-zero value in case of failure */
-	u32	read_count; /* number of bytes read */
-	u8	Data[1];
-};
-
 
 struct smscore_config_gpio {
 #define SMS_GPIO_DIRECTION_INPUT  0
@@ -1115,13 +1095,12 @@ extern int smscore_register_hotplug(hotplug_t hotplug);
 extern void smscore_unregister_hotplug(hotplug_t hotplug);
 
 extern int smscore_register_device(struct smsdevice_params_t *params,
-				   struct smscore_device_t **coredev);
+				   struct smscore_device_t **coredev,
+				   gfp_t gfp_buf_flags,
+				   void *mdev);
 extern void smscore_unregister_device(struct smscore_device_t *coredev);
 
 extern int smscore_start_device(struct smscore_device_t *coredev);
-extern int smscore_load_firmware(struct smscore_device_t *coredev,
-				 char *filename,
-				 loadfirmware_t loadfirmware_handler);
 
 extern int smscore_set_device_mode(struct smscore_device_t *coredev, int mode);
 extern int smscore_get_device_mode(struct smscore_device_t *coredev);
@@ -1135,12 +1114,6 @@ extern int smsclient_sendrequest(struct smscore_client_t *client,
 				 void *buffer, size_t size);
 extern void smscore_onresponse(struct smscore_device_t *coredev,
 			       struct smscore_buffer_t *cb);
-
-extern int smscore_get_common_buffer_size(struct smscore_device_t *coredev);
-extern int smscore_map_common_buffer(struct smscore_device_t *coredev,
-				      struct vm_area_struct *vma);
-extern int smscore_send_fw_file(struct smscore_device_t *coredev,
-				u8 *ufwbuf, int size);
 
 extern
 struct smscore_buffer_t *smscore_getbuffer(struct smscore_device_t *coredev);
@@ -1167,26 +1140,5 @@ int smscore_led_state(struct smscore_device_t *core, int led);
 
 
 /* ------------------------------------------------------------------------ */
-
-#define DBG_INFO 1
-#define DBG_ADV  2
-
-#define sms_printk(kern, fmt, arg...) \
-	printk(kern "%s: " fmt "\n", __func__, ##arg)
-
-#define dprintk(kern, lvl, fmt, arg...) do {\
-	if (sms_dbg & lvl) \
-		sms_printk(kern, fmt, ##arg); \
-} while (0)
-
-#define sms_log(fmt, arg...) sms_printk(KERN_INFO, fmt, ##arg)
-#define sms_err(fmt, arg...) \
-	sms_printk(KERN_ERR, "line: %d: " fmt, __LINE__, ##arg)
-#define sms_warn(fmt, arg...)  sms_printk(KERN_WARNING, fmt, ##arg)
-#define sms_info(fmt, arg...) \
-	dprintk(KERN_INFO, DBG_INFO, fmt, ##arg)
-#define sms_debug(fmt, arg...) \
-	dprintk(KERN_DEBUG, DBG_ADV, fmt, ##arg)
-
 
 #endif /* __SMS_CORE_API_H__ */

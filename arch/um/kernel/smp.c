@@ -1,238 +1,243 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
+ * Copyright (C) 2025 Ant Group
+ * Author: Tiwei Bie <tiwei.btw@antgroup.com>
+ *
+ * Based on the previous implementation in TT mode
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
- * Licensed under the GPL
  */
-
-#include <linux/percpu.h>
-#include <asm/pgalloc.h>
-#include <asm/tlb.h>
-
-#ifdef CONFIG_SMP
 
 #include <linux/sched.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
 #include <linux/module.h>
+#include <linux/processor.h>
 #include <linux/threads.h>
-#include <linux/interrupt.h>
-#include <linux/err.h>
+#include <linux/cpu.h>
 #include <linux/hardirq.h>
-#include <asm/smp.h>
-#include <asm/processor.h>
-#include <asm/spinlock.h>
+#include <linux/smp.h>
+#include <linux/smp-internal.h>
+#include <init.h>
 #include <kern.h>
-#include <irq_user.h>
 #include <os.h>
+#include <skas.h>
+#include <smp.h>
 
-/* Per CPU bogomips and other parameters
- * The only piece used here is the ipi pipe, which is set before SMP is
- * started and never changed.
- */
-struct cpuinfo_um cpu_data[NR_CPUS];
+enum {
+	UML_IPI_RES = 0,
+	UML_IPI_CALL_SINGLE,
+	UML_IPI_CALL,
+	UML_IPI_STOP,
+};
 
-/* A statistic, can be a little off */
-int num_reschedules_sent = 0;
-
-/* Not changed after boot */
-struct task_struct *idle_threads[NR_CPUS];
-
-void smp_send_reschedule(int cpu)
+void arch_smp_send_reschedule(int cpu)
 {
-	os_write_file(cpu_data[cpu].ipi_pipe[1], "R", 1);
-	num_reschedules_sent++;
+	os_send_ipi(cpu, UML_IPI_RES);
+}
+
+void arch_send_call_function_single_ipi(int cpu)
+{
+	os_send_ipi(cpu, UML_IPI_CALL_SINGLE);
+}
+
+void arch_send_call_function_ipi_mask(const struct cpumask *mask)
+{
+	int cpu;
+
+	for_each_cpu(cpu, mask)
+		os_send_ipi(cpu, UML_IPI_CALL);
 }
 
 void smp_send_stop(void)
 {
-	int i;
+	int cpu, me = smp_processor_id();
 
-	printk(KERN_INFO "Stopping all CPUs...");
-	for (i = 0; i < num_online_cpus(); i++) {
-		if (i == current_thread->cpu)
+	for_each_online_cpu(cpu) {
+		if (cpu == me)
 			continue;
-		os_write_file(cpu_data[i].ipi_pipe[1], "S", 1);
+		os_send_ipi(cpu, UML_IPI_STOP);
 	}
-	printk(KERN_CONT "done\n");
 }
 
-static cpumask_t smp_commenced_mask = CPU_MASK_NONE;
-static cpumask_t cpu_callin_map = CPU_MASK_NONE;
-
-static int idle_proc(void *cpup)
+static void ipi_handler(int vector, struct uml_pt_regs *regs)
 {
-	int cpu = (int) cpup, err;
+	struct pt_regs *old_regs = set_irq_regs((struct pt_regs *)regs);
+	int cpu = raw_smp_processor_id();
 
-	err = os_pipe(cpu_data[cpu].ipi_pipe, 1, 1);
-	if (err < 0)
-		panic("CPU#%d failed to create IPI pipe, err = %d", cpu, -err);
+	irq_enter();
 
-	os_set_fd_async(cpu_data[cpu].ipi_pipe[0]);
+	if (current->mm)
+		os_alarm_process(current_mm_id()->pid);
 
-	wmb();
-	if (cpu_test_and_set(cpu, cpu_callin_map)) {
-		printk(KERN_ERR "huh, CPU#%d already present??\n", cpu);
-		BUG();
+	switch (vector) {
+	case UML_IPI_RES:
+		inc_irq_stat(irq_resched_count);
+		scheduler_ipi();
+		break;
+
+	case UML_IPI_CALL_SINGLE:
+		inc_irq_stat(irq_call_count);
+		generic_smp_call_function_single_interrupt();
+		break;
+
+	case UML_IPI_CALL:
+		inc_irq_stat(irq_call_count);
+		generic_smp_call_function_interrupt();
+		break;
+
+	case UML_IPI_STOP:
+		set_cpu_online(cpu, false);
+		while (1)
+			pause();
+		break;
+
+	default:
+		pr_err("CPU#%d received unknown IPI (vector=%d)!\n", cpu, vector);
+		break;
 	}
 
-	while (!cpu_isset(cpu, smp_commenced_mask))
-		cpu_relax();
+	irq_exit();
+	set_irq_regs(old_regs);
+}
+
+void uml_ipi_handler(int vector)
+{
+	struct uml_pt_regs r = { .is_user = 0 };
+
+	preempt_disable();
+	ipi_handler(vector, &r);
+	preempt_enable();
+}
+
+/* AP states used only during CPU startup */
+enum {
+	UML_CPU_PAUSED = 0,
+	UML_CPU_RUNNING,
+};
+
+static int cpu_states[NR_CPUS];
+
+static int start_secondary(void *unused)
+{
+	int err, cpu = raw_smp_processor_id();
 
 	notify_cpu_starting(cpu);
 	set_cpu_online(cpu, true);
-	default_idle();
+
+	err = um_setup_timer();
+	if (err)
+		panic("CPU#%d failed to setup timer, err = %d", cpu, err);
+
+	local_irq_enable();
+
+	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
+
 	return 0;
 }
 
-static struct task_struct *idle_thread(int cpu)
+void uml_start_secondary(void *opaque)
 {
-	struct task_struct *new_task;
-
-	current->thread.request.u.thread.proc = idle_proc;
-	current->thread.request.u.thread.arg = (void *) cpu;
-	new_task = fork_idle(cpu);
-	if (IS_ERR(new_task))
-		panic("copy_process failed in idle_thread, error = %ld",
-		      PTR_ERR(new_task));
-
-	cpu_tasks[cpu] = ((struct cpu_task)
-		          { .pid = 	new_task->thread.mode.tt.extern_pid,
-			    .task = 	new_task } );
-	idle_threads[cpu] = new_task;
-	panic("skas mode doesn't support SMP");
-	return new_task;
-}
-
-void smp_prepare_cpus(unsigned int maxcpus)
-{
+	int cpu = raw_smp_processor_id();
+	struct mm_struct *mm = &init_mm;
 	struct task_struct *idle;
-	unsigned long waittime;
-	int err, cpu, me = smp_processor_id();
-	int i;
 
-	for (i = 0; i < ncpus; ++i)
-		set_cpu_possible(i, true);
+	stack_protections((unsigned long) &cpu_irqstacks[cpu]);
+	set_sigstack(&cpu_irqstacks[cpu], THREAD_SIZE);
 
-	set_cpu_online(me, true);
-	cpu_set(me, cpu_callin_map);
+	set_cpu_present(cpu, true);
+	os_futex_wait(&cpu_states[cpu], UML_CPU_PAUSED);
 
-	err = os_pipe(cpu_data[me].ipi_pipe, 1, 1);
-	if (err < 0)
-		panic("CPU#0 failed to create IPI pipe, errno = %d", -err);
+	smp_rmb(); /* paired with smp_wmb() in __cpu_up() */
 
-	os_set_fd_async(cpu_data[me].ipi_pipe[0]);
+	idle = cpu_tasks[cpu];
+	idle->thread_info.cpu = cpu;
 
-	for (cpu = 1; cpu < ncpus; cpu++) {
-		printk(KERN_INFO "Booting processor %d...\n", cpu);
+	mmgrab(mm);
+	idle->active_mm = mm;
 
-		idle = idle_thread(cpu);
+	idle->thread.request.thread.proc = start_secondary;
+	idle->thread.request.thread.arg = NULL;
 
-		init_idle(idle, cpu);
-
-		waittime = 200000000;
-		while (waittime-- && !cpu_isset(cpu, cpu_callin_map))
-			cpu_relax();
-
-		printk(KERN_INFO "%s\n",
-		       cpu_isset(cpu, cpu_calling_map) ? "done" : "failed");
-	}
+	new_thread(task_stack_page(idle), &idle->thread.switch_buf,
+		   new_thread_handler);
+	os_start_secondary(opaque, &idle->thread.switch_buf);
 }
 
-void smp_prepare_boot_cpu(void)
+void __init smp_prepare_cpus(unsigned int max_cpus)
 {
-	set_cpu_online(smp_processor_id(), true);
+	int err, cpu, me = smp_processor_id();
+	unsigned long deadline;
+
+	os_init_smp();
+
+	for_each_possible_cpu(cpu) {
+		if (cpu == me)
+			continue;
+
+		pr_debug("Booting processor %d...\n", cpu);
+		err = os_start_cpu_thread(cpu);
+		if (err) {
+			pr_crit("CPU#%d failed to start cpu thread, err = %d",
+				cpu, err);
+			continue;
+		}
+
+		deadline = jiffies + msecs_to_jiffies(1000);
+		spin_until_cond(cpu_present(cpu) ||
+				time_is_before_jiffies(deadline));
+
+		if (!cpu_present(cpu))
+			pr_crit("CPU#%d failed to boot\n", cpu);
+	}
 }
 
 int __cpu_up(unsigned int cpu, struct task_struct *tidle)
 {
-	cpu_set(cpu, smp_commenced_mask);
-	while (!cpu_online(cpu))
-		mb();
+	cpu_tasks[cpu] = tidle;
+	smp_wmb(); /* paired with smp_rmb() in uml_start_secondary() */
+	cpu_states[cpu] = UML_CPU_RUNNING;
+	os_futex_wake(&cpu_states[cpu]);
+	spin_until_cond(cpu_online(cpu));
+
 	return 0;
 }
 
-int setup_profiling_timer(unsigned int multiplier)
+void __init smp_cpus_done(unsigned int max_cpus)
 {
-	printk(KERN_INFO "setup_profiling_timer\n");
-	return 0;
 }
 
-void smp_call_function_slave(int cpu);
+/* Set in uml_ncpus_setup */
+int uml_ncpus = 1;
 
-void IPI_handler(int cpu)
+void __init prefill_possible_map(void)
 {
-	unsigned char c;
-	int fd;
+	int cpu;
 
-	fd = cpu_data[cpu].ipi_pipe[0];
-	while (os_read_file(fd, &c, 1) == 1) {
-		switch (c) {
-		case 'C':
-			smp_call_function_slave(cpu);
-			break;
+	for (cpu = 0; cpu < uml_ncpus; cpu++)
+		set_cpu_possible(cpu, true);
+	for (; cpu < NR_CPUS; cpu++)
+		set_cpu_possible(cpu, false);
+}
 
-		case 'R':
-			scheduler_ipi();
-			break;
+static int __init uml_ncpus_setup(char *line, int *add)
+{
+	*add = 0;
 
-		case 'S':
-			printk(KERN_INFO "CPU#%d stopping\n", cpu);
-			while (1)
-				pause();
-			break;
-
-		default:
-			printk(KERN_ERR "CPU#%d received unknown IPI [%c]!\n",
-			       cpu, c);
-			break;
-		}
+	if (kstrtoint(line, 10, &uml_ncpus)) {
+		os_warn("%s: Couldn't parse '%s'\n", __func__, line);
+		return -1;
 	}
-}
 
-int hard_smp_processor_id(void)
-{
-	return pid_to_processor_id(os_getpid());
-}
+	uml_ncpus = clamp(uml_ncpus, 1, NR_CPUS);
 
-static DEFINE_SPINLOCK(call_lock);
-static atomic_t scf_started;
-static atomic_t scf_finished;
-static void (*func)(void *info);
-static void *info;
-
-void smp_call_function_slave(int cpu)
-{
-	atomic_inc(&scf_started);
-	(*func)(info);
-	atomic_inc(&scf_finished);
-}
-
-int smp_call_function(void (*_func)(void *info), void *_info, int wait)
-{
-	int cpus = num_online_cpus() - 1;
-	int i;
-
-	if (!cpus)
-		return 0;
-
-	/* Can deadlock when called with interrupts disabled */
-	WARN_ON(irqs_disabled());
-
-	spin_lock_bh(&call_lock);
-	atomic_set(&scf_started, 0);
-	atomic_set(&scf_finished, 0);
-	func = _func;
-	info = _info;
-
-	for_each_online_cpu(i)
-		os_write_file(cpu_data[i].ipi_pipe[1], "C", 1);
-
-	while (atomic_read(&scf_started) != cpus)
-		barrier();
-
-	if (wait)
-		while (atomic_read(&scf_finished) != cpus)
-			barrier();
-
-	spin_unlock_bh(&call_lock);
 	return 0;
 }
 
-#endif
+__uml_setup("ncpus=", uml_ncpus_setup,
+"ncpus=<# of desired CPUs>\n"
+"    This tells UML how many virtual processors to start. The maximum\n"
+"    number of supported virtual processors can be obtained by querying\n"
+"    the CONFIG_NR_CPUS option using --showconfig.\n\n"
+);
+
+EXPORT_SYMBOL(uml_curr_cpu);

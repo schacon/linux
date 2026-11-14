@@ -1,7 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/libata.h>
 #include <linux/cdrom.h>
 #include <linux/pm_runtime.h>
 #include <linux/module.h>
+#include <linux/pm_qos.h>
 #include <scsi/scsi_device.h>
 
 #include "libata.h"
@@ -32,13 +34,14 @@ struct zpodd {
 
 static int eject_tray(struct ata_device *dev)
 {
-	struct ata_taskfile tf = {};
-	const char cdb[] = {  GPCMD_START_STOP_UNIT,
+	struct ata_taskfile tf;
+	static const char cdb[ATAPI_CDB_LEN] = {  GPCMD_START_STOP_UNIT,
 		0, 0, 0,
 		0x02,     /* LoEj */
 		0, 0, 0, 0, 0, 0, 0,
 	};
 
+	ata_tf_init(dev, &tf);
 	tf.flags = ATA_TFLAG_ISADDR | ATA_TFLAG_DEVICE;
 	tf.command = ATA_CMD_PACKET;
 	tf.protocol = ATAPI_PROT_NODATA;
@@ -49,55 +52,52 @@ static int eject_tray(struct ata_device *dev)
 /* Per the spec, only slot type and drawer type ODD can be supported */
 static enum odd_mech_type zpodd_get_mech_type(struct ata_device *dev)
 {
-	char buf[16];
+	char *buf;
 	unsigned int ret;
-	struct rm_feature_desc *desc = (void *)(buf + 8);
-	struct ata_taskfile tf = {};
-
-	char cdb[] = {  GPCMD_GET_CONFIGURATION,
+	struct rm_feature_desc *desc;
+	struct ata_taskfile tf;
+	static const char cdb[ATAPI_CDB_LEN] = {  GPCMD_GET_CONFIGURATION,
 			2,      /* only 1 feature descriptor requested */
 			0, 3,   /* 3, removable medium feature */
 			0, 0, 0,/* reserved */
-			0, sizeof(buf),
+			0, 16,
 			0, 0, 0,
 	};
 
+	buf = kzalloc(16, GFP_KERNEL);
+	if (!buf)
+		return ODD_MECH_TYPE_UNSUPPORTED;
+	desc = (void *)(buf + 8);
+
+	ata_tf_init(dev, &tf);
 	tf.flags = ATA_TFLAG_ISADDR | ATA_TFLAG_DEVICE;
 	tf.command = ATA_CMD_PACKET;
 	tf.protocol = ATAPI_PROT_PIO;
-	tf.lbam = sizeof(buf);
+	tf.lbam = 16;
 
 	ret = ata_exec_internal(dev, &tf, cdb, DMA_FROM_DEVICE,
-				buf, sizeof(buf), 0);
-	if (ret)
+				buf, 16, 0);
+	if (ret) {
+		kfree(buf);
 		return ODD_MECH_TYPE_UNSUPPORTED;
+	}
 
-	if (be16_to_cpu(desc->feature_code) != 3)
+	if (be16_to_cpu(desc->feature_code) != 3) {
+		kfree(buf);
 		return ODD_MECH_TYPE_UNSUPPORTED;
+	}
 
-	if (desc->mech_type == 0 && desc->load == 0 && desc->eject == 1)
+	if (desc->mech_type == 0 && desc->load == 0 && desc->eject == 1) {
+		kfree(buf);
 		return ODD_MECH_TYPE_SLOT;
-	else if (desc->mech_type == 1 && desc->load == 0 && desc->eject == 1)
+	} else if (desc->mech_type == 1 && desc->load == 0 &&
+		   desc->eject == 1) {
+		kfree(buf);
 		return ODD_MECH_TYPE_DRAWER;
-	else
+	} else {
+		kfree(buf);
 		return ODD_MECH_TYPE_UNSUPPORTED;
-}
-
-static bool odd_can_poweroff(struct ata_device *ata_dev)
-{
-	acpi_handle handle;
-	acpi_status status;
-	struct acpi_device *acpi_dev;
-
-	handle = ata_dev_acpi_handle(ata_dev);
-	if (!handle)
-		return false;
-
-	status = acpi_bus_get_device(handle, &acpi_dev);
-	if (ACPI_FAILURE(status))
-		return false;
-
-	return acpi_device_can_poweroff(acpi_dev);
+	}
 }
 
 /* Test if ODD is zero power ready by sense code */
@@ -112,7 +112,7 @@ static bool zpready(struct ata_device *dev)
 	if (!ret || sense_key != NOT_READY)
 		return false;
 
-	sense_buf = dev->link->ap->sector_buf;
+	sense_buf = dev->sector_buf;
 	ret = atapi_eh_request_sense(dev, sense_buf, sense_key);
 	if (ret)
 		return false;
@@ -160,8 +160,7 @@ void zpodd_on_suspend(struct ata_device *dev)
 		return;
 	}
 
-	expires = zpodd->last_ready +
-		  msecs_to_jiffies(zpodd_poweroff_delay * 1000);
+	expires = zpodd->last_ready + secs_to_jiffies(zpodd_poweroff_delay);
 	if (time_before(jiffies, expires))
 		return;
 
@@ -189,8 +188,7 @@ void zpodd_enable_run_wake(struct ata_device *dev)
 	sdev_disable_disk_events(dev->sdev);
 
 	zpodd->powered_off = true;
-	device_set_run_wake(&dev->sdev->sdev_gendev, true);
-	acpi_pm_device_run_wake(&dev->sdev->sdev_gendev, true);
+	acpi_pm_set_device_wakeup(&dev->tdev, true);
 }
 
 /* Disable runtime wake capability if it is enabled */
@@ -198,10 +196,8 @@ void zpodd_disable_run_wake(struct ata_device *dev)
 {
 	struct zpodd *zpodd = dev->zpodd;
 
-	if (zpodd->powered_off) {
-		acpi_pm_device_run_wake(&dev->sdev->sdev_gendev, false);
-		device_set_run_wake(&dev->sdev->sdev_gendev, false);
-	}
+	if (zpodd->powered_off)
+		acpi_pm_set_device_wakeup(&dev->tdev, false);
 }
 
 /*
@@ -261,26 +257,24 @@ static void ata_acpi_add_pm_notifier(struct ata_device *dev)
 
 static void ata_acpi_remove_pm_notifier(struct ata_device *dev)
 {
-	acpi_handle handle = DEVICE_ACPI_HANDLE(&dev->sdev->sdev_gendev);
+	acpi_handle handle = ata_dev_acpi_handle(dev);
 	acpi_remove_notify_handler(handle, ACPI_SYSTEM_NOTIFY, zpodd_wake_dev);
 }
 
 void zpodd_init(struct ata_device *dev)
 {
+	struct acpi_device *adev = ACPI_COMPANION(&dev->tdev);
 	enum odd_mech_type mech_type;
 	struct zpodd *zpodd;
 
-	if (dev->zpodd)
-		return;
-
-	if (!odd_can_poweroff(dev))
+	if (dev->zpodd || !adev || !acpi_device_can_poweroff(adev))
 		return;
 
 	mech_type = zpodd_get_mech_type(dev);
 	if (mech_type == ODD_MECH_TYPE_UNSUPPORTED)
 		return;
 
-	zpodd = kzalloc(sizeof(struct zpodd), GFP_KERNEL);
+	zpodd = kzalloc_obj(struct zpodd);
 	if (!zpodd)
 		return;
 
@@ -289,6 +283,7 @@ void zpodd_init(struct ata_device *dev)
 	ata_acpi_add_pm_notifier(dev);
 	zpodd->dev = dev;
 	dev->zpodd = zpodd;
+	dev_pm_qos_expose_flags(&dev->tdev, 0);
 }
 
 void zpodd_exit(struct ata_device *dev)

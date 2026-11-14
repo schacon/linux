@@ -1,30 +1,34 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * x86 specific code for irq_work
  *
- * Copyright (C) 2010 Red Hat, Inc., Peter Zijlstra <pzijlstr@redhat.com>
+ * Copyright (C) 2010 Red Hat, Inc., Peter Zijlstra
  */
 
 #include <linux/kernel.h>
 #include <linux/irq_work.h>
 #include <linux/hardirq.h>
 #include <asm/apic.h>
+#include <asm/idtentry.h>
+#include <asm/trace/irq_vectors.h>
+#include <linux/interrupt.h>
 
-void smp_irq_work_interrupt(struct pt_regs *regs)
+#ifdef CONFIG_X86_LOCAL_APIC
+DEFINE_IDTENTRY_SYSVEC(sysvec_irq_work)
 {
-	irq_enter();
-	ack_APIC_irq();
-	inc_irq_stat(apic_irq_work_irqs);
+	apic_eoi();
+	trace_irq_work_entry(IRQ_WORK_VECTOR);
+	inc_irq_stat(IRQ_WORK);
 	irq_work_run();
-	irq_exit();
+	trace_irq_work_exit(IRQ_WORK_VECTOR);
 }
 
 void arch_irq_work_raise(void)
 {
-#ifdef CONFIG_X86_LOCAL_APIC
-	if (!cpu_has_apic)
+	if (!arch_irq_work_has_interrupt())
 		return;
 
-	apic->send_IPI_self(IRQ_WORK_VECTOR);
+	__apic_send_IPI_self(IRQ_WORK_VECTOR);
 	apic_wait_icr_idle();
-#endif
 }
+#endif

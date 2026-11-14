@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _CYPRESS_PS2_H
 #define _CYPRESS_PS2_H
 
@@ -71,12 +72,6 @@
 #define CYTP_DATA_TIMEOUT 30
 
 #define CYTP_EXT_CMD   0xe8
-#define CYTP_PS2_RETRY 0xfe
-#define CYTP_PS2_ERROR 0xfc
-
-#define CYTP_RESP_RETRY 0x01
-#define CYTP_RESP_ERROR 0xfe
-
 
 #define CYTP_105001_WIDTH  97   /* Dell XPS 13 */
 #define CYTP_105001_HIGH   59
@@ -169,23 +164,7 @@ struct cytp_data {
 };
 
 
-#ifdef CONFIG_MOUSE_PS2_CYPRESS
 int cypress_detect(struct psmouse *psmouse, bool set_properties);
 int cypress_init(struct psmouse *psmouse);
-bool cypress_supported(void);
-#else
-inline int cypress_detect(struct psmouse *psmouse, bool set_properties)
-{
-	return -ENOSYS;
-}
-inline int cypress_init(struct psmouse *psmouse)
-{
-	return -ENOSYS;
-}
-inline bool cypress_supported(void)
-{
-	return 0;
-}
-#endif /* CONFIG_MOUSE_PS2_CYPRESS */
 
 #endif  /* _CYPRESS_PS2_H */

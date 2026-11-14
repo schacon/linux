@@ -1,10 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *	w1_ds28e04.c - w1 family 1C (DS28E04) driver
  *
  * Copyright (c) 2012 Markus Franke <franke.m@sebakmt.com>
- *
- * This source code is licensed under the GNU General Public License,
- * Version 2. See the file COPYING for more details.
  */
 
 #include <linux/kernel.h>
@@ -20,13 +18,9 @@
 #define CRC16_INIT		0
 #define CRC16_VALID		0xb001
 
-#include "../w1.h"
-#include "../w1_int.h"
-#include "../w1_family.h"
+#include <linux/w1.h>
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Markus Franke <franke.m@sebakmt.com>, <franm@hrz.tu-chemnitz.de>");
-MODULE_DESCRIPTION("w1 family 1C driver for DS28E04, 4kb EEPROM and PIO");
+#define W1_FAMILY_DS28E04	0x1C
 
 /* Allow the strong pullup to be disabled, but default to enabled.
  * If it was disabled a parasite powered device might not get the required
@@ -38,7 +32,7 @@ static int w1_strong_pullup = 1;
 module_param_named(strong_pullup, w1_strong_pullup, int, 0);
 
 /* enable/disable CRC checking on DS28E04-100 memory accesses */
-static char w1_enable_crccheck = 1;
+static bool w1_enable_crccheck = true;
 
 #define W1_EEPROM_SIZE		512
 #define W1_PAGE_COUNT		16
@@ -59,7 +53,7 @@ struct w1_f1C_data {
 	u32	validcrc;
 };
 
-/**
+/*
  * Check the file size bounds and adjusts count as needed.
  * This would not be needed if the file size didn't reset to 0 after a write.
  */
@@ -117,9 +111,9 @@ static int w1_f1C_read(struct w1_slave *sl, int addr, int len, char *data)
 	return w1_read_block(sl->master, data, len);
 }
 
-static ssize_t w1_f1C_read_bin(struct file *filp, struct kobject *kobj,
-			       struct bin_attribute *bin_attr,
-			       char *buf, loff_t off, size_t count)
+static ssize_t eeprom_read(struct file *filp, struct kobject *kobj,
+			   const struct bin_attribute *bin_attr, char *buf,
+			   loff_t off, size_t count)
 {
 	struct w1_slave *sl = kobj_to_w1_slave(kobj);
 	struct w1_f1C_data *data = sl->family_data;
@@ -152,16 +146,17 @@ out_up:
 }
 
 /**
- * Writes to the scratchpad and reads it back for verification.
+ * w1_f1C_write() - Writes to the scratchpad and reads it back for verification.
+ * @sl:		The slave structure
+ * @addr:	Address for the write
+ * @len:	length must be <= (W1_PAGE_SIZE - (addr & W1_PAGE_MASK))
+ * @data:	The data to write
+ *
  * Then copies the scratchpad to EEPROM.
  * The data must be on one page.
  * The master must be locked.
  *
- * @param sl	The slave structure
- * @param addr	Address for the write
- * @param len   length must be <= (W1_PAGE_SIZE - (addr & W1_PAGE_MASK))
- * @param data	The data to write
- * @return	0=Success -1=failure
+ * Return:	0=Success, -1=failure
  */
 static int w1_f1C_write(struct w1_slave *sl, int addr, int len, const u8 *data)
 {
@@ -203,8 +198,10 @@ static int w1_f1C_write(struct w1_slave *sl, int addr, int len, const u8 *data)
 	wrbuf[3] = es;
 
 	for (i = 0; i < sizeof(wrbuf); ++i) {
-		/* issue 10ms strong pullup (or delay) on the last byte
-		   for writing the data from the scratchpad to EEPROM */
+		/*
+		 * issue 10ms strong pullup (or delay) on the last byte
+		 * for writing the data from the scratchpad to EEPROM
+		 */
 		if (w1_strong_pullup && i == sizeof(wrbuf)-1)
 			w1_next_pullup(sl->master, tm);
 
@@ -225,9 +222,9 @@ static int w1_f1C_write(struct w1_slave *sl, int addr, int len, const u8 *data)
 	return 0;
 }
 
-static ssize_t w1_f1C_write_bin(struct file *filp, struct kobject *kobj,
-			       struct bin_attribute *bin_attr,
-			       char *buf, loff_t off, size_t count)
+static ssize_t eeprom_write(struct file *filp, struct kobject *kobj,
+			    const struct bin_attribute *bin_attr, char *buf,
+			    loff_t off, size_t count)
 
 {
 	struct w1_slave *sl = kobj_to_w1_slave(kobj);
@@ -279,9 +276,11 @@ out_up:
 	return count;
 }
 
-static ssize_t w1_f1C_read_pio(struct file *filp, struct kobject *kobj,
-			       struct bin_attribute *bin_attr,
-			       char *buf, loff_t off, size_t count)
+static const BIN_ATTR_RW(eeprom, W1_EEPROM_SIZE);
+
+static ssize_t pio_read(struct file *filp, struct kobject *kobj,
+			const struct bin_attribute *bin_attr, char *buf, loff_t off,
+			size_t count)
 
 {
 	struct w1_slave *sl = kobj_to_w1_slave(kobj);
@@ -298,9 +297,9 @@ static ssize_t w1_f1C_read_pio(struct file *filp, struct kobject *kobj,
 	return ret;
 }
 
-static ssize_t w1_f1C_write_pio(struct file *filp, struct kobject *kobj,
-				struct bin_attribute *bin_attr,
-				char *buf, loff_t off, size_t count)
+static ssize_t pio_write(struct file *filp, struct kobject *kobj,
+			 const struct bin_attribute *bin_attr, char *buf,
+			 loff_t off, size_t count)
 
 {
 	struct w1_slave *sl = kobj_to_w1_slave(kobj);
@@ -338,132 +337,81 @@ static ssize_t w1_f1C_write_pio(struct file *filp, struct kobject *kobj,
 	return count;
 }
 
-static ssize_t w1_f1C_show_crccheck(struct device *dev,
-				    struct device_attribute *attr, char *buf)
-{
-	if (put_user(w1_enable_crccheck + 0x30, buf))
-		return -EFAULT;
+static const BIN_ATTR_RW(pio, 1);
 
-	return sizeof(w1_enable_crccheck);
+static ssize_t crccheck_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	return sysfs_emit(buf, "%d\n", w1_enable_crccheck);
 }
 
-static ssize_t w1_f1C_store_crccheck(struct device *dev,
-				     struct device_attribute *attr,
-				     const char *buf, size_t count)
+static ssize_t crccheck_store(struct device *dev, struct device_attribute *attr,
+			      const char *buf, size_t count)
 {
-	char val;
+	int err = kstrtobool(buf, &w1_enable_crccheck);
 
-	if (count != 1 || !buf)
-		return -EINVAL;
+	if (err)
+		return err;
 
-	if (get_user(val, buf))
-		return -EFAULT;
-
-	/* convert to decimal */
-	val = val - 0x30;
-	if (val != 0 && val != 1)
-		return -EINVAL;
-
-	/* set the new value */
-	w1_enable_crccheck = val;
-
-	return sizeof(w1_enable_crccheck);
+	return count;
 }
 
-#define NB_SYSFS_BIN_FILES 2
-static struct bin_attribute w1_f1C_bin_attr[NB_SYSFS_BIN_FILES] = {
-	{
-		.attr = {
-			.name = "eeprom",
-			.mode = S_IRUGO | S_IWUSR,
-		},
-		.size = W1_EEPROM_SIZE,
-		.read = w1_f1C_read_bin,
-		.write = w1_f1C_write_bin,
-	},
-	{
-		.attr = {
-			.name = "pio",
-			.mode = S_IRUGO | S_IWUSR,
-		},
-		.size = 1,
-		.read = w1_f1C_read_pio,
-		.write = w1_f1C_write_pio,
-	}
+static DEVICE_ATTR_RW(crccheck);
+
+static struct attribute *w1_f1C_attrs[] = {
+	&dev_attr_crccheck.attr,
+	NULL,
 };
 
-static DEVICE_ATTR(crccheck, S_IWUSR | S_IRUGO,
-		   w1_f1C_show_crccheck, w1_f1C_store_crccheck);
+static const struct bin_attribute *const w1_f1C_bin_attrs[] = {
+	&bin_attr_eeprom,
+	&bin_attr_pio,
+	NULL,
+};
+
+static const struct attribute_group w1_f1C_group = {
+	.attrs		= w1_f1C_attrs,
+	.bin_attrs	= w1_f1C_bin_attrs,
+};
+
+static const struct attribute_group *w1_f1C_groups[] = {
+	&w1_f1C_group,
+	NULL,
+};
 
 static int w1_f1C_add_slave(struct w1_slave *sl)
 {
-	int err = 0;
-	int i;
 	struct w1_f1C_data *data = NULL;
 
 	if (w1_enable_crccheck) {
-		data = kzalloc(sizeof(struct w1_f1C_data), GFP_KERNEL);
+		data = kzalloc_obj(struct w1_f1C_data);
 		if (!data)
 			return -ENOMEM;
 		sl->family_data = data;
 	}
 
-	/* create binary sysfs attributes */
-	for (i = 0; i < NB_SYSFS_BIN_FILES && !err; ++i)
-		err = sysfs_create_bin_file(
-			&sl->dev.kobj, &(w1_f1C_bin_attr[i]));
-
-	if (!err) {
-		/* create device attributes */
-		err = device_create_file(&sl->dev, &dev_attr_crccheck);
-	}
-
-	if (err) {
-		/* remove binary sysfs attributes */
-		for (i = 0; i < NB_SYSFS_BIN_FILES; ++i)
-			sysfs_remove_bin_file(
-				&sl->dev.kobj, &(w1_f1C_bin_attr[i]));
-
-		kfree(data);
-	}
-
-	return err;
+	return 0;
 }
 
 static void w1_f1C_remove_slave(struct w1_slave *sl)
 {
-	int i;
-
 	kfree(sl->family_data);
 	sl->family_data = NULL;
-
-	/* remove device attributes */
-	device_remove_file(&sl->dev, &dev_attr_crccheck);
-
-	/* remove binary sysfs attributes */
-	for (i = 0; i < NB_SYSFS_BIN_FILES; ++i)
-		sysfs_remove_bin_file(&sl->dev.kobj, &(w1_f1C_bin_attr[i]));
 }
 
-static struct w1_family_ops w1_f1C_fops = {
+static const struct w1_family_ops w1_f1C_fops = {
 	.add_slave      = w1_f1C_add_slave,
 	.remove_slave   = w1_f1C_remove_slave,
+	.groups		= w1_f1C_groups,
 };
 
 static struct w1_family w1_family_1C = {
 	.fid = W1_FAMILY_DS28E04,
 	.fops = &w1_f1C_fops,
 };
+module_w1_family(w1_family_1C);
 
-static int __init w1_f1C_init(void)
-{
-	return w1_register_family(&w1_family_1C);
-}
-
-static void __exit w1_f1C_fini(void)
-{
-	w1_unregister_family(&w1_family_1C);
-}
-
-module_init(w1_f1C_init);
-module_exit(w1_f1C_fini);
+MODULE_AUTHOR("Markus Franke <franke.m@sebakmt.com>, <franm@hrz.tu-chemnitz.de>");
+MODULE_DESCRIPTION("w1 family 1C driver for DS28E04, 4kb EEPROM and PIO");
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("w1-family-" __stringify(W1_FAMILY_DS28E04));

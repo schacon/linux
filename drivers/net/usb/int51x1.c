@@ -1,27 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (c) 2009 Peter Holik
  *
  * Intellon usb PLC (Powerline Communications) usb net driver
  *
- * http://www.tandel.be/downloads/INT51X1_Datasheet.pdf
+ * https://web.archive.org/web/20101025091240id_/http://www.tandel.be/downloads/INT51X1_Datasheet.pdf
  *
  * Based on the work of Jan 'RedBully' Seiffert
- */
-
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or.
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/module.h>
@@ -38,14 +23,6 @@
 #define INT51X1_PRODUCT_ID	0x5121
 
 #define INT51X1_HEADER_SIZE	2	/* 2 byte header */
-
-#define PACKET_TYPE_PROMISCUOUS		(1 << 0)
-#define PACKET_TYPE_ALL_MULTICAST	(1 << 1) /* no filter */
-#define PACKET_TYPE_DIRECTED		(1 << 2)
-#define PACKET_TYPE_BROADCAST		(1 << 3)
-#define PACKET_TYPE_MULTICAST		(1 << 4) /* filtered */
-
-#define SET_ETHERNET_PACKET_FILTER	0x43
 
 static int int51x1_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 {
@@ -73,7 +50,7 @@ static struct sk_buff *int51x1_tx_fixup(struct usbnet *dev,
 	int need_tail = 0;
 	__le16 *len;
 
-	/* if packet and our header is smaler than 64 pad to 64 (+ ZLP) */
+	/* if packet and our header is smaller than 64 pad to 64 (+ ZLP) */
 	if ((pack_with_header_len) < dev->maxpacket)
 		need_tail = dev->maxpacket - pack_with_header_len + 1;
 	/*
@@ -107,36 +84,13 @@ static struct sk_buff *int51x1_tx_fixup(struct usbnet *dev,
 	pack_len += need_tail;
 	pack_len &= 0x07ff;
 
-	len = (__le16 *) __skb_push(skb, INT51X1_HEADER_SIZE);
+	len = __skb_push(skb, INT51X1_HEADER_SIZE);
 	*len = cpu_to_le16(pack_len);
 
 	if(need_tail)
-		memset(__skb_put(skb, need_tail), 0, need_tail);
+		__skb_put_zero(skb, need_tail);
 
 	return skb;
-}
-
-static void int51x1_set_multicast(struct net_device *netdev)
-{
-	struct usbnet *dev = netdev_priv(netdev);
-	u16 filter = PACKET_TYPE_DIRECTED | PACKET_TYPE_BROADCAST;
-
-	if (netdev->flags & IFF_PROMISC) {
-		/* do not expect to see traffic of other PLCs */
-		filter |= PACKET_TYPE_PROMISCUOUS;
-		netdev_info(dev->net, "promiscuous mode enabled\n");
-	} else if (!netdev_mc_empty(netdev) ||
-		  (netdev->flags & IFF_ALLMULTI)) {
-		filter |= PACKET_TYPE_ALL_MULTICAST;
-		netdev_dbg(dev->net, "receive all multicast enabled\n");
-	} else {
-		/* ~PROMISCUOUS, ~MULTICAST */
-		netdev_dbg(dev->net, "receive own packets only\n");
-	}
-
-	usbnet_write_cmd_async(dev, SET_ETHERNET_PACKET_FILTER,
-			       USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
-			       filter, 0, NULL, 0);
 }
 
 static const struct net_device_ops int51x1_netdev_ops = {
@@ -145,9 +99,10 @@ static const struct net_device_ops int51x1_netdev_ops = {
 	.ndo_start_xmit		= usbnet_start_xmit,
 	.ndo_tx_timeout		= usbnet_tx_timeout,
 	.ndo_change_mtu		= usbnet_change_mtu,
+	.ndo_get_stats64	= dev_get_tstats64,
 	.ndo_set_mac_address	= eth_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_set_rx_mode	= int51x1_set_multicast,
+	.ndo_set_rx_mode	= usbnet_set_rx_mode,
 };
 
 static int int51x1_bind(struct usbnet *dev, struct usb_interface *intf)
@@ -169,6 +124,7 @@ static const struct driver_info int51x1_info = {
 	.bind        = int51x1_bind,
 	.rx_fixup    = int51x1_rx_fixup,
 	.tx_fixup    = int51x1_tx_fixup,
+	.set_rx_mode = usbnet_cdc_update_filter,
 	.in          = 1,
 	.out         = 2,
 	.flags       = FLAG_ETHER,

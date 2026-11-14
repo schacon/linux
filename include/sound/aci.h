@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ACI_H_
 #define _ACI_H_
 
@@ -71,6 +72,7 @@
 #define ACI_SET_EQ7		0x46	/* ... to Treble */
 
 struct snd_miro_aci {
+	struct snd_card *card;
 	unsigned long aci_port;
 	int aci_vendor;
 	int aci_product;

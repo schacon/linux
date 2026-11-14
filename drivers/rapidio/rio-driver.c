@@ -1,19 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * RapidIO driver support
  *
  * Copyright 2005 MontaVista Software, Inc.
  * Matt Porter <mporter@kernel.crashing.org>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/rio.h>
 #include <linux/rio_ids.h>
+#include <linux/rio_drv.h>
 
 #include "rio.h"
 
@@ -115,7 +112,7 @@ static int rio_device_probe(struct device *dev)
  * driver, then run the driver remove() method.  Then update
  * the reference count.
  */
-static int rio_device_remove(struct device *dev)
+static void rio_device_remove(struct device *dev)
 {
 	struct rio_dev *rdev = to_rio_dev(dev);
 	struct rio_driver *rdrv = rdev->driver;
@@ -127,8 +124,17 @@ static int rio_device_remove(struct device *dev)
 	}
 
 	rio_dev_put(rdev);
+}
 
-	return 0;
+static void rio_device_shutdown(struct device *dev)
+{
+	struct rio_dev *rdev = to_rio_dev(dev);
+	struct rio_driver *rdrv = rdev->driver;
+
+	dev_dbg(dev, "RIO: %s\n", __func__);
+
+	if (rdrv && rdrv->shutdown)
+		rdrv->shutdown(rdev);
 }
 
 /**
@@ -167,7 +173,6 @@ void rio_unregister_driver(struct rio_driver *rdrv)
 void rio_attach_device(struct rio_dev *rdev)
 {
 	rdev->dev.bus = &rio_bus_type;
-	rdev->dev.parent = &rio_bus;
 }
 EXPORT_SYMBOL_GPL(rio_attach_device);
 
@@ -181,10 +186,10 @@ EXPORT_SYMBOL_GPL(rio_attach_device);
  *  there is a matching &struct rio_device_id or 0 if there is
  *  no match.
  */
-static int rio_match_bus(struct device *dev, struct device_driver *drv)
+static int rio_match_bus(struct device *dev, const struct device_driver *drv)
 {
 	struct rio_dev *rdev = to_rio_dev(dev);
-	struct rio_driver *rdrv = to_rio_driver(drv);
+	const struct rio_driver *rdrv = to_rio_driver(drv);
 	const struct rio_device_id *id = rdrv->id_table;
 	const struct rio_device_id *found_id;
 
@@ -199,30 +204,57 @@ static int rio_match_bus(struct device *dev, struct device_driver *drv)
       out:return 0;
 }
 
-struct device rio_bus = {
-	.init_name = "rapidio",
-};
+static int rio_uevent(const struct device *dev, struct kobj_uevent_env *env)
+{
+	const struct rio_dev *rdev;
 
-struct bus_type rio_bus_type = {
+	if (!dev)
+		return -ENODEV;
+
+	rdev = to_rio_dev(dev);
+	if (!rdev)
+		return -ENODEV;
+
+	if (add_uevent_var(env, "MODALIAS=rapidio:v%04Xd%04Xav%04Xad%04X",
+			   rdev->vid, rdev->did, rdev->asm_vid, rdev->asm_did))
+		return -ENOMEM;
+	return 0;
+}
+
+struct class rio_mport_class = {
+	.name		= "rapidio_port",
+	.dev_groups	= rio_mport_groups,
+};
+EXPORT_SYMBOL_GPL(rio_mport_class);
+
+const struct bus_type rio_bus_type = {
 	.name = "rapidio",
 	.match = rio_match_bus,
-	.dev_attrs = rio_dev_attrs,
-	.bus_attrs = rio_bus_attrs,
+	.dev_groups = rio_dev_groups,
+	.bus_groups = rio_bus_groups,
 	.probe = rio_device_probe,
 	.remove = rio_device_remove,
+	.shutdown = rio_device_shutdown,
+	.uevent	= rio_uevent,
 };
 
 /**
  *  rio_bus_init - Register the RapidIO bus with the device model
  *
- *  Registers the RIO bus device and RIO bus type with the Linux
+ *  Registers the RIO mport device class and RIO bus type with the Linux
  *  device model.
  */
 static int __init rio_bus_init(void)
 {
-	if (device_register(&rio_bus) < 0)
-		printk("RIO: failed to register RIO bus device\n");
-	return bus_register(&rio_bus_type);
+	int ret;
+
+	ret = class_register(&rio_mport_class);
+	if (!ret) {
+		ret = bus_register(&rio_bus_type);
+		if (ret)
+			class_unregister(&rio_mport_class);
+	}
+	return ret;
 }
 
 postcore_initcall(rio_bus_init);

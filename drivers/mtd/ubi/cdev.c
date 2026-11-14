@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (c) International Business Machines Corp., 2006
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See
- * the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  *
  * Author: Artem Bityutskiy (Битюцкий Артём)
  */
@@ -60,13 +47,13 @@ static int get_exclusive(struct ubi_volume_desc *desc)
 	struct ubi_volume *vol = desc->vol;
 
 	spin_lock(&vol->ubi->volumes_lock);
-	users = vol->readers + vol->writers + vol->exclusive;
+	users = vol->readers + vol->writers + vol->exclusive + vol->metaonly;
 	ubi_assert(users > 0);
 	if (users > 1) {
-		ubi_err("%d users for volume %d", users, vol->vol_id);
+		ubi_err(vol->ubi, "%d users for volume %d", users, vol->vol_id);
 		err = -EBUSY;
 	} else {
-		vol->readers = vol->writers = 0;
+		vol->readers = vol->writers = vol->metaonly = 0;
 		vol->exclusive = 1;
 		err = desc->mode;
 		desc->mode = UBI_EXCLUSIVE;
@@ -86,13 +73,15 @@ static void revoke_exclusive(struct ubi_volume_desc *desc, int mode)
 	struct ubi_volume *vol = desc->vol;
 
 	spin_lock(&vol->ubi->volumes_lock);
-	ubi_assert(vol->readers == 0 && vol->writers == 0);
+	ubi_assert(vol->readers == 0 && vol->writers == 0 && vol->metaonly == 0);
 	ubi_assert(vol->exclusive == 1 && desc->mode == UBI_EXCLUSIVE);
 	vol->exclusive = 0;
 	if (mode == UBI_READONLY)
 		vol->readers = 1;
 	else if (mode == UBI_READWRITE)
 		vol->writers = 1;
+	else if (mode == UBI_METAONLY)
+		vol->metaonly = 1;
 	else
 		vol->exclusive = 1;
 	spin_unlock(&vol->ubi->volumes_lock);
@@ -134,7 +123,7 @@ static int vol_cdev_release(struct inode *inode, struct file *file)
 		vol->ubi->ubi_num, vol->vol_id, desc->mode);
 
 	if (vol->updating) {
-		ubi_warn("update of volume %d not finished, volume is damaged",
+		ubi_warn(vol->ubi, "update of volume %d not finished, volume is damaged",
 			 vol->vol_id);
 		ubi_assert(!vol->changing_leb);
 		vol->updating = 0;
@@ -155,38 +144,14 @@ static loff_t vol_cdev_llseek(struct file *file, loff_t offset, int origin)
 {
 	struct ubi_volume_desc *desc = file->private_data;
 	struct ubi_volume *vol = desc->vol;
-	loff_t new_offset;
 
 	if (vol->updating) {
 		/* Update is in progress, seeking is prohibited */
-		ubi_err("updating");
+		ubi_err(vol->ubi, "updating");
 		return -EBUSY;
 	}
 
-	switch (origin) {
-	case 0: /* SEEK_SET */
-		new_offset = offset;
-		break;
-	case 1: /* SEEK_CUR */
-		new_offset = file->f_pos + offset;
-		break;
-	case 2: /* SEEK_END */
-		new_offset = vol->used_bytes + offset;
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	if (new_offset < 0 || new_offset > vol->used_bytes) {
-		ubi_err("bad seek %lld", new_offset);
-		return -EINVAL;
-	}
-
-	dbg_gen("seek volume %d, offset %lld, origin %d, new offset %lld",
-		vol->vol_id, offset, origin, new_offset);
-
-	file->f_pos = new_offset;
-	return new_offset;
+	return fixed_size_llseek(file, offset, origin, vol->used_bytes);
 }
 
 static int vol_cdev_fsync(struct file *file, loff_t start, loff_t end,
@@ -196,9 +161,9 @@ static int vol_cdev_fsync(struct file *file, loff_t start, loff_t end,
 	struct ubi_device *ubi = desc->vol->ubi;
 	struct inode *inode = file_inode(file);
 	int err;
-	mutex_lock(&inode->i_mutex);
+	inode_lock(inode);
 	err = ubi_sync(ubi->ubi_num);
-	mutex_unlock(&inode->i_mutex);
+	inode_unlock(inode);
 	return err;
 }
 
@@ -217,11 +182,11 @@ static ssize_t vol_cdev_read(struct file *file, __user char *buf, size_t count,
 		count, *offp, vol->vol_id);
 
 	if (vol->updating) {
-		ubi_err("updating");
+		ubi_err(vol->ubi, "updating");
 		return -EBUSY;
 	}
 	if (vol->upd_marker) {
-		ubi_err("damaged volume, update marker is set");
+		ubi_err(vol->ubi, "damaged volume, update marker is set");
 		return -EBADF;
 	}
 	if (*offp == vol->used_bytes || count == 0)
@@ -301,7 +266,7 @@ static ssize_t vol_cdev_direct_write(struct file *file, const char __user *buf,
 
 	lnum = div_u64_rem(*offp, vol->usable_leb_size, &off);
 	if (off & (ubi->min_io_size - 1)) {
-		ubi_err("unaligned position");
+		ubi_err(ubi, "unaligned position");
 		return -EINVAL;
 	}
 
@@ -310,7 +275,7 @@ static ssize_t vol_cdev_direct_write(struct file *file, const char __user *buf,
 
 	/* We can write only in fractions of the minimum I/O unit */
 	if (count & (ubi->min_io_size - 1)) {
-		ubi_err("unaligned write length");
+		ubi_err(ubi, "unaligned write length");
 		return -EINVAL;
 	}
 
@@ -372,7 +337,7 @@ static ssize_t vol_cdev_write(struct file *file, const char __user *buf,
 		err = ubi_more_leb_change_data(ubi, vol, buf, count);
 
 	if (err < 0) {
-		ubi_err("cannot accept more %zd bytes of data, error %d",
+		ubi_err(ubi, "cannot accept more %zd bytes of data, error %d",
 			count, err);
 		return err;
 	}
@@ -389,12 +354,16 @@ static ssize_t vol_cdev_write(struct file *file, const char __user *buf,
 			return count;
 		}
 
+		/*
+		 * We voluntarily do not take into account the skip_check flag
+		 * as we want to make sure what we wrote was correctly written.
+		 */
 		err = ubi_check_volume(ubi, vol->vol_id);
 		if (err < 0)
 			return err;
 
 		if (err) {
-			ubi_warn("volume %d on UBI device %d is corrupted",
+			ubi_warn(ubi, "volume %d on UBI device %d is corrupted",
 				 vol->vol_id, ubi->ubi_num);
 			vol->corrupted = 1;
 		}
@@ -438,7 +407,7 @@ static long vol_cdev_ioctl(struct file *file, unsigned int cmd,
 		}
 
 		rsvd_bytes = (long long)vol->reserved_pebs *
-					ubi->leb_size-vol->data_pad;
+					vol->usable_leb_size;
 		if (bytes < 0 || bytes > rsvd_bytes) {
 			err = -EINVAL;
 			break;
@@ -449,8 +418,10 @@ static long vol_cdev_ioctl(struct file *file, unsigned int cmd,
 			break;
 
 		err = ubi_start_update(ubi, vol, bytes);
-		if (bytes == 0)
+		if (bytes == 0) {
+			ubi_volume_notify(ubi, vol, UBI_VOLUME_UPDATED);
 			revoke_exclusive(desc, UBI_READWRITE);
+		}
 		break;
 	}
 
@@ -474,8 +445,8 @@ static long vol_cdev_ioctl(struct file *file, unsigned int cmd,
 
 		/* Validate the request */
 		err = -EINVAL;
-		if (req.lnum < 0 || req.lnum >= vol->reserved_pebs ||
-		    req.bytes < 0 || req.lnum >= vol->usable_leb_size)
+		if (!ubi_leb_valid(vol, req.lnum) ||
+		    req.bytes < 0 || req.bytes > vol->usable_leb_size)
 			break;
 
 		err = get_exclusive(desc);
@@ -505,7 +476,7 @@ static long vol_cdev_ioctl(struct file *file, unsigned int cmd,
 			break;
 		}
 
-		if (lnum < 0 || lnum >= vol->reserved_pebs) {
+		if (!ubi_leb_valid(vol, lnum)) {
 			err = -EINVAL;
 			break;
 		}
@@ -585,6 +556,26 @@ static long vol_cdev_ioctl(struct file *file, unsigned int cmd,
 		break;
 	}
 
+	/* Create a R/O block device on top of the UBI volume */
+	case UBI_IOCVOLCRBLK:
+	{
+		struct ubi_volume_info vi;
+
+		ubi_get_volume_info(desc, &vi);
+		err = ubiblock_create(&vi);
+		break;
+	}
+
+	/* Remove the R/O block device */
+	case UBI_IOCVOLRMBLK:
+	{
+		struct ubi_volume_info vi;
+
+		ubi_get_volume_info(desc, &vi);
+		err = ubiblock_remove(&vi);
+		break;
+	}
+
 	default:
 		err = -ENOTTY;
 		break;
@@ -622,6 +613,13 @@ static int verify_mkvol_req(const struct ubi_device *ubi,
 	    req->vol_type != UBI_STATIC_VOLUME)
 		goto bad;
 
+	if (req->flags & ~UBI_VOL_VALID_FLGS)
+		goto bad;
+
+	if (req->flags & UBI_VOL_SKIP_CRC_CHECK_FLG &&
+	    req->vol_type != UBI_STATIC_VOLUME)
+		goto bad;
+
 	if (req->alignment > ubi->leb_size)
 		goto bad;
 
@@ -644,7 +642,7 @@ static int verify_mkvol_req(const struct ubi_device *ubi,
 	return 0;
 
 bad:
-	ubi_err("bad volume creation request");
+	ubi_err(ubi, "bad volume creation request");
 	ubi_dump_mkvol_req(req);
 	return err;
 }
@@ -674,7 +672,7 @@ static int verify_rsvol_req(const struct ubi_device *ubi,
  * @req: volumes re-name request
  *
  * This is a helper function for the volume re-name IOCTL which validates the
- * the request, opens the volume and calls corresponding volumes management
+ * request, opens the volume and calls corresponding volumes management
  * function. Returns zero in case of success and a negative error code in case
  * of failure.
  */
@@ -703,19 +701,19 @@ static int rename_volumes(struct ubi_device *ubi,
 		req->ents[i].name[req->ents[i].name_len] = '\0';
 		n = strlen(req->ents[i].name);
 		if (n != req->ents[i].name_len)
-			err = -EINVAL;
+			return -EINVAL;
 	}
 
 	/* Make sure volume IDs and names are unique */
 	for (i = 0; i < req->count - 1; i++) {
 		for (n = i + 1; n < req->count; n++) {
 			if (req->ents[i].vol_id == req->ents[n].vol_id) {
-				ubi_err("duplicated volume id %d",
+				ubi_err(ubi, "duplicated volume id %d",
 					req->ents[i].vol_id);
 				return -EINVAL;
 			}
 			if (!strcmp(req->ents[i].name, req->ents[n].name)) {
-				ubi_err("duplicated volume name \"%s\"",
+				ubi_err(ubi, "duplicated volume name \"%s\"",
 					req->ents[i].name);
 				return -EINVAL;
 			}
@@ -729,16 +727,17 @@ static int rename_volumes(struct ubi_device *ubi,
 		int name_len = req->ents[i].name_len;
 		const char *name = req->ents[i].name;
 
-		re = kzalloc(sizeof(struct ubi_rename_entry), GFP_KERNEL);
+		re = kzalloc_obj(struct ubi_rename_entry);
 		if (!re) {
 			err = -ENOMEM;
 			goto out_free;
 		}
 
-		re->desc = ubi_open_volume(ubi->ubi_num, vol_id, UBI_EXCLUSIVE);
+		re->desc = ubi_open_volume(ubi->ubi_num, vol_id, UBI_METAONLY);
 		if (IS_ERR(re->desc)) {
 			err = PTR_ERR(re->desc);
-			ubi_err("cannot open volume %d, error %d", vol_id, err);
+			ubi_err(ubi, "cannot open volume %d, error %d",
+				vol_id, err);
 			kfree(re);
 			goto out_free;
 		}
@@ -797,12 +796,12 @@ static int rename_volumes(struct ubi_device *ubi,
 				continue;
 
 			/* The volume exists but busy, or an error occurred */
-			ubi_err("cannot open volume \"%s\", error %d",
+			ubi_err(ubi, "cannot open volume \"%s\", error %d",
 				re->new_name, err);
 			goto out_free;
 		}
 
-		re1 = kzalloc(sizeof(struct ubi_rename_entry), GFP_KERNEL);
+		re1 = kzalloc_obj(struct ubi_rename_entry);
 		if (!re1) {
 			err = -ENOMEM;
 			ubi_close_volume(desc);
@@ -827,6 +826,70 @@ out_free:
 		kfree(re);
 	}
 	return err;
+}
+
+static int ubi_get_ec_info(struct ubi_device *ubi, struct ubi_ecinfo_req __user *ureq)
+{
+	struct ubi_ecinfo_req req;
+	struct ubi_wl_entry *wl;
+	int read_cnt;
+	int peb;
+	int end_peb;
+
+	/* Copy the input arguments */
+	if (copy_from_user(&req, ureq, sizeof(struct ubi_ecinfo_req)))
+		return -EFAULT;
+
+	/* Check input arguments */
+	if (req.length <= 0 || req.start < 0 || req.start >= ubi->peb_count)
+		return -EINVAL;
+
+	if (check_add_overflow(req.start, req.length, &end_peb))
+		return -EINVAL;
+
+	if (end_peb > ubi->peb_count)
+		end_peb = ubi->peb_count;
+
+	/* Check access rights before filling erase_counters array */
+	if (!access_ok((void __user *)ureq->erase_counters,
+		       (end_peb-req.start) * sizeof(int32_t)))
+		return -EFAULT;
+
+	/* Fill erase counter array */
+	read_cnt = 0;
+	for (peb = req.start; peb < end_peb; read_cnt++, peb++) {
+		int ec;
+
+		if (ubi_io_is_bad(ubi, peb)) {
+			if (put_user(UBI_UNKNOWN, ureq->erase_counters+read_cnt))
+				return -EFAULT;
+
+			continue;
+		}
+
+		spin_lock(&ubi->wl_lock);
+
+		wl = ubi->lookuptbl[peb];
+		if (wl)
+			ec = wl->ec;
+		else
+			ec = UBI_UNKNOWN;
+
+		spin_unlock(&ubi->wl_lock);
+
+		if (put_user(ec, ureq->erase_counters+read_cnt))
+			return -EFAULT;
+
+	}
+
+	/* Return actual read length */
+	req.read_length = read_cnt;
+
+	/* Copy everything except erase counter array */
+	if (copy_to_user(ureq, &req, sizeof(struct ubi_ecinfo_req)))
+		return -EFAULT;
+
+	return 0;
 }
 
 static long ubi_cdev_ioctl(struct file *file, unsigned int cmd,
@@ -944,11 +1007,11 @@ static long ubi_cdev_ioctl(struct file *file, unsigned int cmd,
 		struct ubi_rnvol_req *req;
 
 		dbg_gen("re-name volumes");
-		req = kmalloc(sizeof(struct ubi_rnvol_req), GFP_KERNEL);
+		req = kmalloc_obj(struct ubi_rnvol_req);
 		if (!req) {
 			err = -ENOMEM;
 			break;
-		};
+		}
 
 		err = copy_from_user(req, argp, sizeof(struct ubi_rnvol_req));
 		if (err) {
@@ -959,6 +1022,42 @@ static long ubi_cdev_ioctl(struct file *file, unsigned int cmd,
 
 		err = rename_volumes(ubi, req);
 		kfree(req);
+		break;
+	}
+
+	/* Check a specific PEB for bitflips and scrub it if needed */
+	case UBI_IOCRPEB:
+	{
+		int pnum;
+
+		err = get_user(pnum, (__user int32_t *)argp);
+		if (err) {
+			err = -EFAULT;
+			break;
+		}
+
+		err = ubi_bitflip_check(ubi, pnum, 0);
+		break;
+	}
+
+	/* Force scrubbing for a specific PEB */
+	case UBI_IOCSPEB:
+	{
+		int pnum;
+
+		err = get_user(pnum, (__user int32_t *)argp);
+		if (err) {
+			err = -EFAULT;
+			break;
+		}
+
+		err = ubi_bitflip_check(ubi, pnum, 1);
+		break;
+	}
+
+	case UBI_IOCECNFO:
+	{
+		err = ubi_get_ec_info(ubi, argp);
 		break;
 	}
 
@@ -1012,7 +1111,8 @@ static long ctrl_cdev_ioctl(struct file *file, unsigned int cmd,
 		 */
 		mutex_lock(&ubi_devices_mutex);
 		err = ubi_attach_mtd_dev(mtd, req.ubi_num, req.vid_hdr_offset,
-					 req.max_beb_per1024);
+					 req.max_beb_per1024, !!req.disable_fm,
+					 !!req.need_resv_pool, req.wl_threshold);
 		mutex_unlock(&ubi_devices_mutex);
 		if (err < 0)
 			put_mtd_device(mtd);
@@ -1049,36 +1149,6 @@ static long ctrl_cdev_ioctl(struct file *file, unsigned int cmd,
 	return err;
 }
 
-#ifdef CONFIG_COMPAT
-static long vol_cdev_compat_ioctl(struct file *file, unsigned int cmd,
-				  unsigned long arg)
-{
-	unsigned long translated_arg = (unsigned long)compat_ptr(arg);
-
-	return vol_cdev_ioctl(file, cmd, translated_arg);
-}
-
-static long ubi_cdev_compat_ioctl(struct file *file, unsigned int cmd,
-				  unsigned long arg)
-{
-	unsigned long translated_arg = (unsigned long)compat_ptr(arg);
-
-	return ubi_cdev_ioctl(file, cmd, translated_arg);
-}
-
-static long ctrl_cdev_compat_ioctl(struct file *file, unsigned int cmd,
-				   unsigned long arg)
-{
-	unsigned long translated_arg = (unsigned long)compat_ptr(arg);
-
-	return ctrl_cdev_ioctl(file, cmd, translated_arg);
-}
-#else
-#define vol_cdev_compat_ioctl  NULL
-#define ubi_cdev_compat_ioctl  NULL
-#define ctrl_cdev_compat_ioctl NULL
-#endif
-
 /* UBI volume character device operations */
 const struct file_operations ubi_vol_cdev_operations = {
 	.owner          = THIS_MODULE,
@@ -1089,21 +1159,19 @@ const struct file_operations ubi_vol_cdev_operations = {
 	.write          = vol_cdev_write,
 	.fsync		= vol_cdev_fsync,
 	.unlocked_ioctl = vol_cdev_ioctl,
-	.compat_ioctl   = vol_cdev_compat_ioctl,
+	.compat_ioctl   = compat_ptr_ioctl,
 };
 
 /* UBI character device operations */
 const struct file_operations ubi_cdev_operations = {
 	.owner          = THIS_MODULE,
-	.llseek         = no_llseek,
 	.unlocked_ioctl = ubi_cdev_ioctl,
-	.compat_ioctl   = ubi_cdev_compat_ioctl,
+	.compat_ioctl   = compat_ptr_ioctl,
 };
 
 /* UBI control character device operations */
 const struct file_operations ubi_ctrl_cdev_operations = {
 	.owner          = THIS_MODULE,
 	.unlocked_ioctl = ctrl_cdev_ioctl,
-	.compat_ioctl   = ctrl_cdev_compat_ioctl,
-	.llseek		= no_llseek,
+	.compat_ioctl   = compat_ptr_ioctl,
 };

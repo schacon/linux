@@ -1,36 +1,73 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * DBAu1300 init and platform device setup.
  *
  * (c) 2009 Manuel Lauss <manuel.lauss@googlemail.com>
  */
 
+#include <linux/clk.h>
 #include <linux/dma-mapping.h>
-#include <linux/gpio.h>
-#include <linux/gpio_keys.h>
+#include <linux/gpio/machine.h>
+#include <linux/gpio/property.h>
 #include <linux/init.h>
-#include <linux/input.h>	/* KEY_* codes */
+#include <linux/input-event-codes.h>
 #include <linux/i2c.h>
 #include <linux/io.h>
 #include <linux/leds.h>
+#include <linux/interrupt.h>
 #include <linux/ata_platform.h>
 #include <linux/mmc/host.h>
-#include <linux/module.h>
 #include <linux/mtd/mtd.h>
-#include <linux/mtd/nand.h>
-#include <linux/mtd/partitions.h>
+#include <linux/mtd/platnand.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/smsc911x.h>
+#include <linux/wm97xx.h>
 
 #include <asm/mach-au1x00/au1000.h>
+#include <asm/mach-au1x00/gpio-au1300.h>
 #include <asm/mach-au1x00/au1100_mmc.h>
 #include <asm/mach-au1x00/au1200fb.h>
 #include <asm/mach-au1x00/au1xxx_dbdma.h>
 #include <asm/mach-au1x00/au1xxx_psc.h>
-#include <asm/mach-db1x00/db1300.h>
 #include <asm/mach-db1x00/bcsr.h>
 #include <asm/mach-au1x00/prom.h>
 
+#include "db1xxx.h"
 #include "platform.h"
+
+/* FPGA (external mux) interrupt sources */
+#define DB1300_FIRST_INT	(ALCHEMY_GPIC_INT_LAST + 1)
+#define DB1300_IDE_INT		(DB1300_FIRST_INT + 0)
+#define DB1300_ETH_INT		(DB1300_FIRST_INT + 1)
+#define DB1300_CF_INT		(DB1300_FIRST_INT + 2)
+#define DB1300_VIDEO_INT	(DB1300_FIRST_INT + 4)
+#define DB1300_HDMI_INT		(DB1300_FIRST_INT + 5)
+#define DB1300_DC_INT		(DB1300_FIRST_INT + 6)
+#define DB1300_FLASH_INT	(DB1300_FIRST_INT + 7)
+#define DB1300_CF_INSERT_INT	(DB1300_FIRST_INT + 8)
+#define DB1300_CF_EJECT_INT	(DB1300_FIRST_INT + 9)
+#define DB1300_AC97_INT		(DB1300_FIRST_INT + 10)
+#define DB1300_AC97_PEN_INT	(DB1300_FIRST_INT + 11)
+#define DB1300_SD1_INSERT_INT	(DB1300_FIRST_INT + 12)
+#define DB1300_SD1_EJECT_INT	(DB1300_FIRST_INT + 13)
+#define DB1300_OTG_VBUS_OC_INT	(DB1300_FIRST_INT + 14)
+#define DB1300_HOST_VBUS_OC_INT (DB1300_FIRST_INT + 15)
+#define DB1300_LAST_INT		(DB1300_FIRST_INT + 15)
+
+/* SMSC9210 CS */
+#define DB1300_ETH_PHYS_ADDR	0x19000000
+#define DB1300_ETH_PHYS_END	0x197fffff
+
+/* ATA CS */
+#define DB1300_IDE_PHYS_ADDR	0x18800000
+#define DB1300_IDE_REG_SHIFT	5
+#define DB1300_IDE_PHYS_LEN	(16 << DB1300_IDE_REG_SHIFT)
+
+/* NAND CS */
+#define DB1300_NAND_PHYS_ADDR	0x20000000
+#define DB1300_NAND_PHYS_END	0x20000fff
+
 
 static struct i2c_board_info db1300_i2c_devs[] __initdata = {
 	{ I2C_BOARD_INFO("wm8731", 0x1b), },	/* I2S audio codec */
@@ -112,11 +149,12 @@ static void __init db1300_gpio_config(void)
 
 /**********************************************************************/
 
-static void au1300_nand_cmd_ctrl(struct mtd_info *mtd, int cmd,
+static u64 au1300_all_dmamask = DMA_BIT_MASK(32);
+
+static void au1300_nand_cmd_ctrl(struct nand_chip *this, int cmd,
 				 unsigned int ctrl)
 {
-	struct nand_chip *this = mtd->priv;
-	unsigned long ioaddr = (unsigned long)this->IO_ADDR_W;
+	unsigned long ioaddr = (unsigned long)this->legacy.IO_ADDR_W;
 
 	ioaddr &= 0xffffff00;
 
@@ -128,16 +166,16 @@ static void au1300_nand_cmd_ctrl(struct mtd_info *mtd, int cmd,
 		/* assume we want to r/w real data  by default */
 		ioaddr += MEM_STNAND_DATA;
 	}
-	this->IO_ADDR_R = this->IO_ADDR_W = (void __iomem *)ioaddr;
+	this->legacy.IO_ADDR_R = this->legacy.IO_ADDR_W = (void __iomem *)ioaddr;
 	if (cmd != NAND_CMD_NONE) {
-		__raw_writeb(cmd, this->IO_ADDR_W);
+		__raw_writeb(cmd, this->legacy.IO_ADDR_W);
 		wmb();
 	}
 }
 
-static int au1300_nand_device_ready(struct mtd_info *mtd)
+static int au1300_nand_device_ready(struct nand_chip *this)
 {
-	return __raw_readl((void __iomem *)MEM_STSTAT) & 1;
+	return alchemy_rdsmem(AU1000_MEM_STSTAT) & 1;
 }
 
 static struct mtd_partition db1300_nand_parts[] = {
@@ -200,22 +238,37 @@ static struct resource db1300_eth_res[] = {
 	},
 };
 
-static struct smsc911x_platform_config db1300_eth_config = {
-	.phy_interface		= PHY_INTERFACE_MODE_MII,
-	.irq_polarity		= SMSC911X_IRQ_POLARITY_ACTIVE_LOW,
-	.irq_type		= SMSC911X_IRQ_TYPE_PUSH_PULL,
-	.flags			= SMSC911X_USE_32BIT,
+static u8 db1300_eth_macaddr[6];
+
+static const struct property_entry db1300_eth_props[] __initconst = {
+	PROPERTY_ENTRY_U32("reg-io-width", 4),
+	PROPERTY_ENTRY_U32("reg-shift", 0),
+	PROPERTY_ENTRY_BOOL("smsc,irq-push-pull"),
+	PROPERTY_ENTRY_STRING("phy-mode", "mii"),
+	PROPERTY_ENTRY_U8_ARRAY("local-mac-address", db1300_eth_macaddr),
+	{ }
 };
 
-static struct platform_device db1300_eth_dev = {
-	.name			= "smsc911x",
-	.id			= -1,
-	.num_resources		= ARRAY_SIZE(db1300_eth_res),
-	.resource		= db1300_eth_res,
-	.dev = {
-		.platform_data	= &db1300_eth_config,
-	},
+static const struct platform_device_info db1300_eth_info __initconst = {
+	.name		= "smsc911x",
+	.id		= PLATFORM_DEVID_NONE,
+	.res		= db1300_eth_res,
+	.num_res	= ARRAY_SIZE(db1300_eth_res),
+	.properties	= db1300_eth_props,
 };
+
+static void __init db1300_eth_init(void)
+{
+	struct platform_device *pd;
+	int err;
+
+	prom_get_ethernet_addr(db1300_eth_macaddr);
+
+	pd = platform_device_register_full(&db1300_eth_info);
+	err = PTR_ERR_OR_ZERO(pd);
+	if (err)
+		pr_err("failed to create eth device: %d\n", err);
+}
 
 /**********************************************************************/
 
@@ -315,66 +368,127 @@ static struct platform_device db1300_i2c_dev = {
 
 /**********************************************************************/
 
+static const struct property_entry db1300_5waysw_props[] = {
+	PROPERTY_ENTRY_BOOL("autorepeat"),
+	PROPERTY_ENTRY_STRING("label", "db1300-5wayswitch"),
+	{ }
+};
+
 /* proper key assignments when facing the LCD panel.  For key assignments
  * according to the schematics swap up with down and left with right.
  * I chose to use it to emulate the arrow keys of a keyboard.
  */
-static struct gpio_keys_button db1300_5waysw_arrowkeys[] = {
-	{
-		.code			= KEY_DOWN,
-		.gpio			= AU1300_PIN_LCDPWM0,
-		.type			= EV_KEY,
-		.debounce_interval	= 1,
-		.active_low		= 1,
-		.desc			= "5waysw-down",
-	},
-	{
-		.code			= KEY_UP,
-		.gpio			= AU1300_PIN_PSC2SYNC1,
-		.type			= EV_KEY,
-		.debounce_interval	= 1,
-		.active_low		= 1,
-		.desc			= "5waysw-up",
-	},
-	{
-		.code			= KEY_RIGHT,
-		.gpio			= AU1300_PIN_WAKE3,
-		.type			= EV_KEY,
-		.debounce_interval	= 1,
-		.active_low		= 1,
-		.desc			= "5waysw-right",
-	},
-	{
-		.code			= KEY_LEFT,
-		.gpio			= AU1300_PIN_WAKE2,
-		.type			= EV_KEY,
-		.debounce_interval	= 1,
-		.active_low		= 1,
-		.desc			= "5waysw-left",
-	},
-	{
-		.code			= KEY_ENTER,
-		.gpio			= AU1300_PIN_WAKE1,
-		.type			= EV_KEY,
-		.debounce_interval	= 1,
-		.active_low		= 1,
-		.desc			= "5waysw-push",
-	},
+static const struct software_node db1300_5waysw_node = {
+	.name = "db1300-5wayswitch",
+	.properties = db1300_5waysw_props,
 };
 
-static struct gpio_keys_platform_data db1300_5waysw_data = {
-	.buttons	= db1300_5waysw_arrowkeys,
-	.nbuttons	= ARRAY_SIZE(db1300_5waysw_arrowkeys),
-	.rep		= 1,
-	.name		= "db1300-5wayswitch",
+static const struct property_entry db1300_5waysw_down_props[] = {
+	PROPERTY_ENTRY_U32("linux,code", KEY_DOWN),
+	PROPERTY_ENTRY_GPIO("gpios", &alchemy_gpic_node,
+			    AU1300_PIN_LCDPWM0, GPIO_ACTIVE_LOW),
+	PROPERTY_ENTRY_U32("debounce-interval", 1),
+	PROPERTY_ENTRY_STRING("label", "5waysw-down"),
+	{ }
 };
 
-static struct platform_device db1300_5waysw_dev = {
-	.name		= "gpio-keys",
-	.dev	= {
-		.platform_data	= &db1300_5waysw_data,
-	},
+static const struct software_node db1300_5waysw_down_node = {
+	.name = "5waysw-down",
+	.parent = &db1300_5waysw_node,
+	.properties = db1300_5waysw_down_props,
 };
+
+static const struct property_entry db1300_5waysw_up_props[] = {
+	PROPERTY_ENTRY_U32("linux,code", KEY_UP),
+	PROPERTY_ENTRY_GPIO("gpios", &alchemy_gpic_node,
+			    AU1300_PIN_PSC2SYNC1, GPIO_ACTIVE_LOW),
+	PROPERTY_ENTRY_U32("debounce-interval", 1),
+	PROPERTY_ENTRY_STRING("label", "5waysw-up"),
+	{ }
+};
+
+static const struct software_node db1300_5waysw_up_node = {
+	.name = "5waysw-up",
+	.parent = &db1300_5waysw_node,
+	.properties = db1300_5waysw_up_props,
+};
+
+static const struct property_entry db1300_5waysw_right_props[] = {
+	PROPERTY_ENTRY_U32("linux,code", KEY_RIGHT),
+	PROPERTY_ENTRY_GPIO("gpios", &alchemy_gpic_node,
+			    AU1300_PIN_WAKE3, GPIO_ACTIVE_LOW),
+	PROPERTY_ENTRY_U32("debounce-interval", 1),
+	PROPERTY_ENTRY_STRING("label", "5waysw-right"),
+	{ }
+};
+
+static const struct software_node db1300_5waysw_right_node = {
+	.name = "5waysw-right",
+	.parent = &db1300_5waysw_node,
+	.properties = db1300_5waysw_right_props,
+};
+
+static const struct property_entry db1300_5waysw_left_props[] = {
+	PROPERTY_ENTRY_U32("linux,code", KEY_LEFT),
+	PROPERTY_ENTRY_GPIO("gpios", &alchemy_gpic_node,
+			    AU1300_PIN_WAKE2, GPIO_ACTIVE_LOW),
+	PROPERTY_ENTRY_U32("debounce-interval", 1),
+	PROPERTY_ENTRY_STRING("label", "5waysw-left"),
+	{ }
+};
+
+static const struct software_node db1300_5waysw_left_node = {
+	.name = "5waysw-left",
+	.parent = &db1300_5waysw_node,
+	.properties = db1300_5waysw_left_props,
+};
+
+static const struct property_entry db1300_5waysw_push_props[] = {
+	PROPERTY_ENTRY_U32("linux,code", KEY_ENTER),
+	PROPERTY_ENTRY_GPIO("gpios", &alchemy_gpic_node,
+			    AU1300_PIN_WAKE1, GPIO_ACTIVE_LOW),
+	PROPERTY_ENTRY_U32("debounce-interval", 1),
+	PROPERTY_ENTRY_STRING("label", "5waysw-push"),
+	{ }
+};
+
+static const struct software_node db1300_5waysw_push_node = {
+	.name = "5waysw-push",
+	.parent = &db1300_5waysw_node,
+	.properties = db1300_5waysw_push_props,
+};
+
+static const struct software_node * const db1300_5waysw_swnodes[] __initconst = {
+	&db1300_5waysw_node,
+	&db1300_5waysw_down_node,
+	&db1300_5waysw_up_node,
+	&db1300_5waysw_right_node,
+	&db1300_5waysw_left_node,
+	&db1300_5waysw_push_node,
+	NULL
+};
+
+static void __init db1300_5waysw_init(void)
+{
+	const struct platform_device_info pdevinfo = {
+		.name	= "gpio-keys",
+		.id	= PLATFORM_DEVID_NONE,
+		.swnode	= &db1300_5waysw_node,
+	};
+	struct platform_device *pd;
+	int err;
+
+	err = software_node_register_node_group(db1300_5waysw_swnodes);
+	if (err) {
+		pr_err("failed to register 5waysw software nodes: %d\n", err);
+		return;
+	}
+
+	pd = platform_device_register_full(&pdevinfo);
+	err = PTR_ERR_OR_ZERO(pd);
+	if (err)
+		pr_err("failed to create 5waysw device: %d\n", err);
+}
 
 /**********************************************************************/
 
@@ -403,6 +517,8 @@ static struct resource db1300_ide_res[] = {
 
 static struct platform_device db1300_ide_dev = {
 	.dev	= {
+		.dma_mask		= &au1300_all_dmamask,
+		.coherent_dma_mask	= DMA_BIT_MASK(32),
 		.platform_data	= &db1300_ide_info,
 	},
 	.name		= "pata_platform",
@@ -412,25 +528,22 @@ static struct platform_device db1300_ide_dev = {
 
 /**********************************************************************/
 
+#ifdef CONFIG_MMC_AU1X
 static irqreturn_t db1300_mmc_cd(int irq, void *ptr)
 {
-	void(*mmc_cd)(struct mmc_host *, unsigned long);
+	disable_irq_nosync(irq);
+	return IRQ_WAKE_THREAD;
+}
 
-	/* disable the one currently screaming. No other way to shut it up */
-	if (irq == DB1300_SD1_INSERT_INT) {
-		disable_irq_nosync(DB1300_SD1_INSERT_INT);
+static irqreturn_t db1300_mmc_cdfn(int irq, void *ptr)
+{
+	mmc_detect_change(ptr, msecs_to_jiffies(200));
+
+	msleep(100);	/* debounce */
+	if (irq == DB1300_SD1_INSERT_INT)
 		enable_irq(DB1300_SD1_EJECT_INT);
-	} else {
-		disable_irq_nosync(DB1300_SD1_EJECT_INT);
+	else
 		enable_irq(DB1300_SD1_INSERT_INT);
-	}
-
-	/* link against CONFIG_MMC=m.  We can only be called once MMC core has
-	 * initialized the controller, so symbol_get() should always succeed.
-	 */
-	mmc_cd = symbol_get(mmc_detect_change);
-	mmc_cd(ptr, msecs_to_jiffies(500));
-	symbol_put(mmc_detect_change);
 
 	return IRQ_HANDLED;
 }
@@ -451,13 +564,13 @@ static int db1300_mmc_cd_setup(void *mmc_host, int en)
 	int ret;
 
 	if (en) {
-		ret = request_irq(DB1300_SD1_INSERT_INT, db1300_mmc_cd, 0,
-				  "sd_insert", mmc_host);
+		ret = request_threaded_irq(DB1300_SD1_INSERT_INT, db1300_mmc_cd,
+				db1300_mmc_cdfn, 0, "sd_insert", mmc_host);
 		if (ret)
 			goto out;
 
-		ret = request_irq(DB1300_SD1_EJECT_INT, db1300_mmc_cd, 0,
-				  "sd_eject", mmc_host);
+		ret = request_threaded_irq(DB1300_SD1_EJECT_INT, db1300_mmc_cd,
+				db1300_mmc_cdfn, 0, "sd_eject", mmc_host);
 		if (ret) {
 			free_irq(DB1300_SD1_INSERT_INT, mmc_host);
 			goto out;
@@ -522,7 +635,9 @@ static struct resource au1300_sd1_res[] = {
 
 static struct platform_device db1300_sd1_dev = {
 	.dev = {
-		.platform_data	= &db1300_sd1_platdata,
+		.dma_mask		= &au1300_all_dmamask,
+		.coherent_dma_mask	= DMA_BIT_MASK(32),
+		.platform_data		= &db1300_sd1_platdata,
 	},
 	.name		= "au1xxx-mmc",
 	.id		= 1,
@@ -587,13 +702,16 @@ static struct resource au1300_sd0_res[] = {
 
 static struct platform_device db1300_sd0_dev = {
 	.dev = {
-		.platform_data	= &db1300_sd0_platdata,
+		.dma_mask		= &au1300_all_dmamask,
+		.coherent_dma_mask	= DMA_BIT_MASK(32),
+		.platform_data		= &db1300_sd0_platdata,
 	},
 	.name		= "au1xxx-mmc",
 	.id		= 0,
 	.resource	= au1300_sd0_res,
 	.num_resources	= ARRAY_SIZE(au1300_sd0_res),
 };
+#endif /* CONFIG_MMC_AU1X */
 
 /**********************************************************************/
 
@@ -614,10 +732,18 @@ static struct platform_device db1300_i2sdma_dev = {
 
 static struct platform_device db1300_sndac97_dev = {
 	.name		= "db1300-ac97",
+	.dev = {
+		.dma_mask		= &au1300_all_dmamask,
+		.coherent_dma_mask	= DMA_BIT_MASK(32),
+	},
 };
 
 static struct platform_device db1300_sndi2s_dev = {
 	.name		= "db1300-i2s",
+	.dev = {
+		.dma_mask		= &au1300_all_dmamask,
+		.coherent_dma_mask	= DMA_BIT_MASK(32),
+	},
 };
 
 /**********************************************************************/
@@ -662,13 +788,12 @@ static struct resource au1300_lcd_res[] = {
 	}
 };
 
-static u64 au1300_lcd_dmamask = DMA_BIT_MASK(32);
 
 static struct platform_device db1300_lcd_dev = {
 	.name		= "au1200-lcd",
 	.id		= 0,
 	.dev = {
-		.dma_mask		= &au1300_lcd_dmamask,
+		.dma_mask		= &au1300_all_dmamask,
 		.coherent_dma_mask	= DMA_BIT_MASK(32),
 		.platform_data		= &db1300fb_pd,
 	},
@@ -678,14 +803,52 @@ static struct platform_device db1300_lcd_dev = {
 
 /**********************************************************************/
 
+#if IS_ENABLED(CONFIG_TOUCHSCREEN_WM97XX)
+static struct wm97xx_mach_ops db1300_wm97xx_ops = {
+	.irq_gpio	= WM97XX_GPIO_3,
+};
+
+static int db1300_wm97xx_probe(struct platform_device *pdev)
+{
+	struct wm97xx *wm = platform_get_drvdata(pdev);
+
+	/* external pendown indicator */
+	wm97xx_config_gpio(wm, WM97XX_GPIO_13, WM97XX_GPIO_IN,
+			   WM97XX_GPIO_POL_LOW, WM97XX_GPIO_STICKY,
+			   WM97XX_GPIO_WAKE);
+
+	/* internal "virtual" pendown gpio */
+	wm97xx_config_gpio(wm, WM97XX_GPIO_3, WM97XX_GPIO_OUT,
+			   WM97XX_GPIO_POL_LOW, WM97XX_GPIO_NOTSTICKY,
+			   WM97XX_GPIO_NOWAKE);
+
+	wm->pen_irq = DB1300_AC97_PEN_INT;
+
+	return wm97xx_register_mach_ops(wm, &db1300_wm97xx_ops);
+}
+#else
+static int db1300_wm97xx_probe(struct platform_device *pdev)
+{
+	return -ENODEV;
+}
+#endif
+
+static struct platform_driver db1300_wm97xx_driver = {
+	.driver.name	= "wm97xx-touch",
+	.driver.owner	= THIS_MODULE,
+	.probe		= db1300_wm97xx_probe,
+};
+
+/**********************************************************************/
+
 static struct platform_device *db1300_dev[] __initdata = {
-	&db1300_eth_dev,
 	&db1300_i2c_dev,
-	&db1300_5waysw_dev,
 	&db1300_nand_dev,
 	&db1300_ide_dev,
+#ifdef CONFIG_MMC_AU1X
 	&db1300_sd0_dev,
 	&db1300_sd1_dev,
+#endif
 	&db1300_lcd_dev,
 	&db1300_ac97_dev,
 	&db1300_i2s_dev,
@@ -699,6 +862,7 @@ static struct platform_device *db1300_dev[] __initdata = {
 int __init db1300_dev_setup(void)
 {
 	int swapped, cpldirq;
+	struct clk *c;
 
 	/* setup CPLD IRQ muxer */
 	cpldirq = au1300_gpio_to_irq(AU1300_PIN_EXTCLK1);
@@ -716,10 +880,11 @@ int __init db1300_dev_setup(void)
 	/*
 	 * setup board
 	 */
-	prom_get_ethernet_addr(&db1300_eth_config.mac[0]);
-
 	i2c_register_board_info(0, db1300_i2c_devs,
 				ARRAY_SIZE(db1300_i2c_devs));
+
+	if (platform_driver_register(&db1300_wm97xx_driver))
+		pr_warn("DB1300: failed to init touch pen irq support!\n");
 
 	/* Audio PSC clock is supplied by codecs (PSC1, 2) */
 	__raw_writel(PSC_SEL_CLK_SERCLK,
@@ -728,7 +893,13 @@ int __init db1300_dev_setup(void)
 	__raw_writel(PSC_SEL_CLK_SERCLK,
 	    (void __iomem *)KSEG1ADDR(AU1300_PSC2_PHYS_ADDR) + PSC_SEL_OFFSET);
 	wmb();
-	/* I2C uses internal 48MHz EXTCLK1 */
+	/* I2C driver wants 50MHz, get as close as possible */
+	c = clk_get(NULL, "psc3_intclk");
+	if (!IS_ERR(c)) {
+		clk_set_rate(c, 50000000);
+		clk_prepare_enable(c);
+		clk_put(c);
+	}
 	__raw_writel(PSC_SEL_CLK_INTCLK,
 	    (void __iomem *)KSEG1ADDR(AU1300_PSC3_PHYS_ADDR) + PSC_SEL_OFFSET);
 	wmb();
@@ -751,6 +922,9 @@ int __init db1300_dev_setup(void)
 	swapped = bcsr_read(BCSR_STATUS) & BCSR_STATUS_DB1200_SWAPBOOT;
 	db1x_register_norflash(64 << 20, 2, swapped);
 
+	db1300_eth_init();
+	db1300_5waysw_init();
+
 	return platform_add_devices(db1300_dev, ARRAY_SIZE(db1300_dev));
 }
 
@@ -759,11 +933,15 @@ int __init db1300_board_setup(void)
 {
 	unsigned short whoami;
 
-	db1300_gpio_config();
 	bcsr_init(DB1300_BCSR_PHYS_ADDR,
 		  DB1300_BCSR_PHYS_ADDR + DB1300_BCSR_HEXLED_OFS);
 
 	whoami = bcsr_read(BCSR_WHOAMI);
+	if (BCSR_WHOAMI_BOARD(whoami) != BCSR_WHOAMI_DB1300)
+		return -ENODEV;
+
+	db1300_gpio_config();
+
 	printk(KERN_INFO "NetLogic DBAu1300 Development Platform.\n\t"
 		"BoardID %d   CPLD Rev %d   DaughtercardID %d\n",
 		BCSR_WHOAMI_BOARD(whoami), BCSR_WHOAMI_CPLD(whoami),

@@ -1,5 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/types.h>
-#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/console.h>
@@ -9,10 +9,10 @@
 
 static int hvsi_send_packet(struct hvsi_priv *pv, struct hvsi_header *packet)
 {
-	packet->seqno = atomic_inc_return(&pv->seqno);
+	packet->seqno = cpu_to_be16(atomic_inc_return(&pv->seqno));
 
 	/* Assumes that always succeeds, works in practice */
-	return pv->put_chars(pv->termno, (char *)packet, packet->len);
+	return pv->put_chars(pv->termno, (u8 *)packet, packet->len);
 }
 
 static void hvsi_start_handshake(struct hvsi_priv *pv)
@@ -28,7 +28,7 @@ static void hvsi_start_handshake(struct hvsi_priv *pv)
 	/* Send version query */
 	q.hdr.type = VS_QUERY_PACKET_HEADER;
 	q.hdr.len = sizeof(struct hvsi_query);
-	q.verb = VSV_SEND_VERSION_NUMBER;
+	q.verb = cpu_to_be16(VSV_SEND_VERSION_NUMBER);
 	hvsi_send_packet(pv, &q.hdr);
 }
 
@@ -40,7 +40,7 @@ static int hvsi_send_close(struct hvsi_priv *pv)
 
 	ctrl.hdr.type = VS_CONTROL_PACKET_HEADER;
 	ctrl.hdr.len = sizeof(struct hvsi_control);
-	ctrl.verb = VSV_CLOSE_PROTOCOL;
+	ctrl.verb = cpu_to_be16(VSV_CLOSE_PROTOCOL);
 	return hvsi_send_packet(pv, &ctrl.hdr);
 }
 
@@ -69,14 +69,14 @@ static void hvsi_got_control(struct hvsi_priv *pv)
 {
 	struct hvsi_control *pkt = (struct hvsi_control *)pv->inbuf;
 
-	switch (pkt->verb) {
+	switch (be16_to_cpu(pkt->verb)) {
 	case VSV_CLOSE_PROTOCOL:
 		/* We restart the handshaking */
 		hvsi_start_handshake(pv);
 		break;
 	case VSV_MODEM_CTL_UPDATE:
 		/* Transition of carrier detect */
-		hvsi_cd_change(pv, pkt->word & HVSI_TSCD);
+		hvsi_cd_change(pv, be32_to_cpu(pkt->word) & HVSI_TSCD);
 		break;
 	}
 }
@@ -87,7 +87,7 @@ static void hvsi_got_query(struct hvsi_priv *pv)
 	struct hvsi_query_response r;
 
 	/* We only handle version queries */
-	if (pkt->verb != VSV_SEND_VERSION_NUMBER)
+	if (be16_to_cpu(pkt->verb) != VSV_SEND_VERSION_NUMBER)
 		return;
 
 	pr_devel("HVSI@%x: Got version query, sending response...\n",
@@ -96,7 +96,7 @@ static void hvsi_got_query(struct hvsi_priv *pv)
 	/* Send version response */
 	r.hdr.type = VS_QUERY_RESPONSE_PACKET_HEADER;
 	r.hdr.len = sizeof(struct hvsi_query_response);
-	r.verb = VSV_SEND_VERSION_NUMBER;
+	r.verb = cpu_to_be16(VSV_SEND_VERSION_NUMBER);
 	r.u.version = HVSI_VERSION;
 	r.query_seqno = pkt->hdr.seqno;
 	hvsi_send_packet(pv, &r.hdr);
@@ -112,7 +112,7 @@ static void hvsi_got_response(struct hvsi_priv *pv)
 
 	switch(r->verb) {
 	case VSV_SEND_MODEM_CTL_STATUS:
-		hvsi_cd_change(pv, r->u.mctrl_word & HVSI_TSCD);
+		hvsi_cd_change(pv, be32_to_cpu(r->u.mctrl_word) & HVSI_TSCD);
 		pv->mctrl_update = 1;
 		break;
 	}
@@ -178,9 +178,10 @@ static int hvsi_get_packet(struct hvsi_priv *pv)
 	return 0;
 }
 
-int hvsilib_get_chars(struct hvsi_priv *pv, char *buf, int count)
+ssize_t hvsilib_get_chars(struct hvsi_priv *pv, u8 *buf, size_t count)
 {
-	unsigned int tries, read = 0;
+	unsigned int tries;
+	size_t read = 0;
 
 	if (WARN_ON(!pv))
 		return -ENXIO;
@@ -199,7 +200,7 @@ int hvsilib_get_chars(struct hvsi_priv *pv, char *buf, int count)
 	for (tries = 1; count && tries < 2; tries++) {
 		/* Consume existing data packet */
 		if (pv->inbuf_pktlen) {
-			unsigned int l = min(count, (int)pv->inbuf_pktlen);
+			size_t l = min(count, pv->inbuf_pktlen);
 			memcpy(&buf[read], &pv->inbuf[pv->inbuf_cur], l);
 			pv->inbuf_cur += l;
 			pv->inbuf_pktlen -= l;
@@ -228,10 +229,11 @@ int hvsilib_get_chars(struct hvsi_priv *pv, char *buf, int count)
 	return read;
 }
 
-int hvsilib_put_chars(struct hvsi_priv *pv, const char *buf, int count)
+ssize_t hvsilib_put_chars(struct hvsi_priv *pv, const u8 *buf, size_t count)
 {
 	struct hvsi_data dp;
-	int rc, adjcount = min(count, HVSI_MAX_OUTGOING_DATA);
+	size_t adjcount = min_t(size_t, count, HVSI_MAX_OUTGOING_DATA);
+	int rc;
 
 	if (WARN_ON(!pv))
 		return -ENODEV;
@@ -265,8 +267,7 @@ int hvsilib_read_mctrl(struct hvsi_priv *pv)
 	pv->mctrl_update = 0;
 	q.hdr.type = VS_QUERY_PACKET_HEADER;
 	q.hdr.len = sizeof(struct hvsi_query);
-	q.hdr.seqno = atomic_inc_return(&pv->seqno);
-	q.verb = VSV_SEND_MODEM_CTL_STATUS;
+	q.verb = cpu_to_be16(VSV_SEND_MODEM_CTL_STATUS);
 	rc = hvsi_send_packet(pv, &q.hdr);
 	if (rc <= 0) {
 		pr_devel("HVSI@%x: Error %d...\n", pv->termno, rc);
@@ -302,11 +303,11 @@ int hvsilib_write_mctrl(struct hvsi_priv *pv, int dtr)
 	pr_devel("HVSI@%x: %s DTR...\n", pv->termno,
 		 dtr ? "Setting" : "Clearing");
 
-	ctrl.hdr.type = VS_CONTROL_PACKET_HEADER,
+	ctrl.hdr.type = VS_CONTROL_PACKET_HEADER;
 	ctrl.hdr.len = sizeof(struct hvsi_control);
-	ctrl.verb = VSV_SET_MODEM_CTL;
-	ctrl.mask = HVSI_TSDTR;
-	ctrl.word = dtr ? HVSI_TSDTR : 0;
+	ctrl.verb = cpu_to_be16(VSV_SET_MODEM_CTL);
+	ctrl.mask = cpu_to_be32(HVSI_TSDTR);
+	ctrl.word = cpu_to_be32(dtr ? HVSI_TSDTR : 0);
 	return hvsi_send_packet(pv, &ctrl.hdr);
 }
 
@@ -341,8 +342,8 @@ void hvsilib_establish(struct hvsi_priv *pv)
 
 	pr_devel("HVSI@%x:   ... waiting handshake\n", pv->termno);
 
-	/* Try for up to 200s */
-	for (timeout = 0; timeout < 20; timeout++) {
+	/* Try for up to 400ms */
+	for (timeout = 0; timeout < 40; timeout++) {
 		if (pv->established)
 			goto established;
 		if (!hvsi_get_packet(pv))
@@ -407,15 +408,14 @@ void hvsilib_close(struct hvsi_priv *pv, struct hvc_struct *hp)
 		hvsi_send_close(pv);
 	}
 
-	if (pv->tty)
-		tty_kref_put(pv->tty);
+	tty_kref_put(pv->tty);
 	pv->tty = NULL;
 }
 
 void hvsilib_init(struct hvsi_priv *pv,
-		  int (*get_chars)(uint32_t termno, char *buf, int count),
-		  int (*put_chars)(uint32_t termno, const char *buf,
-				   int count),
+		  ssize_t (*get_chars)(uint32_t termno, u8 *buf, size_t count),
+		  ssize_t (*put_chars)(uint32_t termno, const u8 *buf,
+				       size_t count),
 		  int termno, int is_console)
 {
 	memset(pv, 0, sizeof(*pv));

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  *	SBC8360 Watchdog driver
  *
@@ -18,11 +19,6 @@
  *
  *	(c) Copyright 1996 Alan Cox <alan@lxorguk.ukuu.org.uk>,
  *						All Rights Reserved.
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  *
  *	Neither Alan Cox nor CymruNet Ltd. admit liability nor provide
  *	warranty for any of this software. This material is provided
@@ -52,6 +48,7 @@
 #include <linux/moduleparam.h>
 #include <linux/io.h>
 #include <linux/uaccess.h>
+#include <linux/stringify.h>
 
 
 static unsigned long sbc8360_is_open;
@@ -203,7 +200,7 @@ MODULE_PARM_DESC(timeout, "Index into timeout table (0-63) (default=27 (60s))");
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 		 "Watchdog cannot be stopped once started (default="
-				__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+				__stringify(WATCHDOG_NOWAYOUT) ")");
 
 /*
  *	Kernel methods.
@@ -271,7 +268,7 @@ static int sbc8360_open(struct inode *inode, struct file *file)
 	/* Activate and ping once to start the countdown */
 	sbc8360_activate();
 	sbc8360_ping();
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int sbc8360_close(struct inode *inode, struct file *file)
@@ -305,7 +302,6 @@ static int sbc8360_notify_sys(struct notifier_block *this, unsigned long code,
 
 static const struct file_operations sbc8360_fops = {
 	.owner = THIS_MODULE,
-	.llseek = no_llseek,
 	.write = sbc8360_write,
 	.open = sbc8360_open,
 	.release = sbc8360_close,
@@ -404,6 +400,5 @@ MODULE_AUTHOR("Ian E. Morgan <imorgan@webcon.ca>");
 MODULE_DESCRIPTION("SBC8360 watchdog driver");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("1.01");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
 
 /* end of sbc8360.c */

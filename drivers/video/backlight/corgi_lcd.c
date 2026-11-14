@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  LCD/Backlight Driver for Sharp Zaurus Handhelds (various models)
  *
@@ -8,26 +9,21 @@
  *  Copyright (c) 2008 Marvell International Ltd.
  *	Converted to SPI device based LCD/Backlight device driver
  *	by Eric Miao <eric.miao@marvell.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
- *
  */
 
+#include <linux/backlight.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/delay.h>
-#include <linux/gpio.h>
-#include <linux/fb.h>
+#include <linux/gpio/consumer.h>
 #include <linux/lcd.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/corgi_lcd.h>
 #include <linux/slab.h>
 #include <asm/mach/sharpsl_param.h>
 
-#define POWER_IS_ON(pwr)	((pwr) <= FB_BLANK_NORMAL)
+#define POWER_IS_ON(pwr)	((pwr) <= LCD_POWER_REDUCED)
 
 /* Register Addresses */
 #define RESCTL_ADRS     0x00
@@ -94,9 +90,8 @@ struct corgi_lcd {
 	int	mode;
 	char	buf[2];
 
-	int	gpio_backlight_on;
-	int	gpio_backlight_cont;
-	int	gpio_backlight_cont_inverted;
+	struct gpio_desc *backlight_on;
+	struct gpio_desc *backlight_cont;
 
 	void (*kick_battery)(void);
 };
@@ -143,6 +138,7 @@ static void lcdtg_i2c_send_byte(struct corgi_lcd *lcd,
 				uint8_t base, uint8_t data)
 {
 	int i;
+
 	for (i = 0; i < 8; i++) {
 		if (data & 0x80)
 			lcdtg_i2c_send_bit(lcd, base | POWER0_COM_DOUT);
@@ -176,7 +172,7 @@ static int corgi_ssp_lcdtg_send(struct corgi_lcd *lcd, int adrs, uint8_t data)
 	struct spi_message msg;
 	struct spi_transfer xfer = {
 		.len		= 1,
-		.cs_change	= 1,
+		.cs_change	= 0,
 		.tx_buf		= lcd->buf,
 	};
 
@@ -335,12 +331,12 @@ static void corgi_lcd_power_off(struct corgi_lcd *lcd)
 			POWER1_VW_OFF | POWER1_GVSS_OFF | POWER1_VDD_OFF);
 }
 
-static int corgi_lcd_set_mode(struct lcd_device *ld, struct fb_videomode *m)
+static int corgi_lcd_set_mode(struct lcd_device *ld, u32 xres, u32 yres)
 {
 	struct corgi_lcd *lcd = lcd_get_data(ld);
 	int mode = CORGI_LCD_MODE_QVGA;
 
-	if (m->xres == 640 || m->xres == 480)
+	if (xres == 640 || xres == 480)
 		mode = CORGI_LCD_MODE_VGA;
 
 	if (lcd->mode == mode)
@@ -383,7 +379,7 @@ static int corgi_lcd_get_power(struct lcd_device *ld)
 	return lcd->power;
 }
 
-static struct lcd_ops corgi_lcd_ops = {
+static const struct lcd_ops corgi_lcd_ops = {
 	.get_power	= corgi_lcd_get_power,
 	.set_power	= corgi_lcd_set_power,
 	.set_mode	= corgi_lcd_set_mode,
@@ -406,13 +402,13 @@ static int corgi_bl_set_intensity(struct corgi_lcd *lcd, int intensity)
 	corgi_ssp_lcdtg_send(lcd, DUTYCTRL_ADRS, intensity);
 
 	/* Bit 5 via GPIO_BACKLIGHT_CONT */
-	cont = !!(intensity & 0x20) ^ lcd->gpio_backlight_cont_inverted;
+	cont = !!(intensity & 0x20);
 
-	if (gpio_is_valid(lcd->gpio_backlight_cont))
-		gpio_set_value_cansleep(lcd->gpio_backlight_cont, cont);
+	if (lcd->backlight_cont)
+		gpiod_set_value_cansleep(lcd->backlight_cont, cont);
 
-	if (gpio_is_valid(lcd->gpio_backlight_on))
-		gpio_set_value_cansleep(lcd->gpio_backlight_on, intensity);
+	if (lcd->backlight_on)
+		gpiod_set_value_cansleep(lcd->backlight_on, intensity);
 
 	if (lcd->kick_battery)
 		lcd->kick_battery();
@@ -424,13 +420,7 @@ static int corgi_bl_set_intensity(struct corgi_lcd *lcd, int intensity)
 static int corgi_bl_update_status(struct backlight_device *bd)
 {
 	struct corgi_lcd *lcd = bl_get_data(bd);
-	int intensity = bd->props.brightness;
-
-	if (bd->props.power != FB_BLANK_UNBLANK)
-		intensity = 0;
-
-	if (bd->props.fb_blank != FB_BLANK_UNBLANK)
-		intensity = 0;
+	int intensity = backlight_get_brightness(bd);
 
 	if (corgibl_flags & CORGIBL_SUSPENDED)
 		intensity = 0;
@@ -464,7 +454,7 @@ static int corgi_lcd_suspend(struct device *dev)
 
 	corgibl_flags |= CORGIBL_SUSPENDED;
 	corgi_bl_set_intensity(lcd, 0);
-	corgi_lcd_set_power(lcd->lcd_dev, FB_BLANK_POWERDOWN);
+	corgi_lcd_set_power(lcd->lcd_dev, LCD_POWER_OFF);
 	return 0;
 }
 
@@ -473,7 +463,7 @@ static int corgi_lcd_resume(struct device *dev)
 	struct corgi_lcd *lcd = dev_get_drvdata(dev);
 
 	corgibl_flags &= ~CORGIBL_SUSPENDED;
-	corgi_lcd_set_power(lcd->lcd_dev, FB_BLANK_UNBLANK);
+	corgi_lcd_set_power(lcd->lcd_dev, LCD_POWER_ON);
 	backlight_update_status(lcd->bl_dev);
 	return 0;
 }
@@ -485,55 +475,24 @@ static int setup_gpio_backlight(struct corgi_lcd *lcd,
 				struct corgi_lcd_platform_data *pdata)
 {
 	struct spi_device *spi = lcd->spi_dev;
-	int err;
 
-	lcd->gpio_backlight_on = -1;
-	lcd->gpio_backlight_cont = -1;
+	lcd->backlight_on = devm_gpiod_get_optional(&spi->dev,
+						    "BL_ON", GPIOD_OUT_LOW);
+	if (IS_ERR(lcd->backlight_on))
+		return PTR_ERR(lcd->backlight_on);
 
-	if (gpio_is_valid(pdata->gpio_backlight_on)) {
-		err = devm_gpio_request(&spi->dev, pdata->gpio_backlight_on,
-					"BL_ON");
-		if (err) {
-			dev_err(&spi->dev,
-				"failed to request GPIO%d for backlight_on\n",
-				pdata->gpio_backlight_on);
-			return err;
-		}
+	lcd->backlight_cont = devm_gpiod_get_optional(&spi->dev, "BL_CONT",
+						      GPIOD_OUT_LOW);
+	if (IS_ERR(lcd->backlight_cont))
+		return PTR_ERR(lcd->backlight_cont);
 
-		lcd->gpio_backlight_on = pdata->gpio_backlight_on;
-		gpio_direction_output(lcd->gpio_backlight_on, 0);
-	}
-
-	if (gpio_is_valid(pdata->gpio_backlight_cont)) {
-		err = devm_gpio_request(&spi->dev, pdata->gpio_backlight_cont,
-					"BL_CONT");
-		if (err) {
-			dev_err(&spi->dev,
-				"failed to request GPIO%d for backlight_cont\n",
-				pdata->gpio_backlight_cont);
-			return err;
-		}
-
-		lcd->gpio_backlight_cont = pdata->gpio_backlight_cont;
-
-		/* spitz and akita use both GPIOs for backlight, and
-		 * have inverted polarity of GPIO_BACKLIGHT_CONT
-		 */
-		if (gpio_is_valid(lcd->gpio_backlight_on)) {
-			lcd->gpio_backlight_cont_inverted = 1;
-			gpio_direction_output(lcd->gpio_backlight_cont, 1);
-		} else {
-			lcd->gpio_backlight_cont_inverted = 0;
-			gpio_direction_output(lcd->gpio_backlight_cont, 0);
-		}
-	}
 	return 0;
 }
 
 static int corgi_lcd_probe(struct spi_device *spi)
 {
 	struct backlight_properties props;
-	struct corgi_lcd_platform_data *pdata = spi->dev.platform_data;
+	struct corgi_lcd_platform_data *pdata = dev_get_platdata(&spi->dev);
 	struct corgi_lcd *lcd;
 	int ret = 0;
 
@@ -542,74 +501,60 @@ static int corgi_lcd_probe(struct spi_device *spi)
 		return -EINVAL;
 	}
 
-	lcd = devm_kzalloc(&spi->dev, sizeof(struct corgi_lcd), GFP_KERNEL);
-	if (!lcd) {
-		dev_err(&spi->dev, "failed to allocate memory\n");
+	lcd = devm_kzalloc_obj(&spi->dev, struct corgi_lcd);
+	if (!lcd)
 		return -ENOMEM;
-	}
 
 	lcd->spi_dev = spi;
 
-	lcd->lcd_dev = lcd_device_register("corgi_lcd", &spi->dev,
-					lcd, &corgi_lcd_ops);
+	lcd->lcd_dev = devm_lcd_device_register(&spi->dev, "corgi_lcd",
+						&spi->dev, lcd, &corgi_lcd_ops);
 	if (IS_ERR(lcd->lcd_dev))
 		return PTR_ERR(lcd->lcd_dev);
 
-	lcd->power = FB_BLANK_POWERDOWN;
+	lcd->power = LCD_POWER_OFF;
 	lcd->mode = (pdata) ? pdata->init_mode : CORGI_LCD_MODE_VGA;
 
 	memset(&props, 0, sizeof(struct backlight_properties));
 	props.type = BACKLIGHT_RAW;
 	props.max_brightness = pdata->max_intensity;
-	lcd->bl_dev = backlight_device_register("corgi_bl", &spi->dev, lcd,
-						&corgi_bl_ops, &props);
-	if (IS_ERR(lcd->bl_dev)) {
-		ret = PTR_ERR(lcd->bl_dev);
-		goto err_unregister_lcd;
-	}
+	lcd->bl_dev = devm_backlight_device_register(&spi->dev, "corgi_bl",
+						&spi->dev, lcd, &corgi_bl_ops,
+						&props);
+	if (IS_ERR(lcd->bl_dev))
+		return PTR_ERR(lcd->bl_dev);
+
 	lcd->bl_dev->props.brightness = pdata->default_intensity;
-	lcd->bl_dev->props.power = FB_BLANK_UNBLANK;
+	lcd->bl_dev->props.power = BACKLIGHT_POWER_ON;
 
 	ret = setup_gpio_backlight(lcd, pdata);
 	if (ret)
-		goto err_unregister_bl;
+		return ret;
 
 	lcd->kick_battery = pdata->kick_battery;
 
 	spi_set_drvdata(spi, lcd);
-	corgi_lcd_set_power(lcd->lcd_dev, FB_BLANK_UNBLANK);
+	corgi_lcd_set_power(lcd->lcd_dev, LCD_POWER_ON);
 	backlight_update_status(lcd->bl_dev);
 
 	lcd->limit_mask = pdata->limit_mask;
 	the_corgi_lcd = lcd;
 	return 0;
-
-err_unregister_bl:
-	backlight_device_unregister(lcd->bl_dev);
-err_unregister_lcd:
-	lcd_device_unregister(lcd->lcd_dev);
-	return ret;
 }
 
-static int corgi_lcd_remove(struct spi_device *spi)
+static void corgi_lcd_remove(struct spi_device *spi)
 {
 	struct corgi_lcd *lcd = spi_get_drvdata(spi);
 
-	lcd->bl_dev->props.power = FB_BLANK_UNBLANK;
+	lcd->bl_dev->props.power = BACKLIGHT_POWER_ON;
 	lcd->bl_dev->props.brightness = 0;
 	backlight_update_status(lcd->bl_dev);
-	backlight_device_unregister(lcd->bl_dev);
-
-	corgi_lcd_set_power(lcd->lcd_dev, FB_BLANK_POWERDOWN);
-	lcd_device_unregister(lcd->lcd_dev);
-
-	return 0;
+	corgi_lcd_set_power(lcd->lcd_dev, LCD_POWER_OFF);
 }
 
 static struct spi_driver corgi_lcd_driver = {
 	.driver		= {
 		.name	= "corgi-lcd",
-		.owner	= THIS_MODULE,
 		.pm	= &corgi_lcd_pm_ops,
 	},
 	.probe		= corgi_lcd_probe,

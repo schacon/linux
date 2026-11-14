@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* $Date: 2006/02/07 04:21:54 $ $RCSfile: tp.c,v $ $Revision: 1.73 $ */
 #include "common.h"
 #include "regs.h"
@@ -57,7 +58,7 @@ void t1_tp_destroy(struct petp *tp)
 
 struct petp *t1_tp_create(adapter_t *adapter, struct tp_params *p)
 {
-	struct petp *tp = kzalloc(sizeof(*tp), GFP_KERNEL);
+	struct petp *tp = kzalloc_obj(*tp);
 
 	if (!tp)
 		return NULL;

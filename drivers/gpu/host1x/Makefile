@@ -1,6 +1,6 @@
-ccflags-y = -Idrivers/gpu/host1x
-
+# SPDX-License-Identifier: GPL-2.0
 host1x-y = \
+	bus.o \
 	syncpt.o \
 	dev.o \
 	intr.o \
@@ -8,13 +8,20 @@ host1x-y = \
 	channel.o \
 	job.o \
 	debug.o \
-	hw/host1x01.o
+	mipi.o \
+	tegra114-mipi.o \
+	fence.o \
+	hw/host1x01.o \
+	hw/host1x02.o \
+	hw/host1x04.o \
+	hw/host1x05.o \
+	hw/host1x06.o \
+	hw/host1x07.o \
+	hw/host1x08.o \
+	hw/host1x10.o
 
-ccflags-y += -Iinclude/drm
-ccflags-$(CONFIG_DRM_TEGRA_DEBUG) += -DDEBUG
+host1x-$(CONFIG_IOMMU_API) += \
+	context.o
 
-host1x-$(CONFIG_DRM_TEGRA) += drm/drm.o drm/fb.o drm/dc.o
-host1x-$(CONFIG_DRM_TEGRA) += drm/output.o drm/rgb.o drm/hdmi.o
-host1x-$(CONFIG_DRM_TEGRA) += drm/gem.o
-host1x-$(CONFIG_DRM_TEGRA) += drm/gr2d.o
 obj-$(CONFIG_TEGRA_HOST1X) += host1x.o
+obj-$(CONFIG_TEGRA_HOST1X_CONTEXT_BUS) += context_bus.o

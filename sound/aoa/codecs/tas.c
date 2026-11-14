@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Apple Onboard Audio driver for tas codec
  *
  * Copyright 2006 Johannes Berg <johannes@sipsolutions.net>
- *
- * GPL v2, can be found in COPYING.
  *
  * Open questions:
  *  - How to distinguish between 3004 and versions?
@@ -59,13 +58,12 @@
  *    and up to the hardware designer to not wire
  *    them up in some weird unusable way.
  */
-#include <stddef.h>
 #include <linux/i2c.h>
 #include <asm/pmac_low_i2c.h>
-#include <asm/prom.h>
 #include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/slab.h>
 
 MODULE_AUTHOR("Johannes Berg <johannes@sipsolutions.net>");
@@ -218,7 +216,7 @@ static int tas_dev_register(struct snd_device *dev)
 	return 0;
 }
 
-static struct snd_device_ops ops = {
+static const struct snd_device_ops ops = {
 	.dev_register = tas_dev_register,
 };
 
@@ -237,10 +235,9 @@ static int tas_snd_vol_get(struct snd_kcontrol *kcontrol,
 {
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	ucontrol->value.integer.value[0] = tas->cached_volume_l;
 	ucontrol->value.integer.value[1] = tas->cached_volume_r;
-	mutex_unlock(&tas->mtx);
 	return 0;
 }
 
@@ -256,22 +253,19 @@ static int tas_snd_vol_put(struct snd_kcontrol *kcontrol,
 	    ucontrol->value.integer.value[1] > 177)
 		return -EINVAL;
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	if (tas->cached_volume_l == ucontrol->value.integer.value[0]
-	 && tas->cached_volume_r == ucontrol->value.integer.value[1]) {
-		mutex_unlock(&tas->mtx);
+	 && tas->cached_volume_r == ucontrol->value.integer.value[1])
 		return 0;
-	}
 
 	tas->cached_volume_l = ucontrol->value.integer.value[0];
 	tas->cached_volume_r = ucontrol->value.integer.value[1];
 	if (tas->hw_enabled)
 		tas_set_volume(tas);
-	mutex_unlock(&tas->mtx);
 	return 1;
 }
 
-static struct snd_kcontrol_new volume_control = {
+static const struct snd_kcontrol_new volume_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Master Playback Volume",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -287,10 +281,9 @@ static int tas_snd_mute_get(struct snd_kcontrol *kcontrol,
 {
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	ucontrol->value.integer.value[0] = !tas->mute_l;
 	ucontrol->value.integer.value[1] = !tas->mute_r;
-	mutex_unlock(&tas->mtx);
 	return 0;
 }
 
@@ -299,22 +292,19 @@ static int tas_snd_mute_put(struct snd_kcontrol *kcontrol,
 {
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	if (tas->mute_l == !ucontrol->value.integer.value[0]
-	 && tas->mute_r == !ucontrol->value.integer.value[1]) {
-		mutex_unlock(&tas->mtx);
+	 && tas->mute_r == !ucontrol->value.integer.value[1])
 		return 0;
-	}
 
 	tas->mute_l = !ucontrol->value.integer.value[0];
 	tas->mute_r = !ucontrol->value.integer.value[1];
 	if (tas->hw_enabled)
 		tas_set_volume(tas);
-	mutex_unlock(&tas->mtx);
 	return 1;
 }
 
-static struct snd_kcontrol_new mute_control = {
+static const struct snd_kcontrol_new mute_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Master Playback Switch",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -339,10 +329,9 @@ static int tas_snd_mixer_get(struct snd_kcontrol *kcontrol,
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 	int idx = kcontrol->private_value;
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	ucontrol->value.integer.value[0] = tas->mixer_l[idx];
 	ucontrol->value.integer.value[1] = tas->mixer_r[idx];
-	mutex_unlock(&tas->mtx);
 
 	return 0;
 }
@@ -353,24 +342,21 @@ static int tas_snd_mixer_put(struct snd_kcontrol *kcontrol,
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 	int idx = kcontrol->private_value;
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	if (tas->mixer_l[idx] == ucontrol->value.integer.value[0]
-	 && tas->mixer_r[idx] == ucontrol->value.integer.value[1]) {
-		mutex_unlock(&tas->mtx);
+	 && tas->mixer_r[idx] == ucontrol->value.integer.value[1])
 		return 0;
-	}
 
 	tas->mixer_l[idx] = ucontrol->value.integer.value[0];
 	tas->mixer_r[idx] = ucontrol->value.integer.value[1];
 
 	if (tas->hw_enabled)
 		tas_set_mixer(tas);
-	mutex_unlock(&tas->mtx);
 	return 1;
 }
 
 #define MIXER_CONTROL(n,descr,idx)			\
-static struct snd_kcontrol_new n##_control = {		\
+static const struct snd_kcontrol_new n##_control = {	\
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,		\
 	.name = descr " Playback Volume",		\
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,	\
@@ -398,9 +384,8 @@ static int tas_snd_drc_range_get(struct snd_kcontrol *kcontrol,
 {
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	ucontrol->value.integer.value[0] = tas->drc_range;
-	mutex_unlock(&tas->mtx);
 	return 0;
 }
 
@@ -413,20 +398,17 @@ static int tas_snd_drc_range_put(struct snd_kcontrol *kcontrol,
 	    ucontrol->value.integer.value[0] > TAS3004_DRC_MAX)
 		return -EINVAL;
 
-	mutex_lock(&tas->mtx);
-	if (tas->drc_range == ucontrol->value.integer.value[0]) {
-		mutex_unlock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
+	if (tas->drc_range == ucontrol->value.integer.value[0])
 		return 0;
-	}
 
 	tas->drc_range = ucontrol->value.integer.value[0];
 	if (tas->hw_enabled)
 		tas3004_set_drc(tas);
-	mutex_unlock(&tas->mtx);
 	return 1;
 }
 
-static struct snd_kcontrol_new drc_range_control = {
+static const struct snd_kcontrol_new drc_range_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "DRC Range",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -442,9 +424,8 @@ static int tas_snd_drc_switch_get(struct snd_kcontrol *kcontrol,
 {
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	ucontrol->value.integer.value[0] = tas->drc_enabled;
-	mutex_unlock(&tas->mtx);
 	return 0;
 }
 
@@ -453,20 +434,17 @@ static int tas_snd_drc_switch_put(struct snd_kcontrol *kcontrol,
 {
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&tas->mtx);
-	if (tas->drc_enabled == ucontrol->value.integer.value[0]) {
-		mutex_unlock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
+	if (tas->drc_enabled == ucontrol->value.integer.value[0])
 		return 0;
-	}
 
 	tas->drc_enabled = !!ucontrol->value.integer.value[0];
 	if (tas->hw_enabled)
 		tas3004_set_drc(tas);
-	mutex_unlock(&tas->mtx);
 	return 1;
 }
 
-static struct snd_kcontrol_new drc_switch_control = {
+static const struct snd_kcontrol_new drc_switch_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "DRC Range Switch",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -478,15 +456,9 @@ static struct snd_kcontrol_new drc_switch_control = {
 static int tas_snd_capture_source_info(struct snd_kcontrol *kcontrol,
 	struct snd_ctl_elem_info *uinfo)
 {
-	static char *texts[] = { "Line-In", "Microphone" };
+	static const char * const texts[] = { "Line-In", "Microphone" };
 
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
-	uinfo->count = 1;
-	uinfo->value.enumerated.items = 2;
-	if (uinfo->value.enumerated.item > 1)
-		uinfo->value.enumerated.item = 1;
-	strcpy(uinfo->value.enumerated.name, texts[uinfo->value.enumerated.item]);
-	return 0;
+	return snd_ctl_enum_info(uinfo, 1, 2, texts);
 }
 
 static int tas_snd_capture_source_get(struct snd_kcontrol *kcontrol,
@@ -494,9 +466,8 @@ static int tas_snd_capture_source_get(struct snd_kcontrol *kcontrol,
 {
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	ucontrol->value.enumerated.item[0] = !!(tas->acr & TAS_ACR_INPUT_B);
-	mutex_unlock(&tas->mtx);
 	return 0;
 }
 
@@ -508,7 +479,7 @@ static int tas_snd_capture_source_put(struct snd_kcontrol *kcontrol,
 
 	if (ucontrol->value.enumerated.item[0] > 1)
 		return -EINVAL;
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	oldacr = tas->acr;
 
 	/*
@@ -520,17 +491,14 @@ static int tas_snd_capture_source_put(struct snd_kcontrol *kcontrol,
 	if (ucontrol->value.enumerated.item[0])
 		tas->acr |= TAS_ACR_INPUT_B | TAS_ACR_B_MONAUREAL |
 		      TAS_ACR_B_MON_SEL_RIGHT;
-	if (oldacr == tas->acr) {
-		mutex_unlock(&tas->mtx);
+	if (oldacr == tas->acr)
 		return 0;
-	}
 	if (tas->hw_enabled)
 		tas_write_reg(tas, TAS_REG_ACR, 1, &tas->acr);
-	mutex_unlock(&tas->mtx);
 	return 1;
 }
 
-static struct snd_kcontrol_new capture_source_control = {
+static const struct snd_kcontrol_new capture_source_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	/* If we name this 'Input Source', it properly shows up in
 	 * alsamixer as a selection, * but it's shown under the
@@ -565,9 +533,8 @@ static int tas_snd_treble_get(struct snd_kcontrol *kcontrol,
 {
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	ucontrol->value.integer.value[0] = tas->treble;
-	mutex_unlock(&tas->mtx);
 	return 0;
 }
 
@@ -579,20 +546,17 @@ static int tas_snd_treble_put(struct snd_kcontrol *kcontrol,
 	if (ucontrol->value.integer.value[0] < TAS3004_TREBLE_MIN ||
 	    ucontrol->value.integer.value[0] > TAS3004_TREBLE_MAX)
 		return -EINVAL;
-	mutex_lock(&tas->mtx);
-	if (tas->treble == ucontrol->value.integer.value[0]) {
-		mutex_unlock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
+	if (tas->treble == ucontrol->value.integer.value[0])
 		return 0;
-	}
 
 	tas->treble = ucontrol->value.integer.value[0];
 	if (tas->hw_enabled)
 		tas_set_treble(tas);
-	mutex_unlock(&tas->mtx);
 	return 1;
 }
 
-static struct snd_kcontrol_new treble_control = {
+static const struct snd_kcontrol_new treble_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Treble",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -616,9 +580,8 @@ static int tas_snd_bass_get(struct snd_kcontrol *kcontrol,
 {
 	struct tas *tas = snd_kcontrol_chip(kcontrol);
 
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	ucontrol->value.integer.value[0] = tas->bass;
-	mutex_unlock(&tas->mtx);
 	return 0;
 }
 
@@ -630,20 +593,17 @@ static int tas_snd_bass_put(struct snd_kcontrol *kcontrol,
 	if (ucontrol->value.integer.value[0] < TAS3004_BASS_MIN ||
 	    ucontrol->value.integer.value[0] > TAS3004_BASS_MAX)
 		return -EINVAL;
-	mutex_lock(&tas->mtx);
-	if (tas->bass == ucontrol->value.integer.value[0]) {
-		mutex_unlock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
+	if (tas->bass == ucontrol->value.integer.value[0])
 		return 0;
-	}
 
 	tas->bass = ucontrol->value.integer.value[0];
 	if (tas->hw_enabled)
 		tas_set_bass(tas);
-	mutex_unlock(&tas->mtx);
 	return 1;
 }
 
-static struct snd_kcontrol_new bass_control = {
+static const struct snd_kcontrol_new bass_control = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Bass",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -730,13 +690,13 @@ static int tas_switch_clock(struct codec_info_item *cii, enum clock_switch clock
 		break;
 	case CLOCK_SWITCH_SLAVE:
 		/* Clocks are back, re-init the codec */
-		mutex_lock(&tas->mtx);
-		tas_reset_init(tas);
-		tas_set_volume(tas);
-		tas_set_mixer(tas);
-		tas->hw_enabled = 1;
-		tas->codec.gpio->methods->all_amps_restore(tas->codec.gpio);
-		mutex_unlock(&tas->mtx);
+		scoped_guard(mutex, &tas->mtx) {
+			tas_reset_init(tas);
+			tas_set_volume(tas);
+			tas_set_mixer(tas);
+			tas->hw_enabled = 1;
+			tas->codec.gpio->methods->all_amps_restore(tas->codec.gpio);
+		}
 		break;
 	default:
 		/* doesn't happen as of now */
@@ -751,23 +711,21 @@ static int tas_switch_clock(struct codec_info_item *cii, enum clock_switch clock
  * our i2c device is suspended, and then take note of that! */
 static int tas_suspend(struct tas *tas)
 {
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	tas->hw_enabled = 0;
 	tas->acr |= TAS_ACR_ANALOG_PDOWN;
 	tas_write_reg(tas, TAS_REG_ACR, 1, &tas->acr);
-	mutex_unlock(&tas->mtx);
 	return 0;
 }
 
 static int tas_resume(struct tas *tas)
 {
 	/* reset codec */
-	mutex_lock(&tas->mtx);
+	guard(mutex)(&tas->mtx);
 	tas_reset_init(tas);
 	tas_set_volume(tas);
 	tas_set_mixer(tas);
 	tas->hw_enabled = 1;
-	mutex_unlock(&tas->mtx);
 	return 0;
 }
 
@@ -810,14 +768,13 @@ static int tas_init_codec(struct aoa_codec *codec)
 		return -EINVAL;
 	}
 
-	mutex_lock(&tas->mtx);
-	if (tas_reset_init(tas)) {
-		printk(KERN_ERR PFX "tas failed to initialise\n");
-		mutex_unlock(&tas->mtx);
-		return -ENXIO;
+	scoped_guard(mutex, &tas->mtx) {
+		if (tas_reset_init(tas)) {
+			printk(KERN_ERR PFX "tas failed to initialise\n");
+			return -ENXIO;
+		}
+		tas->hw_enabled = 1;
 	}
-	tas->hw_enabled = 1;
-	mutex_unlock(&tas->mtx);
 
 	if (tas->codec.soundbus_dev->attach_codec(tas->codec.soundbus_dev,
 						   aoa_get_card(),
@@ -826,7 +783,7 @@ static int tas_init_codec(struct aoa_codec *codec)
 		return -ENODEV;
 	}
 
-	if (aoa_snd_device_new(SNDRV_DEV_LOWLEVEL, tas, &ops)) {
+	if (aoa_snd_device_new(SNDRV_DEV_CODEC, tas, &ops)) {
 		printk(KERN_ERR PFX "failed to create tas snd device!\n");
 		return -ENODEV;
 	}
@@ -883,13 +840,12 @@ static void tas_exit_codec(struct aoa_codec *codec)
 }
 
 
-static int tas_i2c_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int tas_i2c_probe(struct i2c_client *client)
 {
 	struct device_node *node = client->dev.of_node;
 	struct tas *tas;
 
-	tas = kzalloc(sizeof(struct tas), GFP_KERNEL);
+	tas = kzalloc_obj(struct tas);
 
 	if (!tas)
 		return -ENOMEM;
@@ -901,7 +857,7 @@ static int tas_i2c_probe(struct i2c_client *client,
 	/* seems that half is a saner default */
 	tas->drc_range = TAS3004_DRC_MAX / 2;
 
-	strlcpy(tas->codec.name, "tas", MAX_CODEC_NAME_LEN);
+	strscpy(tas->codec.name, "tas");
 	tas->codec.owner = THIS_MODULE;
 	tas->codec.init = tas_init_codec;
 	tas->codec.exit = tas_exit_codec;
@@ -911,16 +867,17 @@ static int tas_i2c_probe(struct i2c_client *client,
 		goto fail;
 	}
 	printk(KERN_DEBUG
-	       "snd-aoa-codec-tas: tas found, addr 0x%02x on %s\n",
-	       (unsigned int)client->addr, node->full_name);
+	       "snd-aoa-codec-tas: tas found, addr 0x%02x on %pOF\n",
+	       (unsigned int)client->addr, node);
 	return 0;
  fail:
 	mutex_destroy(&tas->mtx);
+	of_node_put(tas->codec.node);
 	kfree(tas);
 	return -EINVAL;
 }
 
-static int tas_i2c_remove(struct i2c_client *client)
+static void tas_i2c_remove(struct i2c_client *client)
 {
 	struct tas *tas = i2c_get_clientdata(client);
 	u8 tmp = TAS_ACR_ANALOG_PDOWN;
@@ -933,11 +890,10 @@ static int tas_i2c_remove(struct i2c_client *client)
 
 	mutex_destroy(&tas->mtx);
 	kfree(tas);
-	return 0;
 }
 
 static const struct i2c_device_id tas_i2c_id[] = {
-	{ "MAC,tas3004", 0 },
+	{ "MAC,tas3004" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c,tas_i2c_id);
@@ -945,7 +901,6 @@ MODULE_DEVICE_TABLE(i2c,tas_i2c_id);
 static struct i2c_driver tas_driver = {
 	.driver = {
 		.name = "aoa_codec_tas",
-		.owner = THIS_MODULE,
 	},
 	.probe = tas_i2c_probe,
 	.remove = tas_i2c_remove,

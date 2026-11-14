@@ -1,35 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * vp27smpx - driver version 0.0.1
  *
- * Copyright (C) 2007 Hans Verkuil <hverkuil@xs4all.nl>
+ * Copyright (C) 2007 Hans Verkuil <hverkuil@kernel.org>
  *
  * Based on a tvaudio patch from Takahiro Adachi <tadachi@tadachi-net.com>
  * and Kazuhiko Kawakami <kazz-0@mail.goo.ne.jp>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/ioctl.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/i2c.h>
 #include <linux/videodev2.h>
 #include <media/v4l2-device.h>
-#include <media/v4l2-chip-ident.h>
 
 MODULE_DESCRIPTION("vp27smpx driver");
 MODULE_AUTHOR("Hans Verkuil");
@@ -112,13 +98,6 @@ static int vp27smpx_g_tuner(struct v4l2_subdev *sd, struct v4l2_tuner *vt)
 	return 0;
 }
 
-static int vp27smpx_g_chip_ident(struct v4l2_subdev *sd, struct v4l2_dbg_chip_ident *chip)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	return v4l2_chip_ident_i2c_client(client, chip, V4L2_IDENT_VP27SMPX, 0);
-}
-
 static int vp27smpx_log_status(struct v4l2_subdev *sd)
 {
 	struct vp27smpx_state *state = to_state(sd);
@@ -132,8 +111,6 @@ static int vp27smpx_log_status(struct v4l2_subdev *sd)
 
 static const struct v4l2_subdev_core_ops vp27smpx_core_ops = {
 	.log_status = vp27smpx_log_status,
-	.g_chip_ident = vp27smpx_g_chip_ident,
-	.s_std = vp27smpx_s_std,
 };
 
 static const struct v4l2_subdev_tuner_ops vp27smpx_tuner_ops = {
@@ -142,9 +119,14 @@ static const struct v4l2_subdev_tuner_ops vp27smpx_tuner_ops = {
 	.g_tuner = vp27smpx_g_tuner,
 };
 
+static const struct v4l2_subdev_video_ops vp27smpx_video_ops = {
+	.s_std = vp27smpx_s_std,
+};
+
 static const struct v4l2_subdev_ops vp27smpx_ops = {
 	.core = &vp27smpx_core_ops,
 	.tuner = &vp27smpx_tuner_ops,
+	.video = &vp27smpx_video_ops,
 };
 
 /* ----------------------------------------------------------------------- */
@@ -156,8 +138,7 @@ static const struct v4l2_subdev_ops vp27smpx_ops = {
  * concerning the addresses: i2c wants 7 bit (without the r/w bit), so '>>1'
  */
 
-static int vp27smpx_probe(struct i2c_client *client,
-			  const struct i2c_device_id *id)
+static int vp27smpx_probe(struct i2c_client *client)
 {
 	struct vp27smpx_state *state;
 	struct v4l2_subdev *sd;
@@ -169,7 +150,7 @@ static int vp27smpx_probe(struct i2c_client *client,
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	state = kzalloc(sizeof(struct vp27smpx_state), GFP_KERNEL);
+	state = devm_kzalloc_obj(&client->dev, *state);
 	if (state == NULL)
 		return -ENOMEM;
 	sd = &state->sd;
@@ -181,26 +162,23 @@ static int vp27smpx_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int vp27smpx_remove(struct i2c_client *client)
+static void vp27smpx_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_device_unregister_subdev(sd);
-	kfree(to_state(sd));
-	return 0;
 }
 
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id vp27smpx_id[] = {
-	{ "vp27smpx", 0 },
+	{ .name = "vp27smpx" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, vp27smpx_id);
 
 static struct i2c_driver vp27smpx_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "vp27smpx",
 	},
 	.probe		= vp27smpx_probe,

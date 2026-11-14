@@ -19,11 +19,11 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/i2c.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/tps6507x.h>
 
-static struct mfd_cell tps6507x_devs[] = {
+static const struct mfd_cell tps6507x_devs[] = {
 	{
 		.name = "tps6507x-pmic",
 	},
@@ -83,13 +83,11 @@ static int tps6507x_i2c_write_device(struct tps6507x_dev *tps6507x, char reg,
 	return 0;
 }
 
-static int tps6507x_i2c_probe(struct i2c_client *i2c,
-			    const struct i2c_device_id *id)
+static int tps6507x_i2c_probe(struct i2c_client *i2c)
 {
 	struct tps6507x_dev *tps6507x;
 
-	tps6507x = devm_kzalloc(&i2c->dev, sizeof(struct tps6507x_dev),
-				GFP_KERNEL);
+	tps6507x = devm_kzalloc_obj(&i2c->dev, struct tps6507x_dev);
 	if (tps6507x == NULL)
 		return -ENOMEM;
 
@@ -99,26 +97,18 @@ static int tps6507x_i2c_probe(struct i2c_client *i2c,
 	tps6507x->read_dev = tps6507x_i2c_read_device;
 	tps6507x->write_dev = tps6507x_i2c_write_device;
 
-	return mfd_add_devices(tps6507x->dev, -1, tps6507x_devs,
-			       ARRAY_SIZE(tps6507x_devs), NULL, 0, NULL);
-}
-
-static int tps6507x_i2c_remove(struct i2c_client *i2c)
-{
-	struct tps6507x_dev *tps6507x = i2c_get_clientdata(i2c);
-
-	mfd_remove_devices(tps6507x->dev);
-	return 0;
+	return devm_mfd_add_devices(tps6507x->dev, -1, tps6507x_devs,
+				    ARRAY_SIZE(tps6507x_devs), NULL, 0, NULL);
 }
 
 static const struct i2c_device_id tps6507x_i2c_id[] = {
-       { "tps6507x", 0 },
-       { }
+	{ "tps6507x" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tps6507x_i2c_id);
 
 #ifdef CONFIG_OF
-static struct of_device_id tps6507x_of_match[] = {
+static const struct of_device_id tps6507x_of_match[] = {
 	{.compatible = "ti,tps6507x", },
 	{},
 };
@@ -128,11 +118,9 @@ MODULE_DEVICE_TABLE(of, tps6507x_of_match);
 static struct i2c_driver tps6507x_i2c_driver = {
 	.driver = {
 		   .name = "tps6507x",
-		   .owner = THIS_MODULE,
 		   .of_match_table = of_match_ptr(tps6507x_of_match),
 	},
 	.probe = tps6507x_i2c_probe,
-	.remove = tps6507x_i2c_remove,
 	.id_table = tps6507x_i2c_id,
 };
 

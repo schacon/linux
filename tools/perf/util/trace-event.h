@@ -1,63 +1,67 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _PERF_UTIL_TRACE_EVENT_H
 #define _PERF_UTIL_TRACE_EVENT_H
 
-#include "parse-events.h"
-#include "event-parse.h"
-#include "session.h"
+#include <stdbool.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <linux/types.h>
 
 struct machine;
-struct perf_sample;
-union perf_event;
-struct perf_tool;
+struct tep_format_field;
+struct tep_plugin_list;
 
-extern int header_page_size_size;
-extern int header_page_ts_size;
-extern int header_page_data_offset;
-
-extern bool latency_format;
-extern struct pevent *perf_pevent;
-
-enum {
-	RINGBUF_TYPE_PADDING		= 29,
-	RINGBUF_TYPE_TIME_EXTEND	= 30,
-	RINGBUF_TYPE_TIME_STAMP		= 31,
+struct trace_event {
+	struct tep_handle	*pevent;
+	struct tep_plugin_list	*plugin_list;
 };
 
-#ifndef TS_SHIFT
-#define TS_SHIFT		27
-#endif
+/* Computes a version number comparable with LIBTRACEEVENT_VERSION from Makefile.config. */
+#define MAKE_LIBTRACEEVENT_VERSION(a, b, c) ((a)*255*255+(b)*255+(c))
 
-int bigendian(void);
+typedef char *(tep_func_resolver_t)(void *priv,
+				    unsigned long long *addrp, char **modp);
 
-struct pevent *read_trace_init(int file_bigendian, int host_bigendian);
-void event_format__print(struct event_format *event,
-			 int cpu, void *data, int size);
+bool have_tracepoints(struct list_head *evlist);
 
-int parse_ftrace_file(struct pevent *pevent, char *buf, unsigned long size);
-int parse_event_file(struct pevent *pevent,
+int trace_event__init(struct trace_event *t);
+void trace_event__cleanup(struct trace_event *t);
+void trace_event__exit(void);
+int trace_event__register_resolver(struct machine *machine,
+				   tep_func_resolver_t *func);
+struct tep_event*
+trace_event__tp_format(const char *sys, const char *name);
+
+struct tep_event *trace_event__tp_format_id(int id);
+
+void event_format__fprintf(const struct tep_event *event,
+			   int cpu, void *data, int size, FILE *fp);
+
+int parse_ftrace_file(struct tep_handle *pevent, char *buf, unsigned long size);
+int parse_event_file(struct tep_handle *pevent,
 		     char *buf, unsigned long size, char *sys);
 
-struct pevent_record *trace_peek_data(struct pevent *pevent, int cpu);
-
 unsigned long long
-raw_field_value(struct event_format *event, const char *name, void *data);
-void *raw_field_ptr(struct event_format *event, const char *name, void *data);
+raw_field_value(struct tep_event *event, const char *name, void *data);
 
-void parse_proc_kallsyms(struct pevent *pevent, char *file, unsigned int size);
-void parse_ftrace_printk(struct pevent *pevent, char *file, unsigned int size);
+const char *parse_task_states(struct tep_format_field *state_field);
 
-ssize_t trace_report(int fd, struct pevent **pevent, bool repipe);
+void parse_proc_kallsyms(struct tep_handle *pevent, char *file, unsigned int size);
+void parse_ftrace_printk(struct tep_handle *pevent, char *file, unsigned int size);
+void parse_saved_cmdline(struct tep_handle *pevent, char *file, unsigned int size);
 
-int trace_parse_common_type(struct pevent *pevent, void *data);
-int trace_parse_common_pid(struct pevent *pevent, void *data);
+ssize_t trace_report(int fd, struct trace_event *tevent, bool repipe);
 
-struct event_format *trace_find_next_event(struct pevent *pevent,
-					   struct event_format *event);
-unsigned long long read_size(struct event_format *event, void *ptr, int size);
+unsigned long long read_size(struct tep_event *event, void *ptr, int size);
 unsigned long long eval_flag(const char *flag);
 
-struct pevent_record *trace_read_data(struct pevent *pevent, int cpu);
 int read_tracing_data(int fd, struct list_head *pattrs);
+
+/*
+ * Return the tracepoint name in the format "subsystem:event_name",
+ * callers should free the returned string.
+ */
+char *tracepoint_id_to_name(u64 config);
 
 struct tracing_data {
 	/* size is only valid if temp is 'true' */
@@ -70,35 +74,20 @@ struct tracing_data *tracing_data_get(struct list_head *pattrs,
 				      int fd, bool temp);
 int tracing_data_put(struct tracing_data *tdata);
 
+#if defined(LIBTRACEEVENT_VERSION) &&  LIBTRACEEVENT_VERSION >= MAKE_LIBTRACEEVENT_VERSION(1, 5, 0)
+#include <event-parse.h>
 
-struct addr_location;
+static inline bool tep_field_is_relative(unsigned long flags)
+{
+	return (flags & TEP_FIELD_IS_RELATIVE) != 0;
+}
+#else
+#include <linux/compiler.h>
 
-struct perf_session;
-
-struct scripting_ops {
-	const char *name;
-	int (*start_script) (const char *script, int argc, const char **argv);
-	int (*stop_script) (void);
-	void (*process_event) (union perf_event *event,
-			       struct perf_sample *sample,
-			       struct perf_evsel *evsel,
-			       struct machine *machine,
-			       struct addr_location *al);
-	int (*generate_script) (struct pevent *pevent, const char *outfile);
-};
-
-int script_spec_register(const char *spec, struct scripting_ops *ops);
-
-void setup_perl_scripting(void);
-void setup_python_scripting(void);
-
-struct scripting_context {
-	struct pevent *pevent;
-	void *event_data;
-};
-
-int common_pc(struct scripting_context *context);
-int common_flags(struct scripting_context *context);
-int common_lock_depth(struct scripting_context *context);
+static inline bool tep_field_is_relative(unsigned long flags __maybe_unused)
+{
+	return false;
+}
+#endif
 
 #endif /* _PERF_UTIL_TRACE_EVENT_H */

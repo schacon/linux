@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * UIO driver for Hilscher NetX based fieldbus cards (cifX, comX).
  * See http://www.hilscher.com for details.
  *
  * (C) 2007 Hans J. Koch <hjk@hansjkoch.de>
  * (C) 2008 Manuel Traut <manut@linutronix.de>
- *
- * Licensed under GPL version 2 only.
  *
  */
 
@@ -54,12 +53,12 @@ static int netx_pci_probe(struct pci_dev *dev,
 	struct uio_info *info;
 	int bar;
 
-	info = kzalloc(sizeof(struct uio_info), GFP_KERNEL);
+	info = devm_kzalloc_obj(&dev->dev, struct uio_info);
 	if (!info)
 		return -ENOMEM;
 
 	if (pci_enable_device(dev))
-		goto out_free;
+		return -ENODEV;
 
 	if (pci_request_regions(dev, "netx"))
 		goto out_disable;
@@ -113,8 +112,6 @@ out_release:
 	pci_release_regions(dev);
 out_disable:
 	pci_disable_device(dev);
-out_free:
-	kfree(info);
 	return -ENODEV;
 }
 
@@ -127,13 +124,10 @@ static void netx_pci_remove(struct pci_dev *dev)
 	uio_unregister_device(info);
 	pci_release_regions(dev);
 	pci_disable_device(dev);
-	pci_set_drvdata(dev, NULL);
 	iounmap(info->mem[0].internal_addr);
-
-	kfree(info);
 }
 
-static struct pci_device_id netx_pci_ids[] = {
+static const struct pci_device_id netx_pci_ids[] = {
 	{
 		.vendor =	PCI_VENDOR_ID_HILSCHER,
 		.device =	PCI_DEVICE_ID_HILSCHER_NETX,
@@ -174,19 +168,8 @@ static struct pci_driver netx_pci_driver = {
 	.remove = netx_pci_remove,
 };
 
-static int __init netx_init_module(void)
-{
-	return pci_register_driver(&netx_pci_driver);
-}
-
-static void __exit netx_exit_module(void)
-{
-	pci_unregister_driver(&netx_pci_driver);
-}
-
-module_init(netx_init_module);
-module_exit(netx_exit_module);
-
+module_pci_driver(netx_pci_driver);
 MODULE_DEVICE_TABLE(pci, netx_pci_ids);
+MODULE_DESCRIPTION("UIO driver for Hilscher NetX based fieldbus cards");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Hans J. Koch, Manuel Traut");

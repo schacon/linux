@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * irq.h: in kernel interrupt controller related definitions
  * Copyright (c) 2007, Intel Corporation.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
- * Place - Suite 330, Boston, MA 02111-1307 USA.
  * Authors:
  *   Yaozu (Eddie) Dong <Eddie.dong@intel.com>
- *
  */
 
 #ifndef __IRQ_H
@@ -27,9 +15,10 @@
 #include <linux/kvm_host.h>
 #include <linux/spinlock.h>
 
-#include "iodev.h"
-#include "ioapic.h"
+#include <kvm/iodev.h>
 #include "lapic.h"
+
+#ifdef CONFIG_KVM_IOAPIC
 
 #define PIC_NUM_PINS 16
 #define SELECT_PIC(irq) \
@@ -68,31 +57,86 @@ struct kvm_pic {
 	int output;		/* intr from master PIC */
 	struct kvm_io_device dev_master;
 	struct kvm_io_device dev_slave;
-	struct kvm_io_device dev_eclr;
-	void (*ack_notifier)(void *opaque, int irq);
+	struct kvm_io_device dev_elcr;
 	unsigned long irq_states[PIC_NUM_PINS];
 };
 
-struct kvm_pic *kvm_create_pic(struct kvm *kvm);
-void kvm_destroy_pic(struct kvm *kvm);
+int kvm_pic_init(struct kvm *kvm);
+void kvm_pic_destroy(struct kvm *kvm);
 int kvm_pic_read_irq(struct kvm *kvm);
 void kvm_pic_update_irq(struct kvm_pic *s);
+int kvm_pic_set_irq(struct kvm_kernel_irq_routing_entry *e, struct kvm *kvm,
+		    int irq_source_id, int level, bool line_status);
 
-static inline struct kvm_pic *pic_irqchip(struct kvm *kvm)
+int kvm_setup_default_ioapic_and_pic_routing(struct kvm *kvm);
+
+int kvm_vm_ioctl_get_irqchip(struct kvm *kvm, struct kvm_irqchip *chip);
+int kvm_vm_ioctl_set_irqchip(struct kvm *kvm, struct kvm_irqchip *chip);
+
+static inline int irqchip_full(struct kvm *kvm)
 {
-	return kvm->arch.vpic;
+	int mode = kvm->arch.irqchip_mode;
+
+	/* Matches smp_wmb() when setting irqchip_mode */
+	smp_rmb();
+	return mode == KVM_IRQCHIP_KERNEL;
+}
+#else /* CONFIG_KVM_IOAPIC */
+static __always_inline int irqchip_full(struct kvm *kvm)
+{
+	return false;
+}
+#endif
+
+static inline int pic_in_kernel(struct kvm *kvm)
+{
+	return irqchip_full(kvm);
+}
+
+
+static inline int irqchip_split(struct kvm *kvm)
+{
+	int mode = kvm->arch.irqchip_mode;
+
+	/* Matches smp_wmb() when setting irqchip_mode */
+	smp_rmb();
+	return mode == KVM_IRQCHIP_SPLIT;
 }
 
 static inline int irqchip_in_kernel(struct kvm *kvm)
 {
-	int ret;
+	int mode = kvm->arch.irqchip_mode;
 
-	ret = (pic_irqchip(kvm) != NULL);
+	/* Matches smp_wmb() when setting irqchip_mode */
 	smp_rmb();
-	return ret;
+	return mode != KVM_IRQCHIP_NONE;
 }
 
-void kvm_pic_reset(struct kvm_kpic_state *s);
+int kvm_cpu_has_injectable_intr(struct kvm_vcpu *v);
+int kvm_cpu_has_interrupt(struct kvm_vcpu *vcpu);
+int kvm_cpu_has_extint(struct kvm_vcpu *v);
+int kvm_cpu_get_extint(struct kvm_vcpu *v);
+int kvm_cpu_get_interrupt(struct kvm_vcpu *v);
+
+static inline void kvm_warn_on_lost_irq(struct kvm_vcpu *vcpu)
+{
+	/*
+	 * WARN if an IRQ was lost between detecting the IRQ and grabbing the
+	 * IRQ for injection, unless it's possible the lost IRQ was due to one
+	 * of the exceptional cases below.
+	 *
+	 * If the VM has an in-kernel PIC, the ExtINT handling that's routed
+	 * through KVM's virtual PIC is tracked per-VM, not per-vCPU.  If
+	 * another vCPU grabs the IRQ, or deasserts the interrupt (which is
+	 * level-triggered), then it's both expected and "fine" for an IRQ
+	 * seemingly be "lost" from this vCPU's perspective.
+	 *
+	 * Similarly, Xen's event channel isn't entirely within KVM's control,
+	 * e.g. Xen emulation can be disabled entirely per-VM, or the guest
+	 * can desassert an IRQ by writing to shared memory.
+	 */
+	WARN_ON_ONCE(!pic_in_kernel(vcpu->kvm) && !IS_ENABLED(CONFIG_KVM_XEN));
+}
 
 void kvm_inject_pending_timer_irqs(struct kvm_vcpu *vcpu);
 void kvm_inject_apic_timer_irqs(struct kvm_vcpu *vcpu);

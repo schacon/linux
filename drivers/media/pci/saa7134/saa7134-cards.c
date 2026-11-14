@@ -1,33 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  * device driver for philips saa7134 based TV cards
  * card-specific stuff.
  *
  * (c) 2001-04 Gerd Knorr <kraxel@bytesex.org> [SuSE Labs]
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
+
+#include "saa7134.h"
+#include "saa7134-reg.h"
 
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
 
-#include "saa7134-reg.h"
-#include "saa7134.h"
-#include "tuner-xc2028.h"
+#include "xc2028.h"
 #include <media/v4l2-common.h>
 #include <media/tveeprom.h>
 #include "tea5767.h"
@@ -35,17 +23,23 @@
 #include "xc5000.h"
 #include "s5h1411.h"
 
-/* commly used strings */
-static char name_mute[]    = "mute";
-static char name_radio[]   = "Radio";
-static char name_tv[]      = "Television";
-static char name_tv_mono[] = "TV (mono only)";
-static char name_comp[]    = "Composite";
-static char name_comp1[]   = "Composite1";
-static char name_comp2[]   = "Composite2";
-static char name_comp3[]   = "Composite3";
-static char name_comp4[]   = "Composite4";
-static char name_svideo[]  = "S-Video";
+/* Input names */
+const char * const saa7134_input_name[] = {
+	[SAA7134_INPUT_MUTE]       = "mute",
+	[SAA7134_INPUT_RADIO]      = "Radio",
+	[SAA7134_INPUT_TV]         = "Television",
+	[SAA7134_INPUT_TV_MONO]    = "TV (mono only)",
+	[SAA7134_INPUT_COMPOSITE]  = "Composite",
+	[SAA7134_INPUT_COMPOSITE0] = "Composite0",
+	[SAA7134_INPUT_COMPOSITE1] = "Composite1",
+	[SAA7134_INPUT_COMPOSITE2] = "Composite2",
+	[SAA7134_INPUT_COMPOSITE3] = "Composite3",
+	[SAA7134_INPUT_COMPOSITE4] = "Composite4",
+	[SAA7134_INPUT_SVIDEO]     = "S-Video",
+	[SAA7134_INPUT_SVIDEO0]    = "S-Video0",
+	[SAA7134_INPUT_SVIDEO1]    = "S-Video1",
+	[SAA7134_INPUT_COMPOSITE_OVER_SVIDEO] = "Composite over S-Video",
+};
 
 /* ------------------------------------------------------------------ */
 /* board config info                                                  */
@@ -68,7 +62,7 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 
 		.inputs         = {{
-			.name = "default",
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 0,
 			.amux = LINE1,
 		}},
@@ -83,22 +77,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 
 		.inputs         = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -113,40 +105,38 @@ struct saa7134_board saa7134_boards[] = {
 
 		.gpiomask       = 0xe000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
 			.gpio = 0x8000,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x0000,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x2000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x8000,
 		},
@@ -162,34 +152,33 @@ struct saa7134_board saa7134_boards[] = {
 
 		.gpiomask       = 0xe000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x0000,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x2000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE2,
 			.gpio = 0x8000,
 		},
@@ -204,20 +193,19 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,     /* Composite signal on S-Video input */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,	/* Composite input */
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
@@ -234,40 +222,38 @@ struct saa7134_board saa7134_boards[] = {
 
 		.gpiomask       = 0x1E000,	/* Set GP16 and unused 15,14,13 to Output */
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
 			.gpio = 0x10000,	/* GP16=1 selects TV input */
-			.tv   = 1,
 		},{
-/*			.name = name_tv_mono,
+/*			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x0000,
-			.tv   = 1,
 		},{
-*/			.name = name_comp1,	/* Composite signal on S-Video input */
+*/			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE2,
 /*			.gpio = 0x4000,         */
 		},{
-			.name = name_comp2,	/* Composite input */
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 3,
 			.amux = LINE2,
 /*			.gpio = 0x4000,         */
 		},{
-			.name = name_svideo,	/* S-Video signal on S-Video input */
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 /*			.gpio = 0x4000,         */
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x00000,	/* GP16=0 selects FM radio antenna */
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x10000,
 		},
@@ -284,40 +270,38 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0xe000,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
 			.gpio = 0x8000,
-			.tv   = 1,
 		}, {
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x0000,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		}, {
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x2000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x8000,
 		},
@@ -330,24 +314,23 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
-		.empress_addr 	= 0x20,
+		.empress_addr	= 0x20,
 
 		.inputs         = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 		.mpeg      = SAA7134_MPEG_EMPRESS,
@@ -363,21 +346,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -389,35 +371,33 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
 			/* workaround for problems with normal TV sound */
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	       .mute = {
-		       .name = name_mute,
+		       .type = SAA7134_INPUT_MUTE,
 		       .amux = TV,
 	       },
 	},
@@ -431,32 +411,30 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux   = LINE2,
-			.tv   = 1,
 		},{
 
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
 
-			.name = "CVid over SVid",
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -467,28 +445,27 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
-		.empress_addr 	= 0x20,
+		.empress_addr	= 0x20,
 		.tda9887_conf	= TDA9887_PRESENT,
 		.gpiomask	= 0x820000,
 		.inputs		= {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x20000,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x20000,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x20000,
 		}},
 		.radio		= {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x20000,
 		},
@@ -503,20 +480,19 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 4,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp2, /* CVideo over SVideo Connector */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE1,
 		}}
@@ -530,31 +506,29 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
 			/* workaround for problems with normal TV sound */
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -566,18 +540,17 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 	},
 	[SAA7134_BOARD_CINERGY600] = {
@@ -589,25 +562,24 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 4,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp2, /* CVideo over SVideo Connector */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -621,25 +593,24 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 0,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = LINE2,
 	       },
 	       .mute = {
-		       .name = name_mute,
+		       .type = SAA7134_INPUT_MUTE,
 		       .amux = TV,
 		},
 	},
@@ -654,21 +625,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = LINE2,
 		},
 	},
@@ -680,18 +650,17 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 0,
 			.amux   = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 4,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 	},
 	[SAA7134_BOARD_ELSA_500TV] = {
@@ -702,19 +671,17 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 7,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 8,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 8,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 	},
 	[SAA7134_BOARD_ELSA_700TV] = {
@@ -725,21 +692,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 4,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 6,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 7,
 			.amux = LINE1,
 		}},
 		.mute           = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 		},
 	},
@@ -752,21 +718,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 4,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE1,
 		},
 	},
@@ -779,29 +744,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 0x200000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
 			.gpio = 0x0000,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 4,
 			.amux = LINE2,
 			.gpio = 0x0000,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE2,
 			.gpio = 0x0000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x200000,
 		},
 		.mute  = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.gpio = 0x0000,
 		},
 
@@ -814,18 +778,17 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 	},
 	[SAA7134_BOARD_10MOONSTVMASTER] = {
@@ -838,34 +801,33 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 0xe000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x0000,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x2000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE2,
 			.gpio = 0x8000,
 		},
@@ -878,25 +840,25 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
-		.empress_addr 	= 0x20,
+		.empress_addr	= 0x20,
 		.inputs         = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 4,
 			.amux = LINE1,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_comp3,
+			.type = SAA7134_INPUT_COMPOSITE3,
 			.vmux = 0,
 			.amux = LINE1,
 		},{
-			.name = name_comp4,
+			.type = SAA7134_INPUT_COMPOSITE4,
 			.vmux = 1,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
@@ -911,18 +873,17 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 	},
 	[SAA7134_BOARD_VIDEOMATE_TV_GOLD_PLUS] = {
@@ -934,21 +895,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x06c00012,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x0ac20012,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x08c20012,
-			.tv   = 1,
 		}},				/* radio and probably mute is missing */
 	},
 	[SAA7134_BOARD_CRONOS_PLUS] = {
@@ -967,23 +927,23 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 0xcf00,
 		.inputs         = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.gpio = 2 << 14,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 0,
 			.gpio = 1 << 14,
 		},{
-			.name = name_comp3,
+			.type = SAA7134_INPUT_COMPOSITE3,
 			.vmux = 0,
 			.gpio = 0 << 14,
 		},{
-			.name = name_comp4,
+			.type = SAA7134_INPUT_COMPOSITE4,
 			.vmux = 0,
 			.gpio = 3 << 14,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.gpio = 2 << 14,
 		}},
@@ -998,34 +958,33 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask	= 0x03,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x00,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x02,
 		}, {
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 0,
 			.amux = LINE1,
 			.gpio = 0x02,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x02,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE1,
 			.gpio = 0x01,
 		},
 		.mute  = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x00,
 		},
@@ -1038,20 +997,19 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
-		.empress_addr 	= 0x20,
+		.empress_addr	= 0x20,
 		.inputs         = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}},
 		.mpeg      = SAA7134_MPEG_EMPRESS,
 		.video_out = CCIR656,
@@ -1067,22 +1025,21 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 4,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE1,
 		},
 	},
@@ -1095,20 +1052,19 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT | TDA9887_INTERCARRIER | TDA9887_PORT2_INACTIVE,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 1,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
@@ -1122,21 +1078,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -1149,21 +1104,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 	},
@@ -1176,16 +1130,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
@@ -1198,30 +1151,28 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux   = 1,
 			.amux   = LINE2,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		},{
-			.name   = "CVid over SVid",
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux   = 0,
 			.amux   = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = LINE2,
 		},
 	},
@@ -1233,30 +1184,28 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux   = 1,
 			.amux   = LINE2,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		},{
-			.name   = "CVid over SVid",
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux   = 0,
 			.amux   = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = LINE2,
 		},
 	},
@@ -1269,30 +1218,28 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux   = 1,
 			.amux   = LINE2,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		},{
-			.name   = "CVid over SVid",
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux   = 0,
 			.amux   = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = LINE2,
 		},
 	},
@@ -1305,30 +1252,28 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x200000,
 		},
@@ -1342,10 +1287,10 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 		}},
 	},
@@ -1359,10 +1304,9 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		 .mpeg           = SAA7134_MPEG_DVB,
 		 .inputs         = {{
-			 .name = name_tv,
+			 .type = SAA7134_INPUT_TV,
 			 .vmux = 1,
 			 .amux = TV,
-			 .tv   = 1,
 		 } },
 	},
 	[SAA7134_BOARD_NOVAC_PRIMETV7133] = {
@@ -1374,15 +1318,14 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 		}},
 	},
@@ -1395,29 +1338,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 	},
@@ -1431,29 +1373,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 		}, {
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 	},
@@ -1466,12 +1407,11 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 7,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 7,
 			.amux = LINE1,
 		}},
@@ -1485,21 +1425,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -1511,25 +1450,24 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 4,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp2, /* CVideo over SVideo Connector */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE1,
 		}},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE2,
 		},
 	},
@@ -1543,29 +1481,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask	= 0x808c0080,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x00080,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x00080,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2_LEFT,
-			.tv   = 1,
 			.gpio = 0x00080,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x80000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE2,
 			.gpio = 0x40000,
 		},
@@ -1579,21 +1516,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = LINE2,
 		},
 	},
@@ -1606,18 +1542,17 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 	},
 	[SAA7134_BOARD_EMPIRE_PCI_TV_RADIO_LE] = {
@@ -1630,29 +1565,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 0x4000,
 		.inputs         = {{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x8000,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x8000,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE1,
 			.gpio = 0x8000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE1,
 			.gpio = 0x8000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio =0x8000,
 		}
@@ -1671,29 +1605,28 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x03,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x00,
 		},{
-			.name = name_comp,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x02,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x02,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE1,
 			.gpio = 0x01,
 		},
 		.mute  = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 			.gpio = 0x00,
 		},
@@ -1708,29 +1641,28 @@ struct saa7134_board saa7134_boards[] = {
 		.gpiomask       = 0x00300003,
 		/* .gpiomask       = 0x8c240003, */
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x01,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 			.gpio = 0x02,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE1,
 			.gpio = 0x02,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x00300001,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x01,
 		},
@@ -1744,21 +1676,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE1,
 		},
 	},
@@ -1773,24 +1704,23 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x08000000,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x08000000,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x08000000,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x08000000,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x00000000,
 		},
@@ -1804,21 +1734,19 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
@@ -1830,28 +1758,27 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
-		.rds_addr 	= 0x10,
+		.rds_addr	= 0x10,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 4,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp2, /* CVideo over SVideo Connector */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -1865,29 +1792,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask	= 0x1ce780,
 		.inputs		= {{
-			.name = name_svideo,
-			.vmux = 0,		/* CVideo over SVideo Connector - ok? */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
+			.vmux = 0,
 			.amux = LINE1,
 			.gpio = 0x008080,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x008080,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x008080,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x80000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE2,
 			.gpio = 0x0c8000,
 		},
@@ -1902,20 +1828,19 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT | TDA9887_INTERCARRIER | TDA9887_PORT2_INACTIVE,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 1,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
@@ -1930,22 +1855,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -1960,25 +1883,24 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 	},
@@ -1994,26 +1916,25 @@ struct saa7134_board saa7134_boards[] = {
 		.gpiomask	= 0x00200000,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
 			.gpio = 0x200000,	/* GPIO21=High for TV input */
-			.tv   = 1,
 		},{
-			.name = name_comp1,	/* Composite signal on S-Video input */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,	/* Composite input */
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,	/* S-Video signal on S-Video input */
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x000000,	/* GPIO21=Low for FM radio antenna */
 		},
@@ -2027,11 +1948,11 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 0,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		}},
@@ -2048,20 +1969,19 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
@@ -2074,16 +1994,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
@@ -2097,29 +2016,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask	= 0x0700,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 			.gpio   = 0x000,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 			.gpio   = 0x200,		/* gpio by DScaler */
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 0,
 			.amux   = LINE1,
 			.gpio   = 0x200,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = LINE1,
 			.gpio   = 0x100,
 		},
 		.mute  = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x000,
 		},
@@ -2134,26 +2052,25 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask	= 0x00200000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
 			.gpio = 0x200000,	/* GPIO21=High for TV input */
-			.tv   = 1,
 		},{
-			.name = name_svideo,	/* S-Video signal on S-Video input */
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		},{
-			.name = name_comp1,	/* Composite signal on S-Video input */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,	/* Composite input */
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x000000,	/* GPIO21=Low for FM radio antenna */
 		},
@@ -2167,29 +2084,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = 0x60,
 		.gpiomask       = 0x8c1880,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 0,
 			.amux = LINE1,
 			.gpio = 0x800800,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x801000,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x800000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x880000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE2,
 			.gpio = 0x840000,
 		},
@@ -2200,7 +2116,6 @@ struct saa7134_board saa7134_boards[] = {
 		- Remote control doesn't initialize properly.
 		- Audio volume starts muted,
 		then gradually increases after channel change.
-		- Overlay scaling problems (application error?)
 		- Composite S-Video untested.
 		From: Konrad Rzepecki <hannibal@megapolis.pl>
 		*/
@@ -2212,29 +2127,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= 0x60,
 		.gpiomask	= 0x0700,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 			.gpio   = 0x000,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 			.gpio   = 0x200,		/* gpio by DScaler */
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 0,
 			.amux   = LINE1,
 			.gpio   = 0x200,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = LINE1,
 			.gpio   = 0x100,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x000,
 		},
@@ -2247,30 +2161,28 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,		/* radio unconfirmed */
+			.type = SAA7134_INPUT_RADIO,		/* radio unconfirmed */
 			.amux = LINE2,
 		},
 	},
@@ -2285,24 +2197,23 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.gpiomask       = 1 << 21,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
 			.gpio = 0x0000000,
-			.tv   = 1,
 		},{
-			.name = name_comp1,     /* Composite input */
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 			.gpio = 0x0000000,
 		},{
-			.name = name_svideo,    /* S-Video input */
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 			.gpio = 0x0000000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x0200000,
 		},
@@ -2321,29 +2232,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr= ADDR_UNSET,
 		.gpiomask       = 0x00010003,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x01,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 			.gpio = 0x02,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE2,
 			.gpio = 0x02,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE1,
 			.gpio = 0x00010003,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x01,
 		},
@@ -2361,21 +2271,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			  .name = name_tv,
+			  .type = SAA7134_INPUT_TV,
 			  .vmux = 3,
 			  .amux = TV,
-			  .tv   = 1,
 		},{
-			  .name = name_comp1,
+			  .type = SAA7134_INPUT_COMPOSITE1,
 			  .vmux = 1,
 			  .amux = LINE1,
 		},{
-			  .name = name_svideo,
+			  .type = SAA7134_INPUT_SVIDEO,
 			  .vmux = 8,
 			  .amux = LINE1,
 		}},
 		.radio = {
-			  .name = name_radio,
+			  .type = SAA7134_INPUT_RADIO,
 			  .amux = LINE2,
 		},
 	},
@@ -2391,34 +2300,33 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf    = TDA9887_PRESENT,
 		.gpiomask        = 0x00200003,
 		.inputs          = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x00200003,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x00200003,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x00200003,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x00200003,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x00200003,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x00200003,
 		},
@@ -2433,16 +2341,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT | TDA9887_PORT1_ACTIVE,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 3,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 0,
 			.amux   = LINE2,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE2,
 		}},
@@ -2457,16 +2364,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT | TDA9887_PORT1_ACTIVE,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 3,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE2,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE2,
 		}},
@@ -2480,11 +2386,11 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 0,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		}},
@@ -2496,29 +2402,30 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type	= UNSET,
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
-		.empress_addr 	= 0x21,
+		.empress_addr	= 0x21,
 		.inputs		= {{
-			.name   = "Composite 0",
+			.type = SAA7134_INPUT_COMPOSITE0,
 			.vmux   = 0,
 			.amux   = LINE1,
 		},{
-			.name   = "Composite 1",
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE2,
 		},{
-			.name   = "Composite 2",
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux   = 2,
 			.amux   = LINE1,
 		},{
-			.name   = "Composite 3",
+			.type = SAA7134_INPUT_COMPOSITE3,
 			.vmux   = 3,
 			.amux   = LINE2,
 		},{
-			.name   = "S-Video 0",
+			.type = SAA7134_INPUT_SVIDEO0,
+
 			.vmux   = 8,
 			.amux   = LINE1,
 		},{
-			.name   = "S-Video 1",
+			.type = SAA7134_INPUT_SVIDEO1,
 			.vmux   = 9,
 			.amux   = LINE2,
 		}},
@@ -2537,27 +2444,27 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs		= {{
-			.name   = "Composite 0",
+			.type = SAA7134_INPUT_COMPOSITE0,
 			.vmux   = 0,
 			.amux   = LINE1,
 		},{
-			.name   = "Composite 1",
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE2,
 		},{
-			.name   = "Composite 2",
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux   = 2,
 			.amux   = LINE1,
 		},{
-			.name   = "Composite 3",
+			.type = SAA7134_INPUT_COMPOSITE3,
 			.vmux   = 3,
 			.amux   = LINE2,
 		},{
-			.name   = "S-Video 0",
+			.type = SAA7134_INPUT_SVIDEO0,
 			.vmux   = 8,
 			.amux   = LINE1,
 		},{
-			.name   = "S-Video 1",
+			.type = SAA7134_INPUT_SVIDEO1,
 			.vmux   = 9,
 			.amux   = LINE2,
 		}},
@@ -2571,26 +2478,25 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,     /* Composite signal on S-Video input */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,	/* Composite input */
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
 	},
 	[SAA7134_BOARD_AVERMEDIA_AVERTVHD_A180] = {
-		/* Michael Krufky <mkrufky@m1k.net>
+		/* Michael Krufky <mkrufky@linuxtv.org>
 		 * Uses Alps Electric TDHU2, containing NXT2004 ATSC Decoder
 		 * AFAIK, there is no analog demod, thus,
 		 * no support for analog television.
@@ -2603,11 +2509,11 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
@@ -2621,16 +2527,15 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 
 		.inputs         = {{
-			  .name = name_tv,
+			  .type = SAA7134_INPUT_TV,
 			  .vmux = 1,
 			  .amux = TV,
-			  .tv   = 1,
 		},{
-			  .name = name_comp1,
+			  .type = SAA7134_INPUT_COMPOSITE1,
 			  .vmux = 3,
 			  .amux = LINE1,
 		},{
-			  .name = name_svideo,
+			  .type = SAA7134_INPUT_SVIDEO,
 			  .vmux = 6,
 			  .amux = LINE1,
 		}},
@@ -2644,25 +2549,24 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.gpiomask       = 0x080200000,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 4,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE2,
 		}, {
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 0,
 			.amux = LINE2,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x0200000,
 		},
@@ -2677,29 +2581,28 @@ struct saa7134_board saa7134_boards[] = {
 		.gpiomask	= 1 << 21,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x0000000,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 			.gpio = 0x0200000,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 0,
 			.amux = LINE2,
 			.gpio = 0x0200000,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 			.gpio = 0x0200000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x0200000,
 		},
@@ -2716,21 +2619,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.gpiomask       = 0xe880c0,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -2744,16 +2646,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
@@ -2769,21 +2670,20 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 0x0200000,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x0200000,
 		},
@@ -2797,25 +2697,24 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 1 << 21,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux   = 3,
 			.amux   = LINE2,	/* unconfirmed, taken from Philips driver */
 		},{
-			.name   = name_comp2,
-			.vmux   = 0,		/* untested, Composite over S-Video */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
+			.vmux   = 0,		/* untested */
 			.amux   = LINE2,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE2,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x0200000,
 		},
@@ -2833,17 +2732,16 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 0x80200000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_svideo,  /* NOT tested */
+			.type = SAA7134_INPUT_SVIDEO,  /* NOT tested */
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x0200000,
 		},
@@ -2860,26 +2758,25 @@ struct saa7134_board saa7134_boards[] = {
 		.gpiomask	= 0x00200000,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,	/* Analog broadcast/cable TV */
+			.type = SAA7134_INPUT_TV,	/* Analog broadcast/cable TV */
 			.vmux = 1,
 			.amux = TV,
 			.gpio = 0x200000,	/* GPIO21=High for TV input */
-			.tv   = 1,
 		},{
-			.name = name_svideo,	/* S-Video signal on S-Video input */
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		},{
-			.name = name_comp1,	/* Composite signal on S-Video input */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,	/* Composite input */
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x000000,	/* GPIO21=Low for FM radio antenna */
 		},
@@ -2893,11 +2790,11 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		}},
@@ -2913,11 +2810,11 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_comp1,	/* Composite input */
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,	/* S-Video signal on S-Video input */
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
@@ -2932,10 +2829,9 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 0x00600000, /* Bit 21 0=Radio, Bit 22 0=TV */
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 			.gpio   = 0x00200000,
 		}},
 	},
@@ -2949,25 +2845,24 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 1 << 21,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		},{
-			.name   = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux   = 0,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x0200000,
 		},
@@ -2982,21 +2877,20 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 1 << 21,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x0200000,
 		},
@@ -3011,16 +2905,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
@@ -3051,17 +2944,16 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0xca60000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 4,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x04a61000,
 		},{
-			.name = name_comp2,  /*  Composite SVIDEO (B/W if signal is carried with SVIDEO) */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 1,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 9,           /* 9 is correct as S-VIDEO1 according to a169.inf! */
 			.amux = LINE1,
 		}},
@@ -3085,26 +2977,25 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 0x00600000, /* Bit 21 0=Radio, Bit 22 0=TV */
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
 			.gpio = 0x200000,	/* GPIO21=High for TV input */
-			.tv   = 1,
 		},{
-			.name = name_svideo,	/* S-Video signal on S-Video input */
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		},{
-			.name = name_comp1,	/* Composite signal on S-Video input */
+			.type = SAA7134_INPUT_COMPOSITE_OVER_SVIDEO,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,	/* Composite input */
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 3,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x000000,	/* GPIO21=Low for FM radio antenna */
 		},
@@ -3120,40 +3011,38 @@ struct saa7134_board saa7134_boards[] = {
 
 		.gpiomask       = 0xe000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
 			.gpio = 0x8000,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x0000,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 			.gpio = 0x4000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x2000,
 		},
 			.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x8000,
 		},
@@ -3167,16 +3056,15 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 0,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		}},
@@ -3192,11 +3080,11 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_comp1,	/* Composite input */
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,	/* S-Video signal on S-Video input */
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
@@ -3210,25 +3098,24 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 	},
@@ -3243,21 +3130,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE1,
 		},
 	},
@@ -3271,21 +3157,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT| TDA9887_PORT1_ACTIVE | TDA9887_PORT2_ACTIVE,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 3,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 4,
 			.amux   = LINE2,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE2,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = LINE1,
 		},
 	},
@@ -3300,25 +3185,24 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 0x000200000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 4,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE2,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x0200000,
 		},
@@ -3334,34 +3218,33 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x03,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x00,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 			.gpio = 0x00,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 3,
 			.amux = LINE2,
 			.gpio = 0x00,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 			.gpio = 0x00,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x01,
 		},
 		.mute  = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 			.gpio = 0x00,
 		},
@@ -3377,16 +3260,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT | TDA9887_PORT1_ACTIVE,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 3,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE2,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE2,
 		}},
@@ -3404,22 +3286,21 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 0x0200100,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x0000100,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x0200100,
 		},
@@ -3437,22 +3318,21 @@ struct saa7134_board saa7134_boards[] = {
 		.ts_force_val   = 1,
 		.gpiomask       = 0x0800100, /* GPIO 21 is an INPUT */
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x0000100,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x0800100, /* GPIO 23 HI for FM */
 		},
@@ -3469,22 +3349,21 @@ struct saa7134_board saa7134_boards[] = {
 		.ts_type	= SAA7134_MPEG_TS_SERIAL,
 		.gpiomask       = 0x0800100, /* GPIO 21 is an INPUT */
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x0000100,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x0800100, /* GPIO 23 HI for FM */
 		},
@@ -3498,16 +3377,15 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 0,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 6,
 			.amux   = LINE1,
 		}},
@@ -3522,33 +3400,31 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = 3,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 7,
 			.amux = 4,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = 2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 0,
 			.amux = 2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 /*			.gpio = 0x00300001,*/
 			.gpio = 0x20000,
 
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = 0,
 		},
 	},
@@ -3561,32 +3437,30 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = 3,
-			.tv   = 1,
 		},{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 7,
 			.amux = 4,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = 2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 0,
 			.amux = 2,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x20000,
 
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = 0,
 		},
 	},
@@ -3599,29 +3473,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask	= 0x7000,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = 1,
-			.tv   = 1,
 			.gpio = 0x50000,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = 2,
 			.gpio = 0x2000,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = 2,
 			.gpio = 0x2000,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.vmux = 1,
 			.amux = 1,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.gpio = 0xf000,
 			.amux = 0,
 		},
@@ -3634,26 +3507,25 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= 0x61,
 		.radio_addr	= 0x60,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.vmux = 1,
 			.amux = LINE1,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 			.gpio = 0x43000,
 		},
@@ -3667,16 +3539,15 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 0,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 6,
 			.amux   = LINE1,
 		}},
@@ -3692,21 +3563,20 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 0x0200000,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		},{
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		}},
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x0200000,
 		},
@@ -3720,16 +3590,15 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 1<<21,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE2,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE2,
 		}},
@@ -3745,11 +3614,25 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 0x0200000,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 			.gpio   = 0x0200000,
+		},{
+			.type = SAA7134_INPUT_COMPOSITE1,
+			.vmux = 3,
+			.amux = LINE2,
+			.gpio = 0x0200000,
+		},{
+			.type = SAA7134_INPUT_COMPOSITE2,
+			.vmux = 0,
+			.amux = LINE2,
+			.gpio = 0x0200000,
+		},{
+			.type = SAA7134_INPUT_SVIDEO,
+			.vmux = 8,
+			.amux = LINE2,
+			.gpio = 0x0200000,
 		}},
 	},
 	[SAA7134_BOARD_ASUSTeK_P7131_HYBRID_LNA] = {
@@ -3763,29 +3646,28 @@ struct saa7134_board saa7134_boards[] = {
 		.gpiomask	= 1 << 21,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x0000000,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 			.gpio = 0x0200000,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 0,
 			.amux = LINE2,
 			.gpio = 0x0200000,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 			.gpio = 0x0200000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x0200000,
 		},
@@ -3799,26 +3681,25 @@ struct saa7134_board saa7134_boards[] = {
 	       .radio_addr     = ADDR_UNSET,
 	       .gpiomask       = 1 << 21,
 	       .inputs         = {{
-		       .name = name_tv,
+		       .type = SAA7134_INPUT_TV,
 		       .vmux = 1,
 		       .amux = TV,
-		       .tv   = 1,
 		       .gpio = 0x0000000,
 	       }, {
-		       .name = name_comp1,
+		       .type = SAA7134_INPUT_COMPOSITE1,
 		       .vmux = 3,
 		       .amux = LINE2,
 	       }, {
-		       .name = name_comp2,
+		       .type = SAA7134_INPUT_COMPOSITE2,
 		       .vmux = 0,
 		       .amux = LINE2,
 	       }, {
-		       .name = name_svideo,
+		       .type = SAA7134_INPUT_SVIDEO,
 		       .vmux = 8,
 		       .amux = LINE2,
 	       } },
 	       .radio = {
-		       .name = name_radio,
+		       .type = SAA7134_INPUT_RADIO,
 		       .amux = TV,
 		       .gpio = 0x0200000,
 	       },
@@ -3831,25 +3712,24 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux = 0,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 		},
 	},
@@ -3863,24 +3743,23 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.gpiomask       = 0x7000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x0000,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x2000,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x2000,
 		}},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE2,
 			.gpio = 0x3000,
 		},
@@ -3895,10 +3774,9 @@ struct saa7134_board saa7134_boards[] = {
 		.tda829x_conf   = { .lna_cfg = TDA8290_LNA_OFF },
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv, /* FIXME: analog tv untested */
+			.type = SAA7134_INPUT_TV, /* FIXME: analog tv untested */
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		}},
 	},
 	[SAA7134_BOARD_AVERMEDIA_M135A] = {
@@ -3911,26 +3789,25 @@ struct saa7134_board saa7134_boards[] = {
 		.tda829x_conf   = { .lna_cfg = TDA8290_LNA_GP0_HIGH_OFF },
 		.gpiomask       = 0x020200000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x00200000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x01,
 		},
@@ -3945,26 +3822,25 @@ struct saa7134_board saa7134_boards[] = {
 		.tda829x_conf	= { .lna_cfg = TDA8290_LNA_OFF },
 		.gpiomask	= 0x020200000,
 		.inputs		= {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x00200000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x01,
 		},
@@ -3980,21 +3856,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 	},
@@ -4009,18 +3884,17 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 	},
 	[SAA7134_BOARD_BEHOLD_403FM] = {
@@ -4034,21 +3908,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4064,18 +3937,17 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 	},
 	[SAA7134_BOARD_BEHOLD_405FM] = {
@@ -4091,83 +3963,80 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
 	[SAA7134_BOARD_BEHOLD_407] = {
 		/*       Beholder Intl. Ltd. 2008      */
 		/*Dmitry Belimov <d.belimov@gmail.com> */
-		.name 		= "Beholder BeholdTV 407",
-		.audio_clock 	= 0x00187de7,
-		.tuner_type 	= TUNER_PHILIPS_FM1216ME_MK3,
-		.radio_type 	= UNSET,
-		.tuner_addr 	= ADDR_UNSET,
-		.radio_addr 	= ADDR_UNSET,
-		.tda9887_conf 	= TDA9887_PRESENT,
+		.name		= "Beholder BeholdTV 407",
+		.audio_clock	= 0x00187de7,
+		.tuner_type	= TUNER_PHILIPS_FM1216ME_MK3,
+		.radio_type	= UNSET,
+		.tuner_addr	= ADDR_UNSET,
+		.radio_addr	= ADDR_UNSET,
+		.tda9887_conf	= TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0xc0c000,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 			.gpio = 0xc0c000,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv = 1,
 			.gpio = 0xc0c000,
 		}},
 	},
 	[SAA7134_BOARD_BEHOLD_407FM] = {
 		/*       Beholder Intl. Ltd. 2008      */
 		/*Dmitry Belimov <d.belimov@gmail.com> */
-		.name 		= "Beholder BeholdTV 407 FM",
-		.audio_clock 	= 0x00187de7,
-		.tuner_type 	= TUNER_PHILIPS_FM1216ME_MK3,
-		.radio_type 	= UNSET,
-		.tuner_addr 	= ADDR_UNSET,
-		.radio_addr 	= ADDR_UNSET,
-		.tda9887_conf 	= TDA9887_PRESENT,
+		.name		= "Beholder BeholdTV 407 FM",
+		.audio_clock	= 0x00187de7,
+		.tuner_type	= TUNER_PHILIPS_FM1216ME_MK3,
+		.radio_type	= UNSET,
+		.tuner_addr	= ADDR_UNSET,
+		.radio_addr	= ADDR_UNSET,
+		.tda9887_conf	= TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs = {{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0xc0c000,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 			.gpio = 0xc0c000,
 		},{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv = 1,
 			.gpio = 0xc0c000,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0xc0c000,
 		},
@@ -4184,16 +4053,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
@@ -4210,25 +4078,24 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4241,29 +4108,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.rds_addr 	= 0x10,
+		.rds_addr	= 0x10,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4279,21 +4145,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 			.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4306,25 +4171,24 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.rds_addr 	= 0x10,
+		.rds_addr	= 0x10,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 			.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4337,25 +4201,24 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.rds_addr 	= 0x10,
+		.rds_addr	= 0x10,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 			.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4371,24 +4234,23 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x000A8004,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x000A8004,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 			.gpio = 0x000A8000,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x000A8000,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x000A8000,
 		},
@@ -4403,21 +4265,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4431,21 +4292,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4459,21 +4319,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4487,21 +4346,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4513,24 +4371,23 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.rds_addr 	= 0x10,
+		.rds_addr	= 0x10,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4542,24 +4399,23 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.rds_addr 	= 0x10,
+		.rds_addr	= 0x10,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4571,24 +4427,23 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.rds_addr 	= 0x10,
+		.rds_addr	= 0x10,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4600,24 +4455,23 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.rds_addr 	= 0x10,
+		.rds_addr	= 0x10,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		},{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		},{
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -4632,24 +4486,23 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.empress_addr 	= 0x20,
+		.empress_addr	= 0x20,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 		.mpeg  = SAA7134_MPEG_EMPRESS,
@@ -4669,24 +4522,23 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.empress_addr 	= 0x20,
+		.empress_addr	= 0x20,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 		.mpeg  = SAA7134_MPEG_EMPRESS,
@@ -4707,25 +4559,24 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.rds_addr 	= 0x10,
-		.empress_addr 	= 0x20,
+		.rds_addr	= 0x10,
+		.empress_addr	= 0x20,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 		.mpeg  = SAA7134_MPEG_EMPRESS,
@@ -4746,21 +4597,20 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 0x0200000,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		}, {
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,		/* untested */
 			.amux   = LINE1,
 		} },
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x0200000,
 		},
@@ -4775,30 +4625,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.gpiomask       = 0xf000,
 		.inputs         = {{
-			.name = name_tv_mono,
+			.type = SAA7134_INPUT_TV_MONO,
 			.vmux = 1,
 			.amux = LINE2,
 			.gpio = 0x0000,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x2000,
-			.tv = 1
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x2000,
 	} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x1000,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE2,
 			.gpio = 0x6000,
 		},
@@ -4812,11 +4660,11 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		} },
@@ -4831,16 +4679,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tda829x_conf = { .lna_cfg = TDA8290_LNA_OFF },
 		.mpeg         = SAA7134_MPEG_DVB,
 		.inputs       = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
@@ -4856,21 +4703,20 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 0x0200000,
 		.inputs = { {
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		}, {
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		} },
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x0200000,
 		},
@@ -4884,21 +4730,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		 .mpeg           = SAA7134_MPEG_DVB,
 		 .inputs         = {{
-			 .name = name_tv,
+			 .type = SAA7134_INPUT_TV,
 			 .vmux = 1,
 			 .amux = TV,
-			 .tv   = 1,
 		 }, {
-			 .name = name_comp1,
+			 .type = SAA7134_INPUT_COMPOSITE1,
 			 .vmux = 3,
 			 .amux = LINE1,
 		 }, {
-			 .name = name_svideo,
+			 .type = SAA7134_INPUT_SVIDEO,
 			 .vmux = 8,
 			 .amux = LINE2,
 		 } },
 		 .radio = {
-			 .name = name_radio,
+			 .type = SAA7134_INPUT_RADIO,
 			 .amux = TV,
 		 },
 	},
@@ -4911,21 +4756,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		}, {
-			.name = name_comp,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 0,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 		},
 	},
@@ -4937,16 +4781,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		} },
@@ -4961,21 +4804,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 3,
 			.amux   = TV,
-			.tv     = 1,
 		}, {
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE2,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE2,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 		}
 	},
@@ -4989,11 +4831,11 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = { {
-			.name = name_comp,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE1,
 		} },
@@ -5008,21 +4850,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = { {
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 4,
 			.amux   = TV,
-			.tv     = 1,
 		}, {
-			.name = name_comp,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 		},
 	},
@@ -5037,21 +4878,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -5066,21 +4906,20 @@ struct saa7134_board saa7134_boards[] = {
 		.gpiomask       = 1 << 21,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 0,
 			.amux = LINE2,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x0200000,
 		},
@@ -5096,21 +4935,20 @@ struct saa7134_board saa7134_boards[] = {
 		.gpiomask       = 1 << 21,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 0,
 			.amux = LINE2,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x0200000,
 		},
@@ -5124,29 +4962,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.gpiomask       = 0x801a8087,
 		.inputs = { {
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 3,
 			.amux   = LINE2,
-			.tv     = 1,
 			.gpio   = 0x624000,
 		}, {
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 1,
 			.amux   = LINE1,
 			.gpio   = 0x624000,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 1,
 			.amux   = LINE1,
 			.gpio   = 0x624000,
 		} },
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = LINE2,
 			.gpio   = 0x624001,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 		},
 	},
@@ -5160,16 +4997,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 4,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
@@ -5185,25 +5021,24 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.gpiomask       = 0x0200000,
 		.inputs = { {
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		}, {
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE2,
 		}, {
-			.name   = name_comp2,
+			.type = SAA7134_INPUT_COMPOSITE2,
 			.vmux   = 0,
 			.amux   = LINE2,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE2,
 		} },
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x0200000,
 		},
@@ -5217,30 +5052,29 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = 0x60,
 		.gpiomask       = 0x80000700,
 		.inputs = { {
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = LINE2,
-			.tv     = 1,
 			.gpio   = 0x100,
 		}, {
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 			.gpio   = 0x200,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 			.gpio   = 0x200,
 		} },
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.vmux   = 1,
 			.amux   = LINE1,
 			.gpio   = 0x100,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.vmux = 8,
 			.amux = 2,
 		},
@@ -5256,18 +5090,17 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.ts_type	= SAA7134_MPEG_TS_PARALLEL,
 		.inputs = { {
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 #if 0	/* FIXME */
 		}, {
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 			.gpio   = 0x200,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 			.gpio   = 0x200,
@@ -5275,14 +5108,14 @@ struct saa7134_board saa7134_boards[] = {
 		} },
 #if 0
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.vmux   = 1,
 			.amux   = LINE1,
 			.gpio   = 0x100,
 		},
 #endif
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.vmux = 0,
 			.amux = TV,
 		},
@@ -5297,30 +5130,29 @@ struct saa7134_board saa7134_boards[] = {
 		.gpiomask       = 0x00300003,
 		/* .gpiomask       = 0x8c240003, */
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x01,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 6,
 			.amux = LINE1,
 			.gpio = 0x02,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x00300001,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 			.gpio = 0x01,
 		},
 	},
 	[SAA7134_BOARD_AVERMEDIA_STUDIO_507UA] = {
-		/* Andy Shevchenko <andy@smile.org.ua> */
+		/* Andy Shevchenko <andy@kernel.org> */
 		.name           = "Avermedia AVerTV Studio 507UA",
 		.audio_clock    = 0x00187de7,
 		.tuner_type     = TUNER_PHILIPS_FM1216ME_MK3, /* Should be MK5 */
@@ -5330,29 +5162,28 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x03,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 			.gpio = 0x00,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x00,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 			.gpio = 0x00,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 			.gpio = 0x01,
 		},
 		.mute  = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 			.gpio = 0x00,
 		},
@@ -5367,11 +5198,11 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr	= ADDR_UNSET,
 		.mpeg		= SAA7134_MPEG_DVB,
 		.inputs = { {
-			.name	= name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux	= 0,
 			.amux	= LINE1,
 		}, {
-			.name	= name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux	= 8, /* Not tested */
 			.amux	= LINE1
 		} },
@@ -5386,21 +5217,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 2,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 9,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 		},
 	},
@@ -5415,13 +5245,12 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.ts_type	= SAA7134_MPEG_TS_PARALLEL,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		} },
 		.radio = {	/* untested */
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 		},
 	},
@@ -5435,16 +5264,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT | TDA9887_PORT1_ACTIVE,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = { {
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 3,
 			.amux   = TV,
-			.tv     = 1,
 		}, {
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 4,
 			.amux   = LINE2,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE2,
 		} },
@@ -5458,10 +5286,10 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = { {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 		} },
 	},
@@ -5474,29 +5302,28 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_type     = UNSET,
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
-		.rds_addr 	= 0x10,
+		.rds_addr	= 0x10,
 		.tda9887_conf   = TDA9887_PRESENT,
 		.gpiomask       = 0x00008000,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE2,
 		},
 	},
@@ -5511,7 +5338,7 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr   = ADDR_UNSET,
 		.gpiomask      = 0x389c00,
 		.inputs       = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x01fc00,
@@ -5528,21 +5355,20 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg           = SAA7134_MPEG_DVB,
 		.ts_type	= SAA7134_MPEG_TS_PARALLEL,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 2,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 9,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 		},
 	},
@@ -5555,21 +5381,20 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = ADDR_UNSET,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 2,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 0,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 9,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 		},
 	},
@@ -5583,16 +5408,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tda9887_conf   = TDA9887_PRESENT | TDA9887_PORT1_ACTIVE,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs = {{
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 3,
 			.amux   = TV,
-			.tv     = 1,
 		}, {
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 0,
 			.amux   = LINE2,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE2,
 		} },
@@ -5606,25 +5430,24 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr     = ADDR_UNSET,
 		.radio_addr     = 0x60,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE2,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE2,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = LINE1,
 		},
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = TV,
 		},
 	},
@@ -5641,29 +5464,28 @@ struct saa7134_board saa7134_boards[] = {
 		.mpeg		= SAA7134_MPEG_DVB,
 		.ts_type	= SAA7134_MPEG_TS_PARALLEL,
 		.inputs		= { {
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 			.gpio   = 0x00050000,
 		}, {
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 3,
 			.amux   = LINE1,
 			.gpio   = 0x00050000,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 			.gpio   = 0x00050000,
 		} },
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio   = 0x00050000,
 		},
 		.mute = {
-			.name   = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.vmux   = 0,
 			.amux   = TV,
 			.gpio   = 0x00050000,
@@ -5680,21 +5502,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.gpiomask       = 0x00008000,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 	},
@@ -5709,21 +5530,20 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr     = ADDR_UNSET,
 		.gpiomask       = 0x00008000,
 		.inputs         = { {
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 3,
 			.amux = LINE2,
-			.tv   = 1,
 		}, {
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 1,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.mute = {
-			.name = name_mute,
+			.type = SAA7134_INPUT_MUTE,
 			.amux = LINE1,
 		},
 	},
@@ -5735,15 +5555,15 @@ struct saa7134_board saa7134_boards[] = {
 		.tuner_addr	= ADDR_UNSET,
 		.radio_addr	= ADDR_UNSET,
 		.inputs		= {{
-			.name   = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux   = 0,
 			.amux   = LINE1,
 		}, {
-			.name   = name_comp3,
+			.type = SAA7134_INPUT_COMPOSITE3,
 			.vmux   = 2,
 			.amux   = LINE1,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE1,
 		} },
@@ -5759,21 +5579,20 @@ struct saa7134_board saa7134_boards[] = {
 		.gpiomask       = 1 << 21,
 		.ts_type	= SAA7134_MPEG_TS_PARALLEL,
 		.inputs = { {
-			.name   = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux   = 1,
 			.amux   = TV,
-			.tv     = 1,
 		}, {
-			.name   = name_comp,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux   = 3,
 			.amux   = LINE1,
 		}, {
-			.name   = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux   = 8,
 			.amux   = LINE2,
 		} },
 		.radio = {
-			.name   = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux   = TV,
 			.gpio	= 0x0000000,
 		},
@@ -5789,7 +5608,7 @@ struct saa7134_board saa7134_boards[] = {
 		.radio_addr   = ADDR_UNSET,
 		.gpiomask      = 0x618E700,
 		.inputs       = {{
-			.name = name_comp1,
+			.type = SAA7134_INPUT_COMPOSITE1,
 			.vmux = 3,
 			.amux = LINE1,
 			.gpio = 0x6010000,
@@ -5808,26 +5627,170 @@ struct saa7134_board saa7134_boards[] = {
 		.gpiomask       = 1 << 11,
 		.mpeg           = SAA7134_MPEG_DVB,
 		.inputs         = {{
-			.name = name_tv,
+			.type = SAA7134_INPUT_TV,
 			.vmux = 1,
 			.amux = TV,
-			.tv   = 1,
 		}, {
-			.name = name_comp,
+			.type = SAA7134_INPUT_COMPOSITE,
 			.vmux = 4,
 			.amux = LINE1,
 		}, {
-			.name = name_svideo,
+			.type = SAA7134_INPUT_SVIDEO,
 			.vmux = 8,
 			.amux = LINE1,
 		} },
 		.radio = {
-			.name = name_radio,
+			.type = SAA7134_INPUT_RADIO,
 			.amux = TV,
 			.gpio = 0x0000800,
 		},
 	},
-
+	[SAA7134_BOARD_WIS_VOYAGER] = {
+		.name           = "WIS Voyager or compatible",
+		.audio_clock    = 0x00200000,
+		.tuner_type	= TUNER_PHILIPS_TDA8290,
+		.radio_type     = UNSET,
+		.tuner_addr     = ADDR_UNSET,
+		.radio_addr     = ADDR_UNSET,
+		.mpeg		= SAA7134_MPEG_GO7007,
+		.inputs		= { {
+			.type = SAA7134_INPUT_COMPOSITE1,
+			.vmux = 0,
+			.amux = LINE2,
+		}, {
+			.type = SAA7134_INPUT_TV,
+			.vmux = 3,
+			.amux = TV,
+		}, {
+			.type = SAA7134_INPUT_SVIDEO,
+			.vmux = 6,
+		.amux = LINE1,
+		} },
+	},
+	[SAA7134_BOARD_AVERMEDIA_505] = {
+		/* much like the "studio" version but without radio
+		* and another tuner (dbaryshkov@gmail.com) */
+		.name           = "AverMedia AverTV/505",
+		.audio_clock    = 0x00187de7,
+		.tuner_type     = TUNER_PHILIPS_FQ1216ME,
+		.radio_type     = UNSET,
+		.tuner_addr	= ADDR_UNSET,
+		.radio_addr	= ADDR_UNSET,
+		.tda9887_conf   = TDA9887_PRESENT,
+		.inputs         = {{
+			.type = SAA7134_INPUT_TV,
+			.vmux = 1,
+			.amux = LINE2,
+		}, {
+			.type = SAA7134_INPUT_COMPOSITE1,
+			.vmux = 0,
+			.amux = LINE2,
+		}, {
+			.type = SAA7134_INPUT_COMPOSITE2,
+			.vmux = 3,
+			.amux = LINE2,
+		}, {
+			.type = SAA7134_INPUT_SVIDEO,
+			.vmux = 8,
+			.amux = LINE2,
+		} },
+		.mute = {
+			.type = SAA7134_INPUT_MUTE,
+			.amux = LINE1,
+		},
+	},
+	[SAA7134_BOARD_LEADTEK_WINFAST_TV2100_FM] = {
+		.name           = "Leadtek Winfast TV2100 FM",
+		.audio_clock    = 0x00187de7,
+		.tuner_type     = TUNER_TNF_5335MF,
+		.radio_type     = UNSET,
+		.tuner_addr	= ADDR_UNSET,
+		.radio_addr	= ADDR_UNSET,
+		.gpiomask       = 0x0d,
+		.inputs         = {{
+			.type = SAA7134_INPUT_TV_MONO,
+			.vmux = 1,
+			.amux = LINE1,
+			.gpio = 0x00,
+		}, {
+			.type = SAA7134_INPUT_COMPOSITE1,
+			.vmux = 3,
+			.amux = LINE2,
+			.gpio = 0x08,
+		}, {
+			.type = SAA7134_INPUT_SVIDEO,
+			.vmux = 8,
+			.amux = LINE2,
+			.gpio = 0x08,
+		} },
+		.radio = {
+			.type = SAA7134_INPUT_RADIO,
+			.amux = LINE1,
+			.gpio = 0x04,
+		},
+		.mute = {
+			.type = SAA7134_INPUT_MUTE,
+			.amux = LINE1,
+			.gpio = 0x08,
+		},
+	},
+	[SAA7134_BOARD_SNAZIO_TVPVR_PRO] = {
+		.name           = "SnaZio* TVPVR PRO",
+		.audio_clock    = 0x00187de7,
+		.tuner_type     = TUNER_PHILIPS_TDA8290,
+		.radio_type     = UNSET,
+		.tuner_addr     = ADDR_UNSET,
+		.radio_addr     = ADDR_UNSET,
+		.gpiomask       = 1 << 21,
+		.inputs         = { {
+			.type = SAA7134_INPUT_TV,
+			.vmux = 1,
+			.amux = TV,
+			.gpio = 0x0000000,
+		}, {
+			.type = SAA7134_INPUT_COMPOSITE1,
+			.vmux = 3,
+			.amux = LINE2,
+			.gpio = 0x0000000,
+		}, {
+			.type = SAA7134_INPUT_SVIDEO,
+			.vmux = 8,
+			.amux = LINE2,
+			.gpio = 0x0000000,
+		} },
+		.radio = {
+			.type = SAA7134_INPUT_RADIO,
+			.amux = TV,
+			.gpio = 0x0200000,
+		},
+	},
+	[SAA7134_BOARD_LEADTEK_WINFAST_HDTV200_H] = {
+		.name           = "Leadtek Winfast HDTV200 H",
+		.audio_clock    = 0x00187de7,
+		.tuner_type     = TUNER_PHILIPS_TDA8290,
+		.radio_type     = UNSET,
+		.tuner_addr     = ADDR_UNSET,
+		.radio_addr     = ADDR_UNSET,
+		.mpeg           = SAA7134_MPEG_DVB,
+		.ts_type        = SAA7134_MPEG_TS_PARALLEL,
+		.gpiomask       = 0x00200700,
+		.inputs         = { {
+			.type = SAA7134_INPUT_TV,
+			.vmux = 1,
+			.amux = TV,
+			.gpio = 0x00000300,
+		}, {
+			.type = SAA7134_INPUT_COMPOSITE,
+			.vmux = 3,
+			.amux = LINE1,
+			.gpio = 0x00200300,
+		}, {
+			.type = SAA7134_INPUT_SVIDEO,
+			.vmux = 8,
+			.amux = LINE1,
+			.gpio = 0x00200300,
+		} },
+	},
 };
 
 const unsigned int saa7134_bcount = ARRAY_SIZE(saa7134_boards);
@@ -5837,1287 +5800,758 @@ const unsigned int saa7134_bcount = ARRAY_SIZE(saa7134_boards);
 
 struct pci_device_id saa7134_pci_tbl[] = {
 	{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0x2001,
-		.driver_data  = SAA7134_BOARD_PROTEUS_PRO,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0x2001,
-		.driver_data  = SAA7134_BOARD_PROTEUS_PRO,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0x6752,
-		.driver_data  = SAA7134_BOARD_EMPRESS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1131,
-		.subdevice    = 0x4e85,
-		.driver_data  = SAA7134_BOARD_MONSTERTV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x153b,
-		.subdevice    = 0x1142,
-		.driver_data  = SAA7134_BOARD_CINERGY400,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x153b,
-		.subdevice    = 0x1143,
-		.driver_data  = SAA7134_BOARD_CINERGY600,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x153b,
-		.subdevice    = 0x1158,
-		.driver_data  = SAA7134_BOARD_CINERGY600_MK3,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x153b,
-		.subdevice    = 0x1162,
-		.driver_data  = SAA7134_BOARD_CINERGY400_CARDBUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x5169,
-		.subdevice    = 0x0138,
-		.driver_data  = SAA7134_BOARD_FLYVIDEO3000_NTSC,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x5168,
-		.subdevice    = 0x0138,
-		.driver_data  = SAA7134_BOARD_FLYVIDEO3000,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x4e42,				/* "Typhoon PCI Capture TV Card" Art.No. 50673 */
-		.subdevice    = 0x0138,
-		.driver_data  = SAA7134_BOARD_FLYVIDEO3000,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x5168,
-		.subdevice    = 0x0138,
-		.driver_data  = SAA7134_BOARD_FLYVIDEO2000,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x4e42,		/* Typhoon */
-		.subdevice    = 0x0138,		/* LifeView FlyTV Prime30 OEM */
-		.driver_data  = SAA7134_BOARD_FLYVIDEO2000,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5168,
-		.subdevice    = 0x0212, /* minipci, LR212 */
-		.driver_data  = SAA7134_BOARD_FLYTVPLATINUM_MINI,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x14c0,
-		.subdevice    = 0x1212, /* minipci, LR1212 */
-		.driver_data  = SAA7134_BOARD_FLYTVPLATINUM_MINI2,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x4e42,
-		.subdevice    = 0x0212, /* OEM minipci, LR212 */
-		.driver_data  = SAA7134_BOARD_FLYTVPLATINUM_MINI,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5168,	/* Animation Technologies (LifeView) */
-		.subdevice    = 0x0214, /* Standard PCI, LR214 Rev E and earlier (SAA7135) */
-		.driver_data  = SAA7134_BOARD_FLYTVPLATINUM_FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5168,	/* Animation Technologies (LifeView) */
-		.subdevice    = 0x5214, /* Standard PCI, LR214 Rev F onwards (SAA7131) */
-		.driver_data  = SAA7134_BOARD_FLYTVPLATINUM_FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1489, /* KYE */
-		.subdevice    = 0x0214, /* Genius VideoWonder ProTV */
-		.driver_data  = SAA7134_BOARD_FLYTVPLATINUM_FM, /* is an LR214WF actually */
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x16be,
-		.subdevice    = 0x0003,
-		.driver_data  = SAA7134_BOARD_MD7134,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x16be, /* CTX946 analog TV, HW mpeg, DVB-T */
-		.subdevice    = 0x5000, /* only analog TV and DVB-T for now */
-		.driver_data  = SAA7134_BOARD_MD7134,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134,
+				PCI_VENDOR_ID_PHILIPS, 0x2001),
+		.driver_data = SAA7134_BOARD_PROTEUS_PRO,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1048,
-		.subdevice    = 0x226b,
-		.driver_data  = SAA7134_BOARD_ELSA,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1048,
-		.subdevice    = 0x226a,
-		.driver_data  = SAA7134_BOARD_ELSA_500TV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1048,
-		.subdevice    = 0x226c,
-		.driver_data  = SAA7134_BOARD_ELSA_700TV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = PCI_VENDOR_ID_ASUSTEK,
-		.subdevice    = 0x4842,
-		.driver_data  = SAA7134_BOARD_ASUSTeK_TVFM7134,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = PCI_VENDOR_ID_ASUSTEK,
-		.subdevice    = 0x4845,
-		.driver_data  = SAA7134_BOARD_ASUSTeK_TVFM7135,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = PCI_VENDOR_ID_ASUSTEK,
-		.subdevice    = 0x4830,
-		.driver_data  = SAA7134_BOARD_ASUSTeK_TVFM7134,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = PCI_VENDOR_ID_ASUSTEK,
-		.subdevice    = 0x4843,
-		.driver_data  = SAA7134_BOARD_ASUSTEK_TVFM7133,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = PCI_VENDOR_ID_ASUSTEK,
-		.subdevice    = 0x4840,
-		.driver_data  = SAA7134_BOARD_ASUSTeK_TVFM7134,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0xfe01,
-		.driver_data  = SAA7134_BOARD_TVSTATION_RDS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1894,
-		.subdevice    = 0xfe01,
-		.driver_data  = SAA7134_BOARD_TVSTATION_RDS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1894,
-		.subdevice    = 0xa006,
-		.driver_data  = SAA7134_BOARD_TVSTATION_DVR,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1131,
-		.subdevice    = 0x7133,
-		.driver_data  = SAA7134_BOARD_VA1000POWER,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0x2001,
-		.driver_data  = SAA7134_BOARD_10MOONSTVMASTER,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x185b,
-		.subdevice    = 0xc100,
-		.driver_data  = SAA7134_BOARD_VIDEOMATE_TV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x185b,
-		.subdevice    = 0xc100,
-		.driver_data  = SAA7134_BOARD_VIDEOMATE_TV_GOLD_PLUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = PCI_VENDOR_ID_MATROX,
-		.subdevice    = 0x48d0,
-		.driver_data  = SAA7134_BOARD_CRONOS_PLUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xa70b,
-		.driver_data  = SAA7134_BOARD_MD2819,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xa7a1,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_A700_PRO,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133,
+				PCI_VENDOR_ID_PHILIPS, 0x2001),
+		.driver_data = SAA7134_BOARD_PROTEUS_PRO,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xa7a2,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_A700_HYBRID,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134,
+				PCI_VENDOR_ID_PHILIPS, 0x6752),
+		.driver_data = SAA7134_BOARD_EMPRESS,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0x2115,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_STUDIO_305,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xa115,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_STUDIO_505,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1131, 0x4e85),
+		.driver_data = SAA7134_BOARD_MONSTERTV,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0x2108,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_305,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0x10ff,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_DVD_EZMAKER,
-	},{
-		/* AVerMedia CardBus */
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xd6ee,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_CARDBUS,
-	},{
-		/* AVerMedia CardBus */
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xb7e9,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_CARDBUS_501,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x153b, 0x1142),
+		.driver_data = SAA7134_BOARD_CINERGY400,
 	}, {
-		/* TransGear 3000TV */
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0x050c,
-		.driver_data  = SAA7134_BOARD_TG3000TV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x11bd,
-		.subdevice    = 0x002b,
-		.driver_data  = SAA7134_BOARD_PINNACLE_PCTV_STEREO,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x11bd,
-		.subdevice    = 0x002d,
-		.driver_data  = SAA7134_BOARD_PINNACLE_300I_DVBT_PAL,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1019,
-		.subdevice    = 0x4cb4,
-		.driver_data  = SAA7134_BOARD_ECS_TVP3XP,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1019,
-		.subdevice    = 0x4cb5,
-		.driver_data  = SAA7134_BOARD_ECS_TVP3XP_4CB5,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1019,
-		.subdevice    = 0x4cb6,
-		.driver_data  = SAA7134_BOARD_ECS_TVP3XP_4CB6,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x12ab,
-		.subdevice    = 0x0800,
-		.driver_data  = SAA7134_BOARD_UPMOST_PURPLE_TV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x153b,
-		.subdevice    = 0x1152,
-		.driver_data  = SAA7134_BOARD_CINERGY200,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x185b,
-		.subdevice    = 0xc100,
-		.driver_data  = SAA7134_BOARD_VIDEOMATE_TV_PVR,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0x9715,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_STUDIO_307,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xa70a,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_307,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x185b,
-		.subdevice    = 0xc200,
-		.driver_data  = SAA7134_BOARD_VIDEOMATE_GOLD_PLUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1540,
-		.subdevice    = 0x9524,
-		.driver_data  = SAA7134_BOARD_PROVIDEO_PV952,
-
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5168,
-		.subdevice    = 0x0502,                /* Cardbus version */
-		.driver_data  = SAA7134_BOARD_FLYDVBT_DUO_CARDBUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5168,
-		.subdevice    = 0x0306,                /* PCI version */
-		.driver_data  = SAA7134_BOARD_FLYDVBTDUO,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xf31f,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_GO_007_FM,
-
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xf11d,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_M135A,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x153b, 0x1143),
+		.driver_data = SAA7134_BOARD_CINERGY600,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0x4155,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_M733A,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x153b, 0x1158),
+		.driver_data = SAA7134_BOARD_CINERGY600_MK3,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0x4255,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_M733A,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x153b, 0x1162),
+		.driver_data = SAA7134_BOARD_CINERGY400_CARDBUS,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0x2004,
-		.driver_data  = SAA7134_BOARD_PHILIPS_TOUGH,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1421,
-		.subdevice    = 0x0350,		/* PCI version */
-		.driver_data  = SAA7134_BOARD_ADS_INSTANT_TV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1421,
-		.subdevice    = 0x0351,		/* PCI version, new revision */
-		.driver_data  = SAA7134_BOARD_ADS_INSTANT_TV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1421,
-		.subdevice    = 0x0370,		/* cardbus version */
-		.driver_data  = SAA7134_BOARD_ADS_INSTANT_TV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1421,
-		.subdevice    = 0x1370,        /* cardbus version */
-		.driver_data  = SAA7134_BOARD_ADS_INSTANT_TV,
-
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x4e42,		/* Typhoon */
-		.subdevice    = 0x0502,		/* LifeView LR502 OEM */
-		.driver_data  = SAA7134_BOARD_FLYDVBT_DUO_CARDBUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1043,
-		.subdevice    = 0x0210,		/* mini pci NTSC version */
-		.driver_data  = SAA7134_BOARD_FLYTV_DIGIMATRIX,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1043,
-		.subdevice    = 0x0210,		/* mini pci PAL/SECAM version */
-		.driver_data  = SAA7134_BOARD_ASUSTEK_DIGIMATRIX_TV,
-
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0000, /* It shouldn't break anything, since subdevice id seems unique */
-		.subdevice    = 0x4091,
-		.driver_data  = SAA7134_BOARD_BEHOLD_409FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5456, /* GoTView */
-		.subdevice    = 0x7135,
-		.driver_data  = SAA7134_BOARD_GOTVIEW_7135,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0x2004,
-		.driver_data  = SAA7134_BOARD_PHILIPS_EUROPA,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x185b,
-		.subdevice    = 0xc900,
-		.driver_data  = SAA7134_BOARD_VIDEOMATE_DVBT_300,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x185b,
-		.subdevice    = 0xc901,
-		.driver_data  = SAA7134_BOARD_VIDEOMATE_DVBT_200,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1435,
-		.subdevice    = 0x7350,
-		.driver_data  = SAA7134_BOARD_RTD_VFG7350,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1435,
-		.subdevice    = 0x7330,
-		.driver_data  = SAA7134_BOARD_RTD_VFG7330,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461,
-		.subdevice    = 0x1044,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_AVERTVHD_A180,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1131,
-		.subdevice    = 0x4ee9,
-		.driver_data  = SAA7134_BOARD_MONSTERTV_MOBILE,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x11bd,
-		.subdevice    = 0x002e,
-		.driver_data  = SAA7134_BOARD_PINNACLE_PCTV_110i,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1043,
-		.subdevice    = 0x4862,
-		.driver_data  = SAA7134_BOARD_ASUSTeK_P7131_DUAL,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0x2018,
-		.driver_data  = SAA7134_BOARD_PHILIPS_TIGER,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1462,
-		.subdevice    = 0x6231, /* tda8275a, ks003 IR */
-		.driver_data  = SAA7134_BOARD_MSI_TVATANYWHERE_PLUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1462,
-		.subdevice    = 0x8624, /* tda8275, ks003 IR */
-		.driver_data  = SAA7134_BOARD_MSI_TVATANYWHERE_PLUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x153b,
-		.subdevice    = 0x1160,
-		.driver_data  = SAA7134_BOARD_CINERGY250PCI,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,	/* SAA 7131E */
-		.subvendor    = 0x5168,
-		.subdevice    = 0x0319,
-		.driver_data  = SAA7134_BOARD_FLYDVB_TRIO,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1461,
-		.subdevice    = 0x2c05,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_777,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x5168,
-		.subdevice    = 0x0301,
-		.driver_data  = SAA7134_BOARD_FLYDVBT_LR301,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0331,
-		.subdevice    = 0x1421,
-		.driver_data  = SAA7134_BOARD_ADS_DUO_CARDBUS_PTV331,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x17de,
-		.subdevice    = 0x7201,
-		.driver_data  = SAA7134_BOARD_TEVION_DVBT_220RF,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x17de,
-		.subdevice    = 0x7250,
-		.driver_data  = SAA7134_BOARD_KWORLD_DVBT_210,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133, /* SAA7135HL */
-		.subvendor    = 0x17de,
-		.subdevice    = 0x7350,
-		.driver_data  = SAA7134_BOARD_KWORLD_ATSC110,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133, /* SAA7135HL */
-		.subvendor    = 0x17de,
-		.subdevice    = 0x7352,
-		.driver_data  = SAA7134_BOARD_KWORLD_ATSC110, /* ATSC 115 */
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133, /* SAA7135HL */
-		.subvendor    = 0x17de,
-		.subdevice    = 0xa134,
-		.driver_data  = SAA7134_BOARD_KWORLD_PC150U,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x5169, 0x0138),
+		.driver_data = SAA7134_BOARD_FLYVIDEO3000_NTSC,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1461,
-		.subdevice    = 0x7360,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_A169_B,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1461,
-		.subdevice    = 0x6360,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_A169_B1,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x16be,
-		.subdevice    = 0x0005,
-		.driver_data  = SAA7134_BOARD_MD7134_BRIDGE_2,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x5168,
-		.subdevice    = 0x0300,
-		.driver_data  = SAA7134_BOARD_FLYDVBS_LR300,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x4e42,
-		.subdevice    = 0x0300,/* LR300 */
-		.driver_data  = SAA7134_BOARD_FLYDVBS_LR300,
-	},{
-		.vendor = PCI_VENDOR_ID_PHILIPS,
-		.device = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor = 0x1489,
-		.subdevice = 0x0301,
-		.driver_data = SAA7134_BOARD_FLYDVBT_LR301,
-	},{
-		.vendor = PCI_VENDOR_ID_PHILIPS,
-		.device = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor = 0x5168, /* Animation Technologies (LifeView) */
-		.subdevice = 0x0304,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x5168, 0x0138),
+		.driver_data = SAA7134_BOARD_FLYVIDEO3000,
+	}, {
+		/* "Typhoon PCI Capture TV Card" Art.No. 50673 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x4e42, 0x0138),
+		.driver_data = SAA7134_BOARD_FLYVIDEO3000,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x5168, 0x0138),
+		.driver_data = SAA7134_BOARD_FLYVIDEO2000,
+	}, {
+		/* Typhoon LifeView FlyTV Prime30 OEM */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x4e42, 0x0138),
+		.driver_data = SAA7134_BOARD_FLYVIDEO2000,
+	}, {
+		/* minipci, LR212 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5168, 0x0212),
+		.driver_data = SAA7134_BOARD_FLYTVPLATINUM_MINI,
+	}, {
+		/* minipci, LR1212 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x14c0, 0x1212),
+		.driver_data = SAA7134_BOARD_FLYTVPLATINUM_MINI2,
+	}, {
+		/* OEM minipci, LR212 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x4e42, 0x0212),
+		.driver_data = SAA7134_BOARD_FLYTVPLATINUM_MINI,
+	}, {
+		/*
+		 * Animation Technologies (LifeView)
+		 * Standard PCI, LR214 Rev E and earlier (SAA7135)
+		 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5168, 0x0214),
 		.driver_data = SAA7134_BOARD_FLYTVPLATINUM_FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5168,
-		.subdevice    = 0x3306,
-		.driver_data  = SAA7134_BOARD_FLYDVBT_HYBRID_CARDBUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5168,
-		.subdevice    = 0x3502,  /* whats the difference to 0x3306 ?*/
-		.driver_data  = SAA7134_BOARD_FLYDVBT_HYBRID_CARDBUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5168,
-		.subdevice    = 0x3307, /* FlyDVB-T Hybrid Mini PCI */
-		.driver_data  = SAA7134_BOARD_FLYDVBT_HYBRID_CARDBUS,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x16be,
-		.subdevice    = 0x0007,
-		.driver_data  = SAA7134_BOARD_MEDION_MD8800_QUADRO,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x16be,
-		.subdevice    = 0x0008,
-		.driver_data  = SAA7134_BOARD_MEDION_MD8800_QUADRO,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x16be,
-		.subdevice    = 0x000d, /* triple CTX948_V1.1.1 */
-		.driver_data  = SAA7134_BOARD_MEDION_MD8800_QUADRO,
+		/*
+		 * Animation Technologies (LifeView)
+		 * Standard PCI, LR214 Rev F onwards (SAA7131)
+		 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5168, 0x5214),
+		.driver_data = SAA7134_BOARD_FLYTVPLATINUM_FM,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461,
-		.subdevice    = 0x2c05,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_777,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1489,
-		.subdevice    = 0x0502,                /* Cardbus version */
-		.driver_data  = SAA7134_BOARD_FLYDVBT_DUO_CARDBUS,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x0919, /* Philips Proteus PRO 2309 */
-		.subdevice    = 0x2003,
-		.driver_data  = SAA7134_BOARD_PROTEUS_2309,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1461,
-		.subdevice    = 0x2c00,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_A16AR,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1043,
-		.subdevice    = 0x4860,
-		.driver_data  = SAA7134_BOARD_ASUS_EUROPA2_HYBRID,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x11bd,
-		.subdevice    = 0x002f,
-		.driver_data  = SAA7134_BOARD_PINNACLE_PCTV_310i,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0x9715,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_STUDIO_507,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xa11b,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_STUDIO_507UA,
+		/* KYE Genius VideoWonder ProTV */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1489, 0x0214),
+		.driver_data = SAA7134_BOARD_FLYTVPLATINUM_FM, /* is an LR214WF actually */
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1043,
-		.subdevice    = 0x4876,
-		.driver_data  = SAA7134_BOARD_ASUSTeK_P7131_HYBRID_LNA,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x6700,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1110,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x6701,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1110,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x6702,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1110,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x6703,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1110,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x6704,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1110,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x6705,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1110,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x6706,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1150,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x6707,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1120,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x6708,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1150,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x6709,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1120,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0070,
-		.subdevice    = 0x670a,
-		.driver_data  = SAA7134_BOARD_HAUPPAUGE_HVR1120,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x153b,
-		.subdevice    = 0x1172,
-		.driver_data  = SAA7134_BOARD_CINERGY_HT_PCMCIA,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0x2342,
-		.driver_data  = SAA7134_BOARD_ENCORE_ENLTV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1131,
-		.subdevice    = 0x2341,
-		.driver_data  = SAA7134_BOARD_ENCORE_ENLTV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x3016,
-		.subdevice    = 0x2344,
-		.driver_data  = SAA7134_BOARD_ENCORE_ENLTV,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1131,
-		.subdevice    = 0x230f,
-		.driver_data  = SAA7134_BOARD_ENCORE_ENLTV_FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x1a7f,
-		.subdevice    = 0x2008,
-		.driver_data  = SAA7134_BOARD_ENCORE_ENLTV_FM53,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x16be, 0x0003),
+		.driver_data = SAA7134_BOARD_MD7134,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1a7f,
-		.subdevice    = 0x2108,
-		.driver_data  = SAA7134_BOARD_ENCORE_ENLTV_FM3,
+		/* CTX946 analog TV, HW mpeg, DVB-T; only analog TV and DVB-T for now */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x16be, 0x5000),
+		.driver_data = SAA7134_BOARD_MD7134,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x153b,
-		.subdevice    = 0x1175,
-		.driver_data  = SAA7134_BOARD_CINERGY_HT_PCI,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xf31e,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_M102,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x4E42,         /* MSI */
-		.subdevice    = 0x0306,         /* TV@nywhere DUO */
-		.driver_data  = SAA7134_BOARD_FLYDVBTDUO,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1043,
-		.subdevice    = 0x4871,
-		.driver_data  = SAA7134_BOARD_ASUS_P7131_4871,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1043,
-		.subdevice    = 0x4857,		/* REV:1.00 */
-		.driver_data  = SAA7134_BOARD_ASUSTeK_TIGER,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x0919, /* SinoVideo PCI 2309 Proteus (7134) */
-		.subdevice    = 0x2003, /* OEM cardbus */
-		.driver_data  = SAA7134_BOARD_SABRENT_TV_PCB05,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0x2304,
-		.driver_data  = SAA7134_BOARD_10MOONSTVMASTER3,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xf01d, /* AVerTV DVB-T Super 007 */
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_SUPER_007,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x4016,
-		.driver_data  = SAA7134_BOARD_BEHOLD_401,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x4036,
-		.driver_data  = SAA7134_BOARD_BEHOLD_403,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x4037,
-		.driver_data  = SAA7134_BOARD_BEHOLD_403FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x4050,
-		.driver_data  = SAA7134_BOARD_BEHOLD_405,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x4051,
-		.driver_data  = SAA7134_BOARD_BEHOLD_405FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x4070,
-		.driver_data  = SAA7134_BOARD_BEHOLD_407,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x4071,
-		.driver_data  = SAA7134_BOARD_BEHOLD_407FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x4090,
-		.driver_data  = SAA7134_BOARD_BEHOLD_409,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x505B,
-		.driver_data  = SAA7134_BOARD_BEHOLD_505RDS_MK5,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1048, 0x226b),
+		.driver_data = SAA7134_BOARD_ELSA,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x5051,
-		.driver_data  = SAA7134_BOARD_BEHOLD_505RDS_MK3,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x5050,
-		.driver_data  = SAA7134_BOARD_BEHOLD_505FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x5071,
-		.driver_data  = SAA7134_BOARD_BEHOLD_507RDS_MK3,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x507B,
-		.driver_data  = SAA7134_BOARD_BEHOLD_507RDS_MK5,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x5070,
-		.driver_data  = SAA7134_BOARD_BEHOLD_507_9FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x5090,
-		.driver_data  = SAA7134_BOARD_BEHOLD_507_9FM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x0000,
-		.subdevice    = 0x5201,
-		.driver_data  = SAA7134_BOARD_BEHOLD_COLUMBUS_TVFM,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6070,
-		.driver_data  = SAA7134_BOARD_BEHOLD_607FM_MK3,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6071,
-		.driver_data  = SAA7134_BOARD_BEHOLD_607FM_MK5,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6072,
-		.driver_data  = SAA7134_BOARD_BEHOLD_607RDS_MK3,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6073,
-		.driver_data  = SAA7134_BOARD_BEHOLD_607RDS_MK5,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6090,
-		.driver_data  = SAA7134_BOARD_BEHOLD_609FM_MK3,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6091,
-		.driver_data  = SAA7134_BOARD_BEHOLD_609FM_MK5,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6092,
-		.driver_data  = SAA7134_BOARD_BEHOLD_609RDS_MK3,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6093,
-		.driver_data  = SAA7134_BOARD_BEHOLD_609RDS_MK5,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6190,
-		.driver_data  = SAA7134_BOARD_BEHOLD_M6,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6193,
-		.driver_data  = SAA7134_BOARD_BEHOLD_M6_EXTRA,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1048, 0x226a),
+		.driver_data = SAA7134_BOARD_ELSA_500TV,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6191,
-		.driver_data  = SAA7134_BOARD_BEHOLD_M63,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x4e42,
-		.subdevice    = 0x3502,
-		.driver_data  = SAA7134_BOARD_FLYDVBT_HYBRID_CARDBUS,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1048, 0x226c),
+		.driver_data = SAA7134_BOARD_ELSA_700TV,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1822, /*Twinhan Technology Co. Ltd*/
-		.subdevice    = 0x0022,
-		.driver_data  = SAA7134_BOARD_TWINHAN_DTV_DVB_3056,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134,
+				PCI_VENDOR_ID_ASUSTEK, 0x4842),
+		.driver_data = SAA7134_BOARD_ASUSTeK_TVFM7134,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x16be,
-		.subdevice    = 0x0010, /* Medion version CTX953_V.1.4.3 */
-		.driver_data  = SAA7134_BOARD_CREATIX_CTX953,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133,
+				PCI_VENDOR_ID_ASUSTEK, 0x4845),
+		.driver_data = SAA7134_BOARD_ASUSTeK_TVFM7135,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1462, /* MSI */
-		.subdevice    = 0x8625, /* TV@nywhere A/D v1.1 */
-		.driver_data  = SAA7134_BOARD_MSI_TVANYWHERE_AD11,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xf436,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_CARDBUS_506,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134,
+				PCI_VENDOR_ID_ASUSTEK, 0x4830),
+		.driver_data = SAA7134_BOARD_ASUSTeK_TVFM7134,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xf936,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_A16D,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133,
+				PCI_VENDOR_ID_ASUSTEK, 0x4843),
+		.driver_data = SAA7134_BOARD_ASUSTEK_TVFM7133,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xa836,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_M115,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134,
+				PCI_VENDOR_ID_ASUSTEK, 0x4840),
+		.driver_data = SAA7134_BOARD_ASUSTeK_TVFM7134,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x185b,
-		.subdevice    = 0xc900,
-		.driver_data  = SAA7134_BOARD_VIDEOMATE_T750,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134,
+				PCI_VENDOR_ID_PHILIPS, 0xfe01),
+		.driver_data = SAA7134_BOARD_TVSTATION_RDS,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133, /* SAA7135HL */
-		.subvendor    = 0x1421,
-		.subdevice    = 0x0380,
-		.driver_data  = SAA7134_BOARD_ADS_INSTANT_HDTV_PCI,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1894, 0xfe01),
+		.driver_data = SAA7134_BOARD_TVSTATION_RDS,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5169,
-		.subdevice    = 0x1502,
-		.driver_data  = SAA7134_BOARD_FLYTVPLATINUM_MINI,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1894, 0xa006),
+		.driver_data = SAA7134_BOARD_TVSTATION_DVR,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x6290,
-		.driver_data  = SAA7134_BOARD_BEHOLD_H6,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1131, 0x7133),
+		.driver_data = SAA7134_BOARD_VA1000POWER,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xf636,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_M103,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130,
+				PCI_VENDOR_ID_PHILIPS, 0x2001),
+		.driver_data = SAA7134_BOARD_10MOONSTVMASTER,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xf736,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_M103,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x185b, 0xc100),
+		.driver_data = SAA7134_BOARD_VIDEOMATE_TV,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1043,
-		.subdevice    = 0x4878, /* REV:1.02G */
-		.driver_data  = SAA7134_BOARD_ASUSTeK_TIGER_3IN1,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x185b, 0xc100),
+		.driver_data = SAA7134_BOARD_VIDEOMATE_TV_GOLD_PLUS,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1043,
-		.subdevice    = 0x48cd,
-		.driver_data  = SAA7134_BOARD_ASUSTeK_PS3_100,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130,
+				PCI_VENDOR_ID_MATROX, 0x48d0),
+		.driver_data = SAA7134_BOARD_CRONOS_PLUS,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x17de,
-		.subdevice    = 0x7128,
-		.driver_data  = SAA7134_BOARD_KWORLD_PLUS_TV_ANALOG,
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1461, 0xa70b),
+		.driver_data = SAA7134_BOARD_MD2819,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x17de,
-		.subdevice    = 0xb136,
-		.driver_data  = SAA7134_BOARD_KWORLD_PCI_SBTVD_FULLSEG,
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xa7a1),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_A700_PRO,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0xf31d,
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_GO_007_FM_PLUS,
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xa7a2),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_A700_HYBRID,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x185b,
-		.subdevice    = 0xc900,
-		.driver_data  = SAA7134_BOARD_VIDEOMATE_S350,
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1461, 0x2115),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_STUDIO_305,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace, /* Beholder Intl. Ltd. */
-		.subdevice    = 0x7595,
-		.driver_data  = SAA7134_BOARD_BEHOLD_X7,
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1461, 0xa115),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_STUDIO_505,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x19d1, /* RoverMedia */
-		.subdevice    = 0x0138, /* LifeView FlyTV Prime30 OEM */
-		.driver_data  = SAA7134_BOARD_ROVERMEDIA_LINK_PRO_FM,
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1461, 0x2108),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_305,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0x2004,
-		.driver_data  = SAA7134_BOARD_ZOLID_HYBRID_PCI,
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1461, 0x10ff),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_DVD_EZMAKER,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x1043,
-		.subdevice    = 0x4847,
-		.driver_data  = SAA7134_BOARD_ASUS_EUROPA_HYBRID,
+		/* AVerMedia CardBus */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1461, 0xd6ee),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_CARDBUS,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x107d,
-		.subdevice    = 0x6655,
-		.driver_data  = SAA7134_BOARD_LEADTEK_WINFAST_DTV1000S,
+		/* AVerMedia CardBus */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1461, 0xb7e9),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_CARDBUS_501,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x13c2,
-		.subdevice    = 0x2804,
-		.driver_data  = SAA7134_BOARD_TECHNOTREND_BUDGET_T3000,
+		/* AVerMedia TransGear 3000TV */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1461, 0x050c),
+		.driver_data = SAA7134_BOARD_TG3000TV,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace, /* Beholder Intl. Ltd. */
-		.subdevice    = 0x7190,
-		.driver_data  = SAA7134_BOARD_BEHOLD_H7,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x11bd, 0x002b),
+		.driver_data = SAA7134_BOARD_PINNACLE_PCTV_STEREO,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace, /* Beholder Intl. Ltd. */
-		.subdevice    = 0x7090,
-		.driver_data  = SAA7134_BOARD_BEHOLD_A7,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x11bd, 0x002d),
+		.driver_data = SAA7134_BOARD_PINNACLE_300I_DVBT_PAL,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7135,
-		.subvendor    = 0x185b,
-		.subdevice    = 0xc900,
-		.driver_data  = SAA7134_BOARD_VIDEOMATE_M1F,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1019, 0x4cb4),
+		.driver_data = SAA7134_BOARD_ECS_TVP3XP,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x5030,
-		.driver_data  = SAA7134_BOARD_BEHOLD_503FM,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1019, 0x4cb5),
+		.driver_data = SAA7134_BOARD_ECS_TVP3XP_4CB5,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = 0x5ace,
-		.subdevice    = 0x5010,
-		.driver_data  = SAA7134_BOARD_BEHOLD_501,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1019, 0x4cb6),
+		.driver_data = SAA7134_BOARD_ECS_TVP3XP_4CB6,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = 0x17de,
-		.subdevice    = 0xd136,
-		.driver_data  = SAA7134_BOARD_MAGICPRO_PROHDTV_PRO2,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x12ab, 0x0800),
+		.driver_data = SAA7134_BOARD_UPMOST_PURPLE_TV,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x6000,
-		.subdevice    = 0x0811,
-		.driver_data  = SAA7134_BOARD_SENSORAY811_911,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x153b, 0x1152),
+		.driver_data = SAA7134_BOARD_CINERGY200,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x6000,
-		.subdevice    = 0x0911,
-		.driver_data  = SAA7134_BOARD_SENSORAY811_911,
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x185b, 0xc100),
+		.driver_data = SAA7134_BOARD_VIDEOMATE_TV_PVR,
 	}, {
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = 0x1461, /* Avermedia Technologies Inc */
-		.subdevice    = 0x2055, /* AverTV Satellite Hybrid+FM A706 */
-		.driver_data  = SAA7134_BOARD_AVERMEDIA_A706,
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1461, 0x9715),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_STUDIO_307,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1461, 0xa70a),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_307,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x185b, 0xc200),
+		.driver_data = SAA7134_BOARD_VIDEOMATE_GOLD_PLUS,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1540, 0x9524),
+		.driver_data = SAA7134_BOARD_PROVIDEO_PV952,
+	}, {
+		/* Cardbus version */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5168, 0x0502),
+		.driver_data = SAA7134_BOARD_FLYDVBT_DUO_CARDBUS,
+	}, {
+		/* PCI version */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5168, 0x0306),
+		.driver_data = SAA7134_BOARD_FLYDVBTDUO,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xf31f),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_GO_007_FM,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xf11d),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_M135A,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0x4155),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_M733A,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0x4255),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_M733A,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130,
+				PCI_VENDOR_ID_PHILIPS, 0x2004),
+		.driver_data = SAA7134_BOARD_PHILIPS_TOUGH,
+	}, {
+		/* PCI version */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1421, 0x0350),
+		.driver_data = SAA7134_BOARD_ADS_INSTANT_TV,
+	}, {
+		/* PCI version, new revision */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1421, 0x0351),
+		.driver_data = SAA7134_BOARD_ADS_INSTANT_TV,
+	}, {
+		/* cardbus version */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1421, 0x0370),
+		.driver_data = SAA7134_BOARD_ADS_INSTANT_TV,
+	}, {
+		/* cardbus version */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1421, 0x1370),
+		.driver_data = SAA7134_BOARD_ADS_INSTANT_TV,
+	}, {
+		/* Typhoon LifeView LR502 OEM */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x4e42, 0x0502),
+		.driver_data = SAA7134_BOARD_FLYDVBT_DUO_CARDBUS,
+	}, {
+		/* mini pci NTSC version */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1043, 0x0210),
+		.driver_data = SAA7134_BOARD_FLYTV_DIGIMATRIX,
+	}, {
+		/* mini pci PAL/SECAM version */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1043, 0x0210),
+		.driver_data = SAA7134_BOARD_ASUSTEK_DIGIMATRIX_TV,
+	}, {
+		/* subvendor == 0 shouldn't break anything, since subdevice id seems unique */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0000, 0x4091),
+		.driver_data = SAA7134_BOARD_BEHOLD_409FM,
+	}, {
+		/* GoTView */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5456, 0x7135),
+		.driver_data = SAA7134_BOARD_GOTVIEW_7135,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134,
+				PCI_VENDOR_ID_PHILIPS, 0x2004),
+		.driver_data = SAA7134_BOARD_PHILIPS_EUROPA,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x185b, 0xc900),
+		.driver_data = SAA7134_BOARD_VIDEOMATE_DVBT_300,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x185b, 0xc901),
+		.driver_data = SAA7134_BOARD_VIDEOMATE_DVBT_200,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1435, 0x7350),
+		.driver_data = SAA7134_BOARD_RTD_VFG7350,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1435, 0x7330),
+		.driver_data = SAA7134_BOARD_RTD_VFG7330,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0x1044),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_AVERTVHD_A180,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1131, 0x4ee9),
+		.driver_data = SAA7134_BOARD_MONSTERTV_MOBILE,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x11bd, 0x002e),
+		.driver_data = SAA7134_BOARD_PINNACLE_PCTV_110i,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1043, 0x4862),
+		.driver_data = SAA7134_BOARD_ASUSTeK_P7131_DUAL,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133,
+				PCI_VENDOR_ID_PHILIPS, 0x2018),
+		.driver_data = SAA7134_BOARD_PHILIPS_TIGER,
+	}, {
+		/* tda8275a, ks003 IR */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1462, 0x6231),
+		.driver_data = SAA7134_BOARD_MSI_TVATANYWHERE_PLUS,
+	}, {
+		/* tda8275, ks003 IR */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1462, 0x8624),
+		.driver_data = SAA7134_BOARD_MSI_TVATANYWHERE_PLUS,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x153b, 0x1160),
+		.driver_data = SAA7134_BOARD_CINERGY250PCI,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5168, 0x0319),
+		.driver_data = SAA7134_BOARD_FLYDVB_TRIO,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1461, 0x2c05),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_777,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x5168, 0x0301),
+		.driver_data = SAA7134_BOARD_FLYDVBT_LR301,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0331, 0x1421),
+		.driver_data = SAA7134_BOARD_ADS_DUO_CARDBUS_PTV331,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x17de, 0x7201),
+		.driver_data = SAA7134_BOARD_TEVION_DVBT_220RF,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x17de, 0x7250),
+		.driver_data = SAA7134_BOARD_KWORLD_DVBT_210,
+	}, {
+		/* SAA7135HL */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x17de, 0x7350),
+		.driver_data = SAA7134_BOARD_KWORLD_ATSC110,
+	}, {
+		/* SAA7135HL */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x17de, 0x7352),
+		.driver_data = SAA7134_BOARD_KWORLD_ATSC110, /* ATSC 115 */
+	}, {
+		/* SAA7135HL */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x17de, 0xa134),
+		.driver_data = SAA7134_BOARD_KWORLD_PC150U,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1461, 0x7360),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_A169_B,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1461, 0x6360),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_A169_B1,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x16be, 0x0005),
+		.driver_data = SAA7134_BOARD_MD7134_BRIDGE_2,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x5168, 0x0300),
+		.driver_data = SAA7134_BOARD_FLYDVBS_LR300,
+	}, {
+		/* LR300 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x4e42, 0x0300),
+		.driver_data = SAA7134_BOARD_FLYDVBS_LR300,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1489, 0x0301),
+		.driver_data = SAA7134_BOARD_FLYDVBT_LR301,
+	}, {
+		/* Animation Technologies (LifeView) */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5168, 0x0304),
+		.driver_data = SAA7134_BOARD_FLYTVPLATINUM_FM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5168, 0x3306),
+		.driver_data = SAA7134_BOARD_FLYDVBT_HYBRID_CARDBUS,
+	}, {
+		/* what's the difference to .subdevice = 0x3306 above? */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5168, 0x3502),
+		.driver_data = SAA7134_BOARD_FLYDVBT_HYBRID_CARDBUS,
+	}, {
+		/* FlyDVB-T Hybrid Mini PCI */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5168, 0x3307),
+		.driver_data = SAA7134_BOARD_FLYDVBT_HYBRID_CARDBUS,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x16be, 0x0007),
+		.driver_data = SAA7134_BOARD_MEDION_MD8800_QUADRO,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x16be, 0x0008),
+		.driver_data = SAA7134_BOARD_MEDION_MD8800_QUADRO,
+	}, {
+		/* triple CTX948_V1.1.1 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x16be, 0x000d),
+		.driver_data = SAA7134_BOARD_MEDION_MD8800_QUADRO,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0x2c05),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_777,
+	}, {
+		/* Cardbus version */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1489, 0x0502),
+		.driver_data = SAA7134_BOARD_FLYDVBT_DUO_CARDBUS,
+	}, {
+		/* Philips Proteus PRO 2309 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x0919, 0x2003),
+		.driver_data = SAA7134_BOARD_PROTEUS_2309,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1461, 0x2c00),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_A16AR,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1043, 0x4860),
+		.driver_data = SAA7134_BOARD_ASUS_EUROPA2_HYBRID,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x11bd, 0x002f),
+		.driver_data = SAA7134_BOARD_PINNACLE_PCTV_310i,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0x9715),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_STUDIO_507,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1461, 0xa11b),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_STUDIO_507UA,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1043, 0x4876),
+		.driver_data = SAA7134_BOARD_ASUSTeK_P7131_HYBRID_LNA,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x6700),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1110,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x6701),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1110,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x6702),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1110,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x6703),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1110,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x6704),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1110,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x6705),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1110,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x6706),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1150,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x6707),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1120,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x6708),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1150,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x6709),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1120,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0070, 0x670a),
+		.driver_data = SAA7134_BOARD_HAUPPAUGE_HVR1120,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x153b, 0x1172),
+		.driver_data = SAA7134_BOARD_CINERGY_HT_PCMCIA,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130,
+				PCI_VENDOR_ID_PHILIPS, 0x2342),
+		.driver_data = SAA7134_BOARD_ENCORE_ENLTV,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1131, 0x2341),
+		.driver_data = SAA7134_BOARD_ENCORE_ENLTV,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x3016, 0x2344),
+		.driver_data = SAA7134_BOARD_ENCORE_ENLTV,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1131, 0x230f),
+		.driver_data = SAA7134_BOARD_ENCORE_ENLTV_FM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1a7f, 0x2008),
+		.driver_data = SAA7134_BOARD_ENCORE_ENLTV_FM53,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1a7f, 0x2108),
+		.driver_data = SAA7134_BOARD_ENCORE_ENLTV_FM3,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x153b, 0x1175),
+		.driver_data = SAA7134_BOARD_CINERGY_HT_PCI,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xf31e),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_M102,
+	}, {
+		/* MSI TV@nywhere DUO */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x4E42, 0x0306),
+		.driver_data = SAA7134_BOARD_FLYDVBTDUO,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1043, 0x4871),
+		.driver_data = SAA7134_BOARD_ASUS_P7131_4871,
+	}, {
+		/* REV:1.00 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1043, 0x4857),
+		.driver_data = SAA7134_BOARD_ASUSTeK_TIGER,
+	}, {
+		/* SinoVideo PCI 2309 Proteus (7134) OEM cardbus */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x0919, 0x2003),
+		.driver_data = SAA7134_BOARD_SABRENT_TV_PCB05,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130,
+				PCI_VENDOR_ID_PHILIPS, 0x2304),
+		.driver_data = SAA7134_BOARD_10MOONSTVMASTER3,
+	}, {
+		/* Avermedia Technologies Inc AVerTV DVB-T Super 007 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xf01d),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_SUPER_007,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x0000, 0x4016),
+		.driver_data = SAA7134_BOARD_BEHOLD_401,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x0000, 0x4036),
+		.driver_data = SAA7134_BOARD_BEHOLD_403,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x0000, 0x4037),
+		.driver_data = SAA7134_BOARD_BEHOLD_403FM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x0000, 0x4050),
+		.driver_data = SAA7134_BOARD_BEHOLD_405,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x0000, 0x4051),
+		.driver_data = SAA7134_BOARD_BEHOLD_405FM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x0000, 0x4070),
+		.driver_data = SAA7134_BOARD_BEHOLD_407,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x0000, 0x4071),
+		.driver_data = SAA7134_BOARD_BEHOLD_407FM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0000, 0x4090),
+		.driver_data = SAA7134_BOARD_BEHOLD_409,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x0000, 0x505B),
+		.driver_data = SAA7134_BOARD_BEHOLD_505RDS_MK5,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x0000, 0x5051),
+		.driver_data = SAA7134_BOARD_BEHOLD_505RDS_MK3,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x5ace, 0x5050),
+		.driver_data = SAA7134_BOARD_BEHOLD_505FM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0000, 0x5071),
+		.driver_data = SAA7134_BOARD_BEHOLD_507RDS_MK3,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0000, 0x507B),
+		.driver_data = SAA7134_BOARD_BEHOLD_507RDS_MK5,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x5ace, 0x5070),
+		.driver_data = SAA7134_BOARD_BEHOLD_507_9FM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x5090),
+		.driver_data = SAA7134_BOARD_BEHOLD_507_9FM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x0000, 0x5201),
+		.driver_data = SAA7134_BOARD_BEHOLD_COLUMBUS_TVFM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x5ace, 0x6070),
+		.driver_data = SAA7134_BOARD_BEHOLD_607FM_MK3,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x5ace, 0x6071),
+		.driver_data = SAA7134_BOARD_BEHOLD_607FM_MK5,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x5ace, 0x6072),
+		.driver_data = SAA7134_BOARD_BEHOLD_607RDS_MK3,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x5ace, 0x6073),
+		.driver_data = SAA7134_BOARD_BEHOLD_607RDS_MK5,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x6090),
+		.driver_data = SAA7134_BOARD_BEHOLD_609FM_MK3,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x6091),
+		.driver_data = SAA7134_BOARD_BEHOLD_609FM_MK5,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x6092),
+		.driver_data = SAA7134_BOARD_BEHOLD_609RDS_MK3,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x6093),
+		.driver_data = SAA7134_BOARD_BEHOLD_609RDS_MK5,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x6190),
+		.driver_data = SAA7134_BOARD_BEHOLD_M6,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x6193),
+		.driver_data = SAA7134_BOARD_BEHOLD_M6_EXTRA,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x6191),
+		.driver_data = SAA7134_BOARD_BEHOLD_M63,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x4e42, 0x3502),
+		.driver_data = SAA7134_BOARD_FLYDVBT_HYBRID_CARDBUS,
+	}, {
+		/*Twinhan Technology Co. Ltd*/
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1822, 0x0022),
+		.driver_data = SAA7134_BOARD_TWINHAN_DTV_DVB_3056,
+	}, {
+		/* Medion version CTX953_V.1.4.3 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x16be, 0x0010),
+		.driver_data = SAA7134_BOARD_CREATIX_CTX953,
+	}, {
+		/* MSI TV@nywhere A/D v1.1 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1462, 0x8625),
+		.driver_data = SAA7134_BOARD_MSI_TVANYWHERE_AD11,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xf436),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_CARDBUS_506,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xf936),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_A16D,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xa836),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_M115,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x185b, 0xc900),
+		.driver_data = SAA7134_BOARD_VIDEOMATE_T750,
+	}, {
+		/* SAA7135HL */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1421, 0x0380),
+		.driver_data = SAA7134_BOARD_ADS_INSTANT_HDTV_PCI,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5169, 0x1502),
+		.driver_data = SAA7134_BOARD_FLYTVPLATINUM_MINI,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x6290),
+		.driver_data = SAA7134_BOARD_BEHOLD_H6,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xf636),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_M103,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xf736),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_M103,
+	}, {
+		/* REV:1.02G */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1043, 0x4878),
+		.driver_data = SAA7134_BOARD_ASUSTeK_TIGER_3IN1,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1043, 0x48cd),
+		.driver_data = SAA7134_BOARD_ASUSTeK_PS3_100,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x17de, 0x7128),
+		.driver_data = SAA7134_BOARD_KWORLD_PLUS_TV_ANALOG,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x17de, 0xb136),
+		.driver_data = SAA7134_BOARD_KWORLD_PCI_SBTVD_FULLSEG,
+	}, {
+		/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0xf31d),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_GO_007_FM_PLUS,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x185b, 0xc900),
+		.driver_data = SAA7134_BOARD_VIDEOMATE_S350,
+	}, {
+		/* Beholder Intl. Ltd. */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x7595),
+		.driver_data = SAA7134_BOARD_BEHOLD_X7,
+	}, {
+		/* RoverMedia LifeView FlyTV Prime30 OEM */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x19d1, 0x0138),
+		.driver_data = SAA7134_BOARD_ROVERMEDIA_LINK_PRO_FM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133,
+				PCI_VENDOR_ID_PHILIPS, 0x2004),
+		.driver_data = SAA7134_BOARD_ZOLID_HYBRID_PCI,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x1043, 0x4847),
+		.driver_data = SAA7134_BOARD_ASUS_EUROPA_HYBRID,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x107d, 0x6655),
+		.driver_data = SAA7134_BOARD_LEADTEK_WINFAST_DTV1000S,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x13c2, 0x2804),
+		.driver_data = SAA7134_BOARD_TECHNOTREND_BUDGET_T3000,
+	}, {
+		/* Beholder Intl. Ltd. */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x7190),
+		.driver_data = SAA7134_BOARD_BEHOLD_H7,
+	}, {
+		/* Beholder Intl. Ltd. */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x7090),
+		.driver_data = SAA7134_BOARD_BEHOLD_A7,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7135, 0x185b, 0xc900),
+		.driver_data = SAA7134_BOARD_VIDEOMATE_M1F,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x5ace, 0x5030),
+		.driver_data = SAA7134_BOARD_BEHOLD_503FM,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x5ace, 0x5010),
+		.driver_data = SAA7134_BOARD_BEHOLD_501,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134, 0x17de, 0xd136),
+		.driver_data = SAA7134_BOARD_MAGICPRO_PROHDTV_PRO2,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x6000, 0x0811),
+		.driver_data = SAA7134_BOARD_SENSORAY811_911,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x6000, 0x0911),
+		.driver_data = SAA7134_BOARD_SENSORAY811_911,
+	}, {
+		/* Avermedia Technologies Inc AverTV Satellite Hybrid+FM A706 */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1461, 0x2055),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_A706,
+	}, {
+		/* WIS */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1905, 0x7007),
+		.driver_data = SAA7134_BOARD_WIS_VOYAGER,
+	}, {
+			/* Avermedia Technologies Inc */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x1461, 0xa10a),
+		.driver_data = SAA7134_BOARD_AVERMEDIA_505,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130, 0x107d, 0x6f3a),
+		.driver_data = SAA7134_BOARD_LEADTEK_WINFAST_TV2100_FM,
+	}, {
+		/* V One Multimedia PTE Ltd */
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x1779, 0x13cf),
+		.driver_data = SAA7134_BOARD_SNAZIO_TVPVR_PRO,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133, 0x107d, 0x6f2e),
+		.driver_data = SAA7134_BOARD_LEADTEK_WINFAST_HDTV200_H,
 	}, {
 		/* --- boards without eeprom + subsystem ID --- */
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0,
-		.driver_data  = SAA7134_BOARD_NOAUTO,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = PCI_VENDOR_ID_PHILIPS,
-		.subdevice    = 0,
-		.driver_data  = SAA7134_BOARD_NOAUTO,
-	},{
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134,
+				PCI_VENDOR_ID_PHILIPS, 0),
+		.driver_data = SAA7134_BOARD_NOAUTO,
+	}, {
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130,
+				PCI_VENDOR_ID_PHILIPS, 0),
+		.driver_data = SAA7134_BOARD_NOAUTO,
+	}, {
 		/* --- default catch --- */
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7130,
-		.subvendor    = PCI_ANY_ID,
-		.subdevice    = PCI_ANY_ID,
-		.driver_data  = SAA7134_BOARD_UNKNOWN,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7133,
-		.subvendor    = PCI_ANY_ID,
-		.subdevice    = PCI_ANY_ID,
-		.driver_data  = SAA7134_BOARD_UNKNOWN,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7134,
-		.subvendor    = PCI_ANY_ID,
-		.subdevice    = PCI_ANY_ID,
-		.driver_data  = SAA7134_BOARD_UNKNOWN,
-	},{
-		.vendor       = PCI_VENDOR_ID_PHILIPS,
-		.device       = PCI_DEVICE_ID_PHILIPS_SAA7135,
-		.subvendor    = PCI_ANY_ID,
-		.subdevice    = PCI_ANY_ID,
-		.driver_data  = SAA7134_BOARD_UNKNOWN,
-	},{
+		PCI_DEVICE(PCI_VENDOR_ID_PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7130),
+		.driver_data = SAA7134_BOARD_UNKNOWN,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7133),
+		.driver_data = SAA7134_BOARD_UNKNOWN,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7134),
+		.driver_data = SAA7134_BOARD_UNKNOWN,
+	}, {
+		PCI_DEVICE(PCI_VENDOR_ID_PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7135),
+		.driver_data = SAA7134_BOARD_UNKNOWN,
+	}, {
 		/* --- end of list --- */
 	}
 };
@@ -7129,10 +6563,10 @@ MODULE_DEVICE_TABLE(pci, saa7134_pci_tbl);
 
 static void board_flyvideo(struct saa7134_dev *dev)
 {
-	printk("%s: there are different flyvideo cards with different tuners\n"
-	       "%s: out there, you might have to use the tuner=<nr> insmod\n"
-	       "%s: option to override the default value.\n",
-	       dev->name, dev->name, dev->name);
+	pr_warn("%s: there are different flyvideo cards with different tuners\n"
+		"%s: out there, you might have to use the tuner=<nr> insmod\n"
+		"%s: option to override the default value.\n",
+		dev->name, dev->name, dev->name);
 }
 
 static int saa7134_xc2028_callback(struct saa7134_dev *dev,
@@ -7165,7 +6599,7 @@ static int saa7134_xc2028_callback(struct saa7134_dev *dev,
 			saa7134_set_gpio(dev, 20, 1);
 		break;
 		}
-	return 0;
+		return 0;
 	}
 	return -EINVAL;
 }
@@ -7284,6 +6718,22 @@ static int saa7134_kworld_pc150u_toggle_agc(struct saa7134_dev *dev,
 	return 0;
 }
 
+static int saa7134_leadtek_hdtv200h_toggle_agc(struct saa7134_dev *dev,
+					       enum tda18271_mode mode)
+{
+	switch (mode) {
+	case TDA18271_ANALOG:
+		saa7134_set_gpio(dev, 10, 0);
+		break;
+	case TDA18271_DIGITAL:
+		saa7134_set_gpio(dev, 10, 1);
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
 static int saa7134_tda8290_18271_callback(struct saa7134_dev *dev,
 					  int command, int arg)
 {
@@ -7302,6 +6752,9 @@ static int saa7134_tda8290_18271_callback(struct saa7134_dev *dev,
 			break;
 		case SAA7134_BOARD_KWORLD_PC150U:
 			ret = saa7134_kworld_pc150u_toggle_agc(dev, arg);
+			break;
+		case SAA7134_BOARD_LEADTEK_WINFAST_HDTV200_H:
+			ret = saa7134_leadtek_hdtv200h_toggle_agc(dev, arg);
 			break;
 		default:
 			break;
@@ -7326,6 +6779,7 @@ static int saa7134_tda8290_callback(struct saa7134_dev *dev,
 	case SAA7134_BOARD_KWORLD_PCI_SBTVD_FULLSEG:
 	case SAA7134_BOARD_KWORLD_PC150U:
 	case SAA7134_BOARD_MAGICPRO_PROHDTV_PRO2:
+	case SAA7134_BOARD_LEADTEK_WINFAST_HDTV200_H:
 		/* tda8290 + tda18271 */
 		ret = saa7134_tda8290_18271_callback(dev, command, arg);
 		break;
@@ -7351,7 +6805,7 @@ int saa7134_tuner_callback(void *priv, int component, int command, int arg)
 			return saa7134_xc5000_callback(dev, command, arg);
 		}
 	} else {
-		printk(KERN_ERR "saa7134: Error - device struct undefined.\n");
+		pr_err("saa7134: Error - device struct undefined.\n");
 		return -EINVAL;
 	}
 	return -EINVAL;
@@ -7364,7 +6818,7 @@ static void hauppauge_eeprom(struct saa7134_dev *dev, u8 *eeprom_data)
 {
 	struct tveeprom tv;
 
-	tveeprom_hauppauge_analog(&dev->i2c_client, &tv, eeprom_data);
+	tveeprom_hauppauge_analog(&tv, eeprom_data);
 
 	/* Make sure we support the board model */
 	switch (tv.model) {
@@ -7382,12 +6836,12 @@ static void hauppauge_eeprom(struct saa7134_dev *dev, u8 *eeprom_data)
 	case 67659: /* WinTV-HVR1110 (OEM, no IR, hybrid, FM, SVid/Comp, RCA aud) */
 		break;
 	default:
-		printk(KERN_WARNING "%s: warning: "
-		       "unknown hauppauge model #%d\n", dev->name, tv.model);
+		pr_warn("%s: warning: unknown hauppauge model #%d\n",
+			dev->name, tv.model);
 		break;
 	}
 
-	printk(KERN_INFO "%s: hauppauge eeprom: model=%d\n",
+	pr_info("%s: hauppauge eeprom: model=%d\n",
 	       dev->name, tv.model);
 }
 
@@ -7398,7 +6852,7 @@ int saa7134_board_init1(struct saa7134_dev *dev)
 	/* Always print gpio, often manufacturers encode tuner type and other info. */
 	saa_writel(SAA7134_GPIO_GPMODE0 >> 2, 0);
 	dev->gpio_value = saa_readl(SAA7134_GPIO_GPSTATUS0 >> 2);
-	printk(KERN_INFO "%s: board init: gpio is %x\n", dev->name, dev->gpio_value);
+	pr_info("%s: board init: gpio is %x\n", dev->name, dev->gpio_value);
 
 	switch (dev->board) {
 	case SAA7134_BOARD_FLYVIDEO2000:
@@ -7419,8 +6873,9 @@ int saa7134_board_init1(struct saa7134_dev *dev)
 	case SAA7134_BOARD_KWORLD_VSTREAM_XPERT:
 	case SAA7134_BOARD_KWORLD_XPERT:
 	case SAA7134_BOARD_AVERMEDIA_STUDIO_305:
-	case SAA7134_BOARD_AVERMEDIA_STUDIO_505:
 	case SAA7134_BOARD_AVERMEDIA_305:
+	case SAA7134_BOARD_AVERMEDIA_STUDIO_505:
+	case SAA7134_BOARD_AVERMEDIA_505:
 	case SAA7134_BOARD_AVERMEDIA_STUDIO_307:
 	case SAA7134_BOARD_AVERMEDIA_307:
 	case SAA7134_BOARD_AVERMEDIA_STUDIO_507:
@@ -7475,6 +6930,7 @@ int saa7134_board_init1(struct saa7134_dev *dev)
 	case SAA7134_BOARD_AVERMEDIA_GO_007_FM_PLUS:
 	case SAA7134_BOARD_ROVERMEDIA_LINK_PRO_FM:
 	case SAA7134_BOARD_LEADTEK_WINFAST_DTV1000S:
+	case SAA7134_BOARD_LEADTEK_WINFAST_TV2100_FM:
 		dev->has_remote = SAA7134_REMOTE_GPIO;
 		break;
 	case SAA7134_BOARD_FLYDVBS_LR300:
@@ -7483,10 +6939,10 @@ int saa7134_board_init1(struct saa7134_dev *dev)
 		dev->has_remote = SAA7134_REMOTE_GPIO;
 		break;
 	case SAA7134_BOARD_MD5044:
-		printk("%s: seems there are two different versions of the MD5044\n"
-		       "%s: (with the same ID) out there.  If sound doesn't work for\n"
-		       "%s: you try the audio_clock_override=0x200000 insmod option.\n",
-		       dev->name,dev->name,dev->name);
+		pr_warn("%s: seems there are two different versions of the MD5044\n"
+			"%s: (with the same ID) out there.  If sound doesn't work for\n"
+			"%s: you try the audio_clock_override=0x200000 insmod option.\n",
+			dev->name, dev->name, dev->name);
 		break;
 	case SAA7134_BOARD_CINERGY400_CARDBUS:
 		/* power-up tuner chip */
@@ -7608,13 +7064,14 @@ int saa7134_board_init1(struct saa7134_dev *dev)
 	case SAA7134_BOARD_BEHOLD_H7:
 	case SAA7134_BOARD_BEHOLD_A7:
 	case SAA7134_BOARD_KWORLD_PC150U:
+	case SAA7134_BOARD_SNAZIO_TVPVR_PRO:
 		dev->has_remote = SAA7134_REMOTE_I2C;
 		break;
 	case SAA7134_BOARD_AVERMEDIA_A169_B:
-		printk("%s: %s: dual saa713x broadcast decoders\n"
-		       "%s: Sorry, none of the inputs to this chip are supported yet.\n"
-		       "%s: Dual decoder functionality is disabled for now, use the other chip.\n",
-		       dev->name,card(dev).name,dev->name,dev->name);
+		pr_warn("%s: %s: dual saa713x broadcast decoders\n"
+			"%s: Sorry, none of the inputs to this chip are supported yet.\n"
+			"%s: Dual decoder functionality is disabled for now, use the other chip.\n",
+			dev->name, card(dev).name, dev->name, dev->name);
 		break;
 	case SAA7134_BOARD_AVERMEDIA_M102:
 		/* enable tuner */
@@ -7760,7 +7217,7 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 		if (board == dev->board)
 			break;
 		dev->board = board;
-		printk("%s: board type fixup: %s\n", dev->name,
+		pr_warn("%s: board type fixup: %s\n", dev->name,
 		saa7134_boards[dev->board].name);
 		dev->tuner_type = saa7134_boards[dev->board].tuner_type;
 
@@ -7768,10 +7225,11 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 	case SAA7134_BOARD_MD7134:
 	{
 		u8 subaddr;
-		u8 data[3];
+		u8 data[3], data1[] = { 0x09, 0x9f, 0x86, 0x11};
 		int ret, tuner_t;
-		struct i2c_msg msg[] = {{.addr=0x50, .flags=0, .buf=&subaddr, .len = 1},
-					{.addr=0x50, .flags=I2C_M_RD, .buf=data, .len = 3}};
+		struct i2c_msg msg[] = {{.addr = 0x50, .flags = 0, .buf = &subaddr, .len = 1},
+					{.addr = 0x50, .flags = I2C_M_RD, .buf = data, .len = 3}},
+				msg1 = {.addr = 0x61, .flags = 0, .buf = data1, .len = sizeof(data1)};
 
 		subaddr= 0x14;
 		tuner_t = 0;
@@ -7781,7 +7239,7 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 		 */
 		ret = i2c_transfer(&dev->i2c_adap, msg, 2);
 		if (ret != 2) {
-			printk(KERN_ERR "EEPROM read failure\n");
+			pr_err("EEPROM read failure\n");
 		} else if ((data[0] != 0) && (data[0] != 0xff)) {
 			/* old config structure */
 			subaddr = data[0] + 2;
@@ -7796,7 +7254,8 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 				dev->tuner_type = TUNER_PHILIPS_FM1216ME_MK3;
 				break;
 			default:
-				printk(KERN_ERR "%s Can't determine tuner type %x from EEPROM\n", dev->name, tuner_t);
+				pr_err("%s Can't determine tuner type %x from EEPROM\n",
+				       dev->name, tuner_t);
 			}
 		} else if ((data[1] != 0) && (data[1] != 0xff)) {
 			/* new config structure */
@@ -7813,16 +7272,28 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 				break;
 			case 0x001d:
 				dev->tuner_type = TUNER_PHILIPS_FMD1216ME_MK3;
-					printk(KERN_INFO "%s Board has DVB-T\n", dev->name);
+				pr_info("%s Board has DVB-T\n",
+				       dev->name);
 				break;
 			default:
-				printk(KERN_ERR "%s Can't determine tuner type %x from EEPROM\n", dev->name, tuner_t);
+				pr_err("%s Can't determine tuner type %x from EEPROM\n",
+				       dev->name, tuner_t);
 			}
 		} else {
-			printk(KERN_ERR "%s unexpected config structure\n", dev->name);
+			pr_err("%s unexpected config structure\n", dev->name);
 		}
 
-		printk(KERN_INFO "%s Tuner type is %d\n", dev->name, dev->tuner_type);
+		pr_info("%s Tuner type is %d\n", dev->name, dev->tuner_type);
+
+		/* The tuner TUNER_PHILIPS_FMD1216ME_MK3 after hardware    */
+		/* start has disabled IF and enabled DVB-T. When saa7134   */
+		/* scan I2C devices it will not detect IF tda9887 and can`t*/
+		/* watch TV without software reboot. To solve this problem */
+		/* switch the tuner to analog TV mode manually.            */
+		if (dev->tuner_type == TUNER_PHILIPS_FMD1216ME_MK3) {
+			if (i2c_transfer(&dev->i2c_adap, &msg1, 1) != 1)
+				printk(KERN_WARNING "%s: Unable to enable IF of the tuner.\n", dev->name);
+		}
 		break;
 	}
 	case SAA7134_BOARD_PHILIPS_EUROPA:
@@ -7830,11 +7301,11 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 			/* Reconfigure board as Snake reference design */
 			dev->board = SAA7134_BOARD_PHILIPS_SNAKE;
 			dev->tuner_type = saa7134_boards[dev->board].tuner_type;
-			printk(KERN_INFO "%s: Reconfigured board as %s\n",
+			pr_info("%s: Reconfigured board as %s\n",
 				dev->name, saa7134_boards[dev->board].name);
 			break;
 		}
-		/* break intentionally omitted */
+		fallthrough;
 	case SAA7134_BOARD_VIDEOMATE_DVBT_300:
 	case SAA7134_BOARD_ASUS_EUROPA2_HYBRID:
 	case SAA7134_BOARD_ASUS_EUROPA_HYBRID:
@@ -7858,7 +7329,7 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 		struct i2c_msg msg = {.addr=0x08, .flags=0, .buf=data, .len = sizeof(data)};
 		if (dev->autodetected && (dev->eedata[0x49] == 0x50)) {
 			dev->board = SAA7134_BOARD_PHILIPS_TIGER_S;
-			printk(KERN_INFO "%s: Reconfigured board as %s\n",
+			pr_info("%s: Reconfigured board as %s\n",
 				dev->name, saa7134_boards[dev->board].name);
 		}
 		if (dev->board == SAA7134_BOARD_PHILIPS_TIGER_S) {
@@ -7874,13 +7345,14 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 	case SAA7134_BOARD_ASUSTeK_TVFM7135:
 	/* The card below is detected as card=53, but is different */
 	       if (dev->autodetected && (dev->eedata[0x27] == 0x03)) {
-		       dev->board = SAA7134_BOARD_ASUSTeK_P7131_ANALOG;
-		       printk(KERN_INFO "%s: P7131 analog only, using "
-						       "entry of %s\n",
-		       dev->name, saa7134_boards[dev->board].name);
+			dev->board = SAA7134_BOARD_ASUSTeK_P7131_ANALOG;
+			pr_info("%s: P7131 analog only, using entry of %s\n",
+				dev->name, saa7134_boards[dev->board].name);
 
-			/* IR init has already happened for other cards, so
-			 * we have to catch up. */
+			/*
+			 * IR init has already happened for other cards, so
+			 * we have to catch up.
+			 */
 			dev->has_remote = SAA7134_REMOTE_GPIO;
 			saa7134_input_init1(dev);
 	       }
@@ -7891,7 +7363,7 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 		break;
 	case SAA7134_BOARD_HAUPPAUGE_HVR1110:
 		hauppauge_eeprom(dev, dev->eedata+0x80);
-		/* break intentionally omitted */
+		fallthrough;
 	case SAA7134_BOARD_PINNACLE_PCTV_310i:
 	case SAA7134_BOARD_KWORLD_DVBT_210:
 	case SAA7134_BOARD_TEVION_DVBT_220RF:
@@ -7943,12 +7415,12 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 		msg.addr = 0x0b;
 		msg.len = 1;
 		if (1 != i2c_transfer(&dev->i2c_adap, &msg, 1)) {
-			printk(KERN_WARNING "%s: send wake up byte to pic16C505"
-					"(IR chip) failed\n", dev->name);
+			pr_warn("%s: send wake up byte to pic16C505(IR chip) failed\n",
+				dev->name);
 		} else {
 			msg.flags = I2C_M_RD;
 			rc = i2c_transfer(&dev->i2c_adap, &msg, 1);
-			printk(KERN_INFO "%s: probe IR chip @ i2c 0x%02x: %s\n",
+			pr_info("%s: probe IR chip @ i2c 0x%02x: %s\n",
 				   dev->name, msg.addr,
 				   (1 == rc) ? "yes" : "no");
 			if (rc == 1)
@@ -7989,10 +7461,10 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 			dev->board = SAA7134_BOARD_VIDEOMATE_DVBT_200A;
 			dev->tuner_type   = saa7134_boards[dev->board].tuner_type;
 			dev->tda9887_conf = saa7134_boards[dev->board].tda9887_conf;
-			printk(KERN_INFO "%s: Reconfigured board as %s\n",
+			pr_info("%s: Reconfigured board as %s\n",
 				dev->name, saa7134_boards[dev->board].name);
 		} else {
-			printk(KERN_WARNING "%s: Unexpected tuner type info: %x in eeprom\n",
+			pr_warn("%s: Unexpected tuner type info: %x in eeprom\n",
 				dev->name, dev->eedata[0x41]);
 			break;
 		}
@@ -8014,9 +7486,8 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 			msg.buf = &buffer[i][0];
 			msg.len = ARRAY_SIZE(buffer[0]);
 			if (i2c_transfer(&dev->i2c_adap, &msg, 1) != 1)
-				printk(KERN_WARNING
-				       "%s: Unable to enable tuner(%i).\n",
-				       dev->name, i);
+				pr_warn("%s: Unable to enable tuner(%i).\n",
+					dev->name, i);
 		}
 		break;
 	}
@@ -8032,9 +7503,8 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 		/* watch TV without software reboot. For solve this problem */
 		/* switch the tuner to analog TV mode manually.             */
 		if (i2c_transfer(&dev->i2c_adap, &msg, 1) != 1)
-				printk(KERN_WARNING
-				      "%s: Unable to enable IF of the tuner.\n",
-				       dev->name);
+			pr_warn("%s: Unable to enable IF of the tuner.\n",
+				dev->name);
 		break;
 	}
 	case SAA7134_BOARD_KWORLD_PCI_SBTVD_FULLSEG:
@@ -8045,8 +7515,8 @@ int saa7134_board_init2(struct saa7134_dev *dev)
 		break;
 	} /* switch() */
 
-	/* initialize tuner */
-	if (TUNER_ABSENT != dev->tuner_type) {
+	/* initialize tuner (don't do this when resuming) */
+	if (!dev->insuspend && TUNER_ABSENT != dev->tuner_type) {
 		int has_demod = (dev->tda9887_conf & TDA9887_PRESENT);
 
 		/* Note: radio tuner address is always filled in,

@@ -1,28 +1,16 @@
+// SPDX-License-Identifier: LGPL-2.0+
 /*
  *  PCM Interface - misc routines
  *  Copyright (c) 1998 by Jaroslav Kysela <perex@perex.cz>
- *
- *
- *   This library is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU Library General Public License as
- *   published by the Free Software Foundation; either version 2 of
- *   the License, or (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU Library General Public License for more details.
- *
- *   You should have received a copy of the GNU Library General Public
- *   License along with this library; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
-  
+
 #include <linux/time.h>
 #include <linux/export.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
+
+#include "pcm_local.h"
+
 #define SND_PCM_FORMAT_UNKNOWN (-1)
 
 /* NOTE: "signed" prefix must be given below since the default char is
@@ -36,10 +24,12 @@ struct pcm_format_data {
 	unsigned char silence[8];	/* silence data to fill */
 };
 
-/* we do lots of calculations on snd_pcm_format_t; shut up sparse */
-#define INT	__force int
+static bool valid_format(snd_pcm_format_t format)
+{
+	return format >= 0 && format <= SNDRV_PCM_FORMAT_LAST;
+}
 
-static struct pcm_format_data pcm_formats[(INT)SNDRV_PCM_FORMAT_LAST+1] = {
+static const struct pcm_format_data pcm_formats[SNDRV_PCM_FORMAT_LAST+1] = {
 	[SNDRV_PCM_FORMAT_S8] = {
 		.width = 8, .phys = 8, .le = -1, .signd = 1,
 		.silence = {},
@@ -142,19 +132,48 @@ static struct pcm_format_data pcm_formats[(INT)SNDRV_PCM_FORMAT_LAST+1] = {
 	},
 	[SNDRV_PCM_FORMAT_DSD_U8] = {
 		.width = 8, .phys = 8, .le = 1, .signd = 0,
-		.silence = {},
+		.silence = { 0x69 },
 	},
 	[SNDRV_PCM_FORMAT_DSD_U16_LE] = {
 		.width = 16, .phys = 16, .le = 1, .signd = 0,
-		.silence = {},
+		.silence = { 0x69, 0x69 },
 	},
-	/* FIXME: the following three formats are not defined properly yet */
+	[SNDRV_PCM_FORMAT_DSD_U32_LE] = {
+		.width = 32, .phys = 32, .le = 1, .signd = 0,
+		.silence = { 0x69, 0x69, 0x69, 0x69 },
+	},
+	[SNDRV_PCM_FORMAT_DSD_U16_BE] = {
+		.width = 16, .phys = 16, .le = 0, .signd = 0,
+		.silence = { 0x69, 0x69 },
+	},
+	[SNDRV_PCM_FORMAT_DSD_U32_BE] = {
+		.width = 32, .phys = 32, .le = 0, .signd = 0,
+		.silence = { 0x69, 0x69, 0x69, 0x69 },
+	},
+	/* FIXME: the following two formats are not defined properly yet */
 	[SNDRV_PCM_FORMAT_MPEG] = {
 		.le = -1, .signd = -1,
 	},
 	[SNDRV_PCM_FORMAT_GSM] = {
 		.le = -1, .signd = -1,
 	},
+	[SNDRV_PCM_FORMAT_S20_LE] = {
+		.width = 20, .phys = 32, .le = 1, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_S20_BE] = {
+		.width = 20, .phys = 32, .le = 0, .signd = 1,
+		.silence = {},
+	},
+	[SNDRV_PCM_FORMAT_U20_LE] = {
+		.width = 20, .phys = 32, .le = 1, .signd = 0,
+		.silence = { 0x00, 0x00, 0x08, 0x00 },
+	},
+	[SNDRV_PCM_FORMAT_U20_BE] = {
+		.width = 20, .phys = 32, .le = 0, .signd = 0,
+		.silence = { 0x00, 0x08, 0x00, 0x00 },
+	},
+	/* FIXME: the following format is not defined properly yet */
 	[SNDRV_PCM_FORMAT_SPECIAL] = {
 		.le = -1, .signd = -1,
 	},
@@ -227,13 +246,13 @@ static struct pcm_format_data pcm_formats[(INT)SNDRV_PCM_FORMAT_LAST+1] = {
 int snd_pcm_format_signed(snd_pcm_format_t format)
 {
 	int val;
-	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
+	if (!valid_format(format))
 		return -EINVAL;
-	if ((val = pcm_formats[(INT)format].signd) < 0)
+	val = pcm_formats[format].signd;
+	if (val < 0)
 		return -EINVAL;
 	return val;
 }
-
 EXPORT_SYMBOL(snd_pcm_format_signed);
 
 /**
@@ -252,7 +271,6 @@ int snd_pcm_format_unsigned(snd_pcm_format_t format)
 		return val;
 	return !val;
 }
-
 EXPORT_SYMBOL(snd_pcm_format_unsigned);
 
 /**
@@ -265,7 +283,6 @@ int snd_pcm_format_linear(snd_pcm_format_t format)
 {
 	return snd_pcm_format_signed(format) >= 0;
 }
-
 EXPORT_SYMBOL(snd_pcm_format_linear);
 
 /**
@@ -278,13 +295,13 @@ EXPORT_SYMBOL(snd_pcm_format_linear);
 int snd_pcm_format_little_endian(snd_pcm_format_t format)
 {
 	int val;
-	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
+	if (!valid_format(format))
 		return -EINVAL;
-	if ((val = pcm_formats[(INT)format].le) < 0)
+	val = pcm_formats[format].le;
+	if (val < 0)
 		return -EINVAL;
 	return val;
 }
-
 EXPORT_SYMBOL(snd_pcm_format_little_endian);
 
 /**
@@ -303,7 +320,6 @@ int snd_pcm_format_big_endian(snd_pcm_format_t format)
 		return val;
 	return !val;
 }
-
 EXPORT_SYMBOL(snd_pcm_format_big_endian);
 
 /**
@@ -316,13 +332,13 @@ EXPORT_SYMBOL(snd_pcm_format_big_endian);
 int snd_pcm_format_width(snd_pcm_format_t format)
 {
 	int val;
-	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
+	if (!valid_format(format))
 		return -EINVAL;
-	if ((val = pcm_formats[(INT)format].width) == 0)
+	val = pcm_formats[format].width;
+	if (!val)
 		return -EINVAL;
 	return val;
 }
-
 EXPORT_SYMBOL(snd_pcm_format_width);
 
 /**
@@ -335,13 +351,13 @@ EXPORT_SYMBOL(snd_pcm_format_width);
 int snd_pcm_format_physical_width(snd_pcm_format_t format)
 {
 	int val;
-	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
+	if (!valid_format(format))
 		return -EINVAL;
-	if ((val = pcm_formats[(INT)format].phys) == 0)
+	val = pcm_formats[format].phys;
+	if (!val)
 		return -EINVAL;
 	return val;
 }
-
 EXPORT_SYMBOL(snd_pcm_format_physical_width);
 
 /**
@@ -359,7 +375,6 @@ ssize_t snd_pcm_format_size(snd_pcm_format_t format, size_t samples)
 		return -EINVAL;
 	return samples * phys_width / 8;
 }
-
 EXPORT_SYMBOL(snd_pcm_format_size);
 
 /**
@@ -370,13 +385,12 @@ EXPORT_SYMBOL(snd_pcm_format_size);
  */
 const unsigned char *snd_pcm_format_silence_64(snd_pcm_format_t format)
 {
-	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
+	if (!valid_format(format))
 		return NULL;
-	if (! pcm_formats[(INT)format].phys)
+	if (! pcm_formats[format].phys)
 		return NULL;
-	return pcm_formats[(INT)format].silence;
+	return pcm_formats[format].silence;
 }
-
 EXPORT_SYMBOL(snd_pcm_format_silence_64);
 
 /**
@@ -392,18 +406,19 @@ EXPORT_SYMBOL(snd_pcm_format_silence_64);
 int snd_pcm_format_set_silence(snd_pcm_format_t format, void *data, unsigned int samples)
 {
 	int width;
-	unsigned char *dst, *pat;
+	unsigned char *dst;
+	const unsigned char *pat;
 
-	if ((INT)format < 0 || (INT)format > (INT)SNDRV_PCM_FORMAT_LAST)
+	if (!valid_format(format))
 		return -EINVAL;
 	if (samples == 0)
 		return 0;
-	width = pcm_formats[(INT)format].phys; /* physical width */
-	pat = pcm_formats[(INT)format].silence;
-	if (! width)
+	width = pcm_formats[format].phys; /* physical width */
+	if (!width)
 		return -EINVAL;
+	pat = pcm_formats[format].silence;
 	/* signed or 1 byte data */
-	if (pcm_formats[(INT)format].signd == 1 || width <= 8) {
+	if (pcm_formats[format].signd == 1 || width <= 8) {
 		unsigned int bytes = samples * width / 8;
 		memset(data, *pat, bytes);
 		return 0;
@@ -447,37 +462,37 @@ int snd_pcm_format_set_silence(snd_pcm_format_t format, void *data, unsigned int
 #endif
 	return 0;
 }
-
 EXPORT_SYMBOL(snd_pcm_format_set_silence);
 
 /**
- * snd_pcm_limit_hw_rates - determine rate_min/rate_max fields
- * @runtime: the runtime instance
+ * snd_pcm_hw_limit_rates - determine rate_min/rate_max fields
+ * @hw: the pcm hw instance
  *
  * Determines the rate_min and rate_max fields from the rates bits of
- * the given runtime->hw.
+ * the given hw.
  *
  * Return: Zero if successful.
  */
-int snd_pcm_limit_hw_rates(struct snd_pcm_runtime *runtime)
+int snd_pcm_hw_limit_rates(struct snd_pcm_hardware *hw)
 {
 	int i;
+	unsigned int rmin, rmax;
+
+	rmin = UINT_MAX;
+	rmax = 0;
 	for (i = 0; i < (int)snd_pcm_known_rates.count; i++) {
-		if (runtime->hw.rates & (1 << i)) {
-			runtime->hw.rate_min = snd_pcm_known_rates.list[i];
-			break;
+		if (hw->rates & (1 << i)) {
+			rmin = min(rmin, snd_pcm_known_rates.list[i]);
+			rmax = max(rmax, snd_pcm_known_rates.list[i]);
 		}
 	}
-	for (i = (int)snd_pcm_known_rates.count - 1; i >= 0; i--) {
-		if (runtime->hw.rates & (1 << i)) {
-			runtime->hw.rate_max = snd_pcm_known_rates.list[i];
-			break;
-		}
-	}
+	if (rmin > rmax)
+		return -EINVAL;
+	hw->rate_min = rmin;
+	hw->rate_max = rmax;
 	return 0;
 }
-
-EXPORT_SYMBOL(snd_pcm_limit_hw_rates);
+EXPORT_SYMBOL(snd_pcm_hw_limit_rates);
 
 /**
  * snd_pcm_rate_to_rate_bit - converts sample rate to SNDRV_PCM_RATE_xxx bit
@@ -514,3 +529,42 @@ unsigned int snd_pcm_rate_bit_to_rate(unsigned int rate_bit)
 	return 0;
 }
 EXPORT_SYMBOL(snd_pcm_rate_bit_to_rate);
+
+static unsigned int snd_pcm_rate_mask_sanitize(unsigned int rates)
+{
+	if (rates & SNDRV_PCM_RATE_CONTINUOUS)
+		return SNDRV_PCM_RATE_CONTINUOUS;
+	else if (rates & SNDRV_PCM_RATE_KNOT)
+		return SNDRV_PCM_RATE_KNOT;
+	return rates;
+}
+
+/**
+ * snd_pcm_rate_mask_intersect - computes the intersection between two rate masks
+ * @rates_a: The first rate mask
+ * @rates_b: The second rate mask
+ *
+ * This function computes the rates that are supported by both rate masks passed
+ * to the function. It will take care of the special handling of
+ * SNDRV_PCM_RATE_CONTINUOUS and SNDRV_PCM_RATE_KNOT.
+ *
+ * Return: A rate mask containing the rates that are supported by both rates_a
+ * and rates_b.
+ */
+unsigned int snd_pcm_rate_mask_intersect(unsigned int rates_a,
+	unsigned int rates_b)
+{
+	rates_a = snd_pcm_rate_mask_sanitize(rates_a);
+	rates_b = snd_pcm_rate_mask_sanitize(rates_b);
+
+	if (rates_a & SNDRV_PCM_RATE_CONTINUOUS)
+		return rates_b;
+	else if (rates_b & SNDRV_PCM_RATE_CONTINUOUS)
+		return rates_a;
+	else if (rates_a & SNDRV_PCM_RATE_KNOT)
+		return rates_b;
+	else if (rates_b & SNDRV_PCM_RATE_KNOT)
+		return rates_a;
+	return rates_a & rates_b;
+}
+EXPORT_SYMBOL_GPL(snd_pcm_rate_mask_intersect);

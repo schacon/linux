@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Base driver for Analog Devices ADP5520/ADP5501 MFD PMICs
  * LCD Backlight: drivers/video/backlight/adp5520_bl
@@ -7,20 +8,19 @@
  *
  * Copyright 2009 Analog Devices Inc.
  *
+ * Author: Michael Hennerich <michael.hennerich@analog.com>
+ *
  * Derived from da903x:
  * Copyright (C) 2008 Compulab, Ltd.
- * 	Mike Rapoport <mike@compulab.co.il>
+ *	Mike Rapoport <mike@compulab.co.il>
  *
  * Copyright (C) 2006-2008 Marvell International Ltd.
- * 	Eric Miao <eric.miao@marvell.com>
- *
- * Licensed under the GPL-2 or later.
+ *	Eric Miao <eric.miao@marvell.com>
  */
 
 #include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/platform_device.h>
 #include <linux/init.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
@@ -204,10 +204,10 @@ static int adp5520_remove_subdevs(struct adp5520_chip *chip)
 	return device_for_each_child(chip->dev, NULL, __remove_subdev);
 }
 
-static int adp5520_probe(struct i2c_client *client,
-					const struct i2c_device_id *id)
+static int adp5520_probe(struct i2c_client *client)
 {
-	struct adp5520_platform_data *pdata = client->dev.platform_data;
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
+	struct adp5520_platform_data *pdata = dev_get_platdata(&client->dev);
 	struct platform_device *pdev;
 	struct adp5520_chip *chip;
 	int ret;
@@ -223,7 +223,7 @@ static int adp5520_probe(struct i2c_client *client,
 		return -ENODEV;
 	}
 
-	chip = kzalloc(sizeof(*chip), GFP_KERNEL);
+	chip = devm_kzalloc_obj(&client->dev, *chip);
 	if (!chip)
 		return -ENOMEM;
 
@@ -244,7 +244,7 @@ static int adp5520_probe(struct i2c_client *client,
 		if (ret) {
 			dev_err(&client->dev, "failed to request irq %d\n",
 					chip->irq);
-			goto out_free_chip;
+			return ret;
 		}
 	}
 
@@ -302,26 +302,9 @@ out_free_irq:
 	if (chip->irq)
 		free_irq(chip->irq, chip);
 
-out_free_chip:
-	kfree(chip);
-
 	return ret;
 }
 
-static int adp5520_remove(struct i2c_client *client)
-{
-	struct adp5520_chip *chip = dev_get_drvdata(&client->dev);
-
-	if (chip->irq)
-		free_irq(chip->irq, chip);
-
-	adp5520_remove_subdevs(chip);
-	adp5520_write(chip->dev, ADP5520_MODE_STATUS, 0);
-	kfree(chip);
-	return 0;
-}
-
-#ifdef CONFIG_PM_SLEEP
 static int adp5520_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
@@ -342,30 +325,22 @@ static int adp5520_resume(struct device *dev)
 	adp5520_write(chip->dev, ADP5520_MODE_STATUS, chip->mode);
 	return 0;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(adp5520_pm, adp5520_suspend, adp5520_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(adp5520_pm, adp5520_suspend, adp5520_resume);
 
 static const struct i2c_device_id adp5520_id[] = {
 	{ "pmic-adp5520", ID_ADP5520 },
 	{ "pmic-adp5501", ID_ADP5501 },
 	{ }
 };
-MODULE_DEVICE_TABLE(i2c, adp5520_id);
 
 static struct i2c_driver adp5520_driver = {
 	.driver = {
-		.name	= "adp5520",
-		.owner	= THIS_MODULE,
-		.pm	= &adp5520_pm,
+		.name			= "adp5520",
+		.pm			= pm_sleep_ptr(&adp5520_pm),
+		.suppress_bind_attrs	= true,
 	},
 	.probe		= adp5520_probe,
-	.remove		= adp5520_remove,
-	.id_table 	= adp5520_id,
+	.id_table	= adp5520_id,
 };
-
-module_i2c_driver(adp5520_driver);
-
-MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>");
-MODULE_DESCRIPTION("ADP5520(01) PMIC-MFD Driver");
-MODULE_LICENSE("GPL");
+builtin_i2c_driver(adp5520_driver);

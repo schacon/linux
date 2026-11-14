@@ -1,25 +1,16 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+// SPDX-License-Identifier: GPL-2.0-only
+/*
  * stackglue.c
  *
  * Code which implements an OCFS2 specific interface to underlying
  * cluster stacks.
  *
  * Copyright (C) 2007, 2009 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation, version 2.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 
 #include <linux/list.h>
 #include <linux/spinlock.h>
+#include <linux/string.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/kmod.h>
@@ -27,6 +18,7 @@
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include <linux/sysctl.h>
+#include <linux/umh.h>
 
 #include "ocfs2_fs.h"
 
@@ -309,6 +301,8 @@ int ocfs2_plock(struct ocfs2_cluster_connection *conn, u64 ino,
 EXPORT_SYMBOL_GPL(ocfs2_plock);
 
 int ocfs2_cluster_connect(const char *stack_name,
+			  const char *cluster_name,
+			  int cluster_name_len,
 			  const char *group,
 			  int grouplen,
 			  struct ocfs2_locking_protocol *lproto,
@@ -335,15 +329,18 @@ int ocfs2_cluster_connect(const char *stack_name,
 		goto out;
 	}
 
-	new_conn = kzalloc(sizeof(struct ocfs2_cluster_connection),
-			   GFP_KERNEL);
+	new_conn = kzalloc_obj(struct ocfs2_cluster_connection);
 	if (!new_conn) {
 		rc = -ENOMEM;
 		goto out;
 	}
 
-	memcpy(new_conn->cc_name, group, grouplen);
+	strscpy(new_conn->cc_name, group, GROUP_NAME_MAX + 1);
 	new_conn->cc_namelen = grouplen;
+	if (cluster_name_len)
+		strscpy(new_conn->cc_cluster_name, cluster_name,
+			CLUSTER_NAME_MAX + 1);
+	new_conn->cc_cluster_name_len = cluster_name_len;
 	new_conn->cc_recovery_handler = recovery_handler;
 	new_conn->cc_recovery_data = recovery_data;
 
@@ -386,8 +383,9 @@ int ocfs2_cluster_connect_agnostic(const char *group,
 
 	if (cluster_stack_name[0])
 		stack_name = cluster_stack_name;
-	return ocfs2_cluster_connect(stack_name, group, grouplen, lproto,
-				     recovery_handler, recovery_data, conn);
+	return ocfs2_cluster_connect(stack_name, NULL, 0, group, grouplen,
+				     lproto, recovery_handler, recovery_data,
+				     conn);
 }
 EXPORT_SYMBOL_GPL(ocfs2_cluster_connect_agnostic);
 
@@ -460,9 +458,10 @@ void ocfs2_cluster_hangup(const char *group, int grouplen)
 }
 EXPORT_SYMBOL_GPL(ocfs2_cluster_hangup);
 
-int ocfs2_cluster_this_node(unsigned int *node)
+int ocfs2_cluster_this_node(struct ocfs2_cluster_connection *conn,
+			    unsigned int *node)
 {
-	return active_stack->sp_ops->this_node(node);
+	return active_stack->sp_ops->this_node(conn, node);
 }
 EXPORT_SYMBOL_GPL(ocfs2_cluster_this_node);
 
@@ -488,7 +487,7 @@ static ssize_t ocfs2_max_locking_protocol_show(struct kobject *kobj,
 }
 
 static struct kobj_attribute ocfs2_attr_max_locking_protocol =
-	__ATTR(max_locking_protocol, S_IFREG | S_IRUGO,
+	__ATTR(max_locking_protocol, S_IRUGO,
 	       ocfs2_max_locking_protocol_show, NULL);
 
 static ssize_t ocfs2_loaded_cluster_plugins_show(struct kobject *kobj,
@@ -502,11 +501,7 @@ static ssize_t ocfs2_loaded_cluster_plugins_show(struct kobject *kobj,
 	list_for_each_entry(p, &ocfs2_stack_list, sp_list) {
 		ret = snprintf(buf, remain, "%s\n",
 			       p->sp_name);
-		if (ret < 0) {
-			total = ret;
-			break;
-		}
-		if (ret == remain) {
+		if (ret >= remain) {
 			/* snprintf() didn't fit */
 			total = -E2BIG;
 			break;
@@ -520,7 +515,7 @@ static ssize_t ocfs2_loaded_cluster_plugins_show(struct kobject *kobj,
 }
 
 static struct kobj_attribute ocfs2_attr_loaded_cluster_plugins =
-	__ATTR(loaded_cluster_plugins, S_IFREG | S_IRUGO,
+	__ATTR(loaded_cluster_plugins, S_IRUGO,
 	       ocfs2_loaded_cluster_plugins_show, NULL);
 
 static ssize_t ocfs2_active_cluster_plugin_show(struct kobject *kobj,
@@ -533,7 +528,7 @@ static ssize_t ocfs2_active_cluster_plugin_show(struct kobject *kobj,
 	if (active_stack) {
 		ret = snprintf(buf, PAGE_SIZE, "%s\n",
 			       active_stack->sp_name);
-		if (ret == PAGE_SIZE)
+		if (ret >= PAGE_SIZE)
 			ret = -E2BIG;
 	}
 	spin_unlock(&ocfs2_stack_lock);
@@ -542,7 +537,7 @@ static ssize_t ocfs2_active_cluster_plugin_show(struct kobject *kobj,
 }
 
 static struct kobj_attribute ocfs2_attr_active_cluster_plugin =
-	__ATTR(active_cluster_plugin, S_IFREG | S_IRUGO,
+	__ATTR(active_cluster_plugin, S_IRUGO,
 	       ocfs2_active_cluster_plugin_show, NULL);
 
 static ssize_t ocfs2_cluster_stack_show(struct kobject *kobj,
@@ -591,23 +586,38 @@ static ssize_t ocfs2_cluster_stack_store(struct kobject *kobj,
 
 
 static struct kobj_attribute ocfs2_attr_cluster_stack =
-	__ATTR(cluster_stack, S_IFREG | S_IRUGO | S_IWUSR,
+	__ATTR(cluster_stack, S_IRUGO | S_IWUSR,
 	       ocfs2_cluster_stack_show,
 	       ocfs2_cluster_stack_store);
+
+
+
+static ssize_t ocfs2_dlm_recover_show(struct kobject *kobj,
+					struct kobj_attribute *attr,
+					char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "1\n");
+}
+
+static struct kobj_attribute ocfs2_attr_dlm_recover_support =
+	__ATTR(dlm_recover_callback_support, S_IRUGO,
+	       ocfs2_dlm_recover_show, NULL);
 
 static struct attribute *ocfs2_attrs[] = {
 	&ocfs2_attr_max_locking_protocol.attr,
 	&ocfs2_attr_loaded_cluster_plugins.attr,
 	&ocfs2_attr_active_cluster_plugin.attr,
 	&ocfs2_attr_cluster_stack.attr,
+	&ocfs2_attr_dlm_recover_support.attr,
 	NULL,
 };
 
-static struct attribute_group ocfs2_attr_group = {
+static const struct attribute_group ocfs2_attr_group = {
 	.attrs = ocfs2_attrs,
 };
 
-static struct kset *ocfs2_kset;
+struct kset *ocfs2_kset;
+EXPORT_SYMBOL_GPL(ocfs2_kset);
 
 static void ocfs2_sysfs_exit(void)
 {
@@ -641,9 +651,7 @@ error:
  * and easier to preserve the name.
  */
 
-#define FS_OCFS2_NM		1
-
-static ctl_table ocfs2_nm_table[] = {
+static const struct ctl_table ocfs2_nm_table[] = {
 	{
 		.procname	= "hb_ctl_path",
 		.data		= ocfs2_hb_ctl_path,
@@ -651,44 +659,9 @@ static ctl_table ocfs2_nm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dostring,
 	},
-	{ }
 };
 
-static ctl_table ocfs2_mod_table[] = {
-	{
-		.procname	= "nm",
-		.data		= NULL,
-		.maxlen		= 0,
-		.mode		= 0555,
-		.child		= ocfs2_nm_table
-	},
-	{ }
-};
-
-static ctl_table ocfs2_kern_table[] = {
-	{
-		.procname	= "ocfs2",
-		.data		= NULL,
-		.maxlen		= 0,
-		.mode		= 0555,
-		.child		= ocfs2_mod_table
-	},
-	{ }
-};
-
-static ctl_table ocfs2_root_table[] = {
-	{
-		.procname	= "fs",
-		.data		= NULL,
-		.maxlen		= 0,
-		.mode		= 0555,
-		.child		= ocfs2_kern_table
-	},
-	{ }
-};
-
-static struct ctl_table_header *ocfs2_table_header = NULL;
-
+static struct ctl_table_header *ocfs2_table_header;
 
 /*
  * Initialization
@@ -696,31 +669,34 @@ static struct ctl_table_header *ocfs2_table_header = NULL;
 
 static int __init ocfs2_stack_glue_init(void)
 {
-	strcpy(cluster_stack_name, OCFS2_STACK_PLUGIN_O2CB);
+	int ret;
 
-	ocfs2_table_header = register_sysctl_table(ocfs2_root_table);
+	strscpy(cluster_stack_name, OCFS2_STACK_PLUGIN_O2CB);
+
+	ocfs2_table_header = register_sysctl("fs/ocfs2/nm", ocfs2_nm_table);
 	if (!ocfs2_table_header) {
 		printk(KERN_ERR
 		       "ocfs2 stack glue: unable to register sysctl\n");
 		return -ENOMEM; /* or something. */
 	}
 
-	return ocfs2_sysfs_init();
+	ret = ocfs2_sysfs_init();
+	if (ret)
+		unregister_sysctl_table(ocfs2_table_header);
+
+	return ret;
 }
 
 static void __exit ocfs2_stack_glue_exit(void)
 {
 	memset(&locking_max_version, 0,
 	       sizeof(struct ocfs2_protocol_version));
-	locking_max_version.pv_major = 0;
-	locking_max_version.pv_minor = 0;
 	ocfs2_sysfs_exit();
-	if (ocfs2_table_header)
-		unregister_sysctl_table(ocfs2_table_header);
+	unregister_sysctl_table(ocfs2_table_header);
 }
 
 MODULE_AUTHOR("Oracle");
-MODULE_DESCRIPTION("ocfs2 cluter stack glue layer");
+MODULE_DESCRIPTION("ocfs2 cluster stack glue layer");
 MODULE_LICENSE("GPL");
 module_init(ocfs2_stack_glue_init);
 module_exit(ocfs2_stack_glue_exit);

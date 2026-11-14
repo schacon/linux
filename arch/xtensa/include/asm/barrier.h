@@ -9,21 +9,23 @@
 #ifndef _XTENSA_SYSTEM_H
 #define _XTENSA_SYSTEM_H
 
-#define smp_read_barrier_depends() do { } while(0)
-#define read_barrier_depends() do { } while(0)
+#include <asm/core.h>
 
-#define mb()  ({ __asm__ __volatile__("memw" : : : "memory"); })
-#define rmb() barrier()
-#define wmb() mb()
+#define __mb()  ({ __asm__ __volatile__("memw" : : : "memory"); })
+#define __rmb() barrier()
+#define __wmb() __mb()
 
 #ifdef CONFIG_SMP
-#error smp_* not defined
-#else
-#define smp_mb()	barrier()
-#define smp_rmb()	barrier()
-#define smp_wmb()	barrier()
+#define __smp_mb() __mb()
+#define __smp_rmb() __rmb()
+#define __smp_wmb() __wmb()
 #endif
 
-#define set_mb(var, value)	do { var = value; mb(); } while (0)
+#if XCHAL_HAVE_S32C1I
+#define __smp_mb__before_atomic()		barrier()
+#define __smp_mb__after_atomic()		barrier()
+#endif
+
+#include <asm-generic/barrier.h>
 
 #endif /* _XTENSA_SYSTEM_H */

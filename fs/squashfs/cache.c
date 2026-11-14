@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Squashfs - a compressed read only filesystem for Linux
  *
  * Copyright (c) 2002, 2003, 2004, 2005, 2006, 2007, 2008
  * Phillip Lougher <phillip@squashfs.org.uk>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2,
- * or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  * cache.c
  */
@@ -30,7 +17,7 @@
  * access the metadata and fragment caches.
  *
  * To avoid out of memory and fragmentation issues with vmalloc the cache
- * uses sequences of kmalloced PAGE_CACHE_SIZE buffers.
+ * uses sequences of kmalloced PAGE_SIZE buffers.
  *
  * It should be noted that the cache is not used for file datablocks, these
  * are decompressed and cached in the page-cache in the normal way.  The
@@ -56,20 +43,84 @@
 #include "squashfs_fs.h"
 #include "squashfs_fs_sb.h"
 #include "squashfs.h"
+#include "page_actor.h"
+
+/*
+ * Waiters on cache->wait_queue are keyed by the block they want, so a wakeup
+ * can name who it is for.  A NULL key is a capacity wakeup: one entry became
+ * free, so wake one waiter.  A block key is a publication wakeup: that block
+ * now has an entry, so wake every waiter which can share it.
+ */
+struct squashfs_cache_wait {
+	wait_queue_entry_t	wait;
+	u64			block;
+	bool			capacity_wake;
+};
+
+static int squashfs_cache_wake_function(wait_queue_entry_t *wait,
+					unsigned int mode, int sync, void *key)
+{
+	struct squashfs_cache_wait *cache_wait =
+		container_of(wait, struct squashfs_cache_wait, wait);
+	u64 *block = key;
+
+	if (block && cache_wait->block != *block)
+		return 0;
+
+	WRITE_ONCE(cache_wait->capacity_wake, !block);
+
+	/*
+	 * Wake and unlink unconditionally instead of using
+	 * autoremove_wake_function(), which unlinks only when it changed the
+	 * task state.  A waiter can be made runnable by something which does
+	 * not go through this queue: wake_up_process() takes TASK_NORMAL, and
+	 * a cgroup v2 thaw calls it on every task in the cgroup, as do
+	 * free_pid() on a pid namespace init and a late rcuwait_wake_up().
+	 * try_to_wake_up() then fails.  Leaving such a waiter queued with a
+	 * reason already recorded would let it act on a freed entry it was not
+	 * given, and the failure would not consume the exclusive budget, so a
+	 * second waiter would be woken for the same entry.
+	 *
+	 * list_del_init_careful() must be the last access to @cache_wait: it
+	 * releases the waiter, whose wait structure lives on its stack, and it
+	 * pairs with list_empty_careful() in finish_wait() to publish the
+	 * store above.  __wake_up_common() samples ->flags and the next entry
+	 * before calling here, so it does not touch @wait afterwards either.
+	 */
+	default_wake_function(wait, mode, sync, key);
+	list_del_init_careful(&wait->entry);
+
+	return 1;
+}
+
+static void squashfs_cache_wake_block(struct squashfs_cache *cache, u64 block)
+{
+	/* nr_exclusive == 0: wake every waiter which matches the key. */
+	__wake_up(&cache->wait_queue, TASK_NORMAL, 0, &block);
+}
 
 /*
  * Look-up block in cache, and increment usage count.  If not in cache, read
  * and decompress it from disk.
+ *
+ * A caller which finds no free entry sleeps on cache->wait_queue as an
+ * exclusive waiter, so squashfs_cache_put() releasing one entry wakes exactly
+ * one task.  Because a wakee may find its block published in the meantime and
+ * share that entry rather than claim the free one, a wakee which shares hands
+ * its wakeup on to the next waiter.
  */
 struct squashfs_cache_entry *squashfs_cache_get(struct super_block *sb,
 	struct squashfs_cache *cache, u64 block, int length)
 {
 	int i, n;
 	struct squashfs_cache_entry *entry;
+	bool capacity_wake = false;
 
 	spin_lock(&cache->lock);
 
 	while (1) {
+		bool pending, wake_next, wake_block;
+
 		for (i = cache->curr_blk, n = 0; n < cache->entries; n++) {
 			if (cache->entry[i].block == block) {
 				cache->curr_blk = i;
@@ -84,9 +135,25 @@ struct squashfs_cache_entry *squashfs_cache_get(struct super_block *sb,
 			 * go to sleep waiting for one to become available.
 			 */
 			if (cache->unused == 0) {
+				struct squashfs_cache_wait wait = {
+					.block		= block,
+					.capacity_wake	= false,
+				};
+
+				init_wait_func(&wait.wait,
+					       squashfs_cache_wake_function);
 				cache->num_waiters++;
+				/*
+				 * Enqueue while still holding cache->lock, so
+				 * that a concurrent lookup either sees us
+				 * queued or we see the block it publishes.
+				 */
+				prepare_to_wait_exclusive(&cache->wait_queue,
+						&wait.wait, TASK_UNINTERRUPTIBLE);
 				spin_unlock(&cache->lock);
-				wait_event(cache->wait_queue, cache->unused);
+				schedule();
+				finish_wait(&cache->wait_queue, &wait.wait);
+				capacity_wake = READ_ONCE(wait.capacity_wake);
 				spin_lock(&cache->lock);
 				cache->num_waiters--;
 				continue;
@@ -117,11 +184,20 @@ struct squashfs_cache_entry *squashfs_cache_get(struct super_block *sb,
 			entry->pending = 1;
 			entry->num_waiters = 0;
 			entry->error = 0;
+			wake_block = cache->num_waiters > 0;
 			spin_unlock(&cache->lock);
 
-			entry->length = squashfs_read_data(sb, entry->data,
-				block, length, &entry->next_index,
-				cache->block_size, cache->pages);
+			/*
+			 * The entry is now findable, so release everybody
+			 * queued for this block to share it rather than each
+			 * waiting for an entry of their own.  They will block
+			 * on entry->wait_queue below until the read completes.
+			 */
+			if (wake_block)
+				squashfs_cache_wake_block(cache, block);
+
+			entry->length = squashfs_read_data(sb, block, length,
+				&entry->next_index, entry->actor);
 
 			spin_lock(&cache->lock);
 
@@ -151,20 +227,33 @@ struct squashfs_cache_entry *squashfs_cache_get(struct super_block *sb,
 		 * for reuse.
 		 */
 		entry = &cache->entry[i];
-		if (entry->refcount == 0)
+		if (entry->refcount == 0) {
 			cache->unused--;
+			/* This claims the capacity we were woken for. */
+			capacity_wake = false;
+		}
 		entry->refcount++;
 
 		/*
 		 * If the entry is currently being filled in by another process
 		 * go to sleep waiting for it to become available.
 		 */
-		if (entry->pending) {
+		pending = entry->pending;
+		if (pending)
 			entry->num_waiters++;
-			spin_unlock(&cache->lock);
+
+		/*
+		 * We were woken because an entry became free, but shared a
+		 * block instead of claiming it.  Hand the wakeup on, otherwise
+		 * the free entry sits unclaimed while others sleep.
+		 */
+		wake_next = capacity_wake && cache->unused && cache->num_waiters;
+		spin_unlock(&cache->lock);
+
+		if (wake_next)
+			wake_up(&cache->wait_queue);
+		if (pending)
 			wait_event(entry->wait_queue, !entry->pending);
-		} else
-			spin_unlock(&cache->lock);
 
 		goto out;
 	}
@@ -211,7 +300,7 @@ void squashfs_cache_delete(struct squashfs_cache *cache)
 {
 	int i, j;
 
-	if (cache == NULL)
+	if (IS_ERR(cache) || cache == NULL)
 		return;
 
 	for (i = 0; i < cache->entries; i++) {
@@ -220,6 +309,7 @@ void squashfs_cache_delete(struct squashfs_cache *cache)
 				kfree(cache->entry[i].data[j]);
 			kfree(cache->entry[i].data);
 		}
+		kfree(cache->entry[i].actor);
 	}
 
 	kfree(cache->entry);
@@ -230,20 +320,24 @@ void squashfs_cache_delete(struct squashfs_cache *cache)
 /*
  * Initialise cache allocating the specified number of entries, each of
  * size block_size.  To avoid vmalloc fragmentation issues each entry
- * is allocated as a sequence of kmalloced PAGE_CACHE_SIZE buffers.
+ * is allocated as a sequence of kmalloced PAGE_SIZE buffers.
  */
 struct squashfs_cache *squashfs_cache_init(char *name, int entries,
 	int block_size)
 {
 	int i, j;
-	struct squashfs_cache *cache = kzalloc(sizeof(*cache), GFP_KERNEL);
+	struct squashfs_cache *cache;
 
+	if (entries == 0)
+		return NULL;
+
+	cache = kzalloc_obj(*cache);
 	if (cache == NULL) {
 		ERROR("Failed to allocate %s cache\n", name);
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
-	cache->entry = kcalloc(entries, sizeof(*(cache->entry)), GFP_KERNEL);
+	cache->entry = kzalloc_objs(*(cache->entry), entries);
 	if (cache->entry == NULL) {
 		ERROR("Failed to allocate %s cache\n", name);
 		goto cleanup;
@@ -254,7 +348,7 @@ struct squashfs_cache *squashfs_cache_init(char *name, int entries,
 	cache->unused = entries;
 	cache->entries = entries;
 	cache->block_size = block_size;
-	cache->pages = block_size >> PAGE_CACHE_SHIFT;
+	cache->pages = block_size >> PAGE_SHIFT;
 	cache->pages = cache->pages ? cache->pages : 1;
 	cache->name = name;
 	cache->num_waiters = 0;
@@ -274,11 +368,18 @@ struct squashfs_cache *squashfs_cache_init(char *name, int entries,
 		}
 
 		for (j = 0; j < cache->pages; j++) {
-			entry->data[j] = kmalloc(PAGE_CACHE_SIZE, GFP_KERNEL);
+			entry->data[j] = kmalloc(PAGE_SIZE, GFP_KERNEL);
 			if (entry->data[j] == NULL) {
 				ERROR("Failed to allocate %s buffer\n", name);
 				goto cleanup;
 			}
+		}
+
+		entry->actor = squashfs_page_actor_init(entry->data,
+						cache->pages, 0);
+		if (entry->actor == NULL) {
+			ERROR("Failed to allocate %s cache entry\n", name);
+			goto cleanup;
 		}
 	}
 
@@ -286,7 +387,7 @@ struct squashfs_cache *squashfs_cache_init(char *name, int entries,
 
 cleanup:
 	squashfs_cache_delete(cache);
-	return NULL;
+	return ERR_PTR(-ENOMEM);
 }
 
 
@@ -300,16 +401,16 @@ int squashfs_copy_data(void *buffer, struct squashfs_cache_entry *entry,
 {
 	int remaining = length;
 
-	if (length == 0)
+	if (length == 0 || offset < 0)
 		return 0;
 	else if (buffer == NULL)
 		return min(length, entry->length - offset);
 
 	while (offset < entry->length) {
-		void *buff = entry->data[offset / PAGE_CACHE_SIZE]
-				+ (offset % PAGE_CACHE_SIZE);
+		void *buff = entry->data[offset / PAGE_SIZE]
+				+ (offset % PAGE_SIZE);
 		int bytes = min_t(int, entry->length - offset,
-				PAGE_CACHE_SIZE - (offset % PAGE_CACHE_SIZE));
+				PAGE_SIZE - (offset % PAGE_SIZE));
 
 		if (bytes >= remaining) {
 			memcpy(buffer, buff, remaining);
@@ -341,6 +442,12 @@ int squashfs_read_metadata(struct super_block *sb, void *buffer,
 	struct squashfs_cache_entry *entry;
 
 	TRACE("Entered squashfs_read_metadata [%llx:%x]\n", *block, *offset);
+
+	if (unlikely(length < 0))
+		return -EIO;
+
+	if (unlikely(*offset < 0 || *offset >= SQUASHFS_METADATA_SIZE))
+		return -EIO;
 
 	while (length) {
 		entry = squashfs_cache_get(sb, msblk->block_cache, *block, 0);
@@ -407,9 +514,10 @@ struct squashfs_cache_entry *squashfs_get_datablock(struct super_block *sb,
  */
 void *squashfs_read_table(struct super_block *sb, u64 block, int length)
 {
-	int pages = (length + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
+	int pages = (length + PAGE_SIZE - 1) >> PAGE_SHIFT;
 	int i, res;
 	void *table, *buffer, **data;
+	struct squashfs_page_actor *actor;
 
 	table = buffer = kmalloc(length, GFP_KERNEL);
 	if (table == NULL)
@@ -421,19 +529,28 @@ void *squashfs_read_table(struct super_block *sb, u64 block, int length)
 		goto failed;
 	}
 
-	for (i = 0; i < pages; i++, buffer += PAGE_CACHE_SIZE)
+	actor = squashfs_page_actor_init(data, pages, length);
+	if (actor == NULL) {
+		res = -ENOMEM;
+		goto failed2;
+	}
+
+	for (i = 0; i < pages; i++, buffer += PAGE_SIZE)
 		data[i] = buffer;
 
-	res = squashfs_read_data(sb, data, block, length |
-		SQUASHFS_COMPRESSED_BIT_BLOCK, NULL, length, pages);
+	res = squashfs_read_data(sb, block, length |
+		SQUASHFS_COMPRESSED_BIT_BLOCK, NULL, actor);
 
 	kfree(data);
+	kfree(actor);
 
 	if (res < 0)
 		goto failed;
 
 	return table;
 
+failed2:
+	kfree(data);
 failed:
 	kfree(table);
 	return ERR_PTR(res);

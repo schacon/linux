@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  S390 version
  *    Copyright IBM Corp. 2002, 2006
@@ -7,24 +8,23 @@
 #ifndef _ASM_THREAD_INFO_H
 #define _ASM_THREAD_INFO_H
 
+#include <linux/bits.h>
+#include <vdso/page.h>
+
 /*
- * Size of kernel stack for each process
+ * General size of kernel stacks
  */
-#ifndef CONFIG_64BIT
-#define THREAD_ORDER 1
-#define ASYNC_ORDER  1
-#else /* CONFIG_64BIT */
-#define THREAD_ORDER 2
-#define ASYNC_ORDER  2
-#endif /* CONFIG_64BIT */
+#if defined(CONFIG_KASAN) || defined(CONFIG_KMSAN)
+#define THREAD_SIZE_ORDER 4
+#else
+#define THREAD_SIZE_ORDER 2
+#endif
+#define BOOT_STACK_SIZE (PAGE_SIZE << 2)
+#define THREAD_SIZE (PAGE_SIZE << THREAD_SIZE_ORDER)
 
-#define THREAD_SIZE (PAGE_SIZE << THREAD_ORDER)
-#define ASYNC_SIZE  (PAGE_SIZE << ASYNC_ORDER)
+#define STACK_INIT_OFFSET (THREAD_SIZE - STACK_FRAME_OVERHEAD - __PT_SIZE)
 
-#ifndef __ASSEMBLY__
-#include <asm/lowcore.h>
-#include <asm/page.h>
-#include <asm/processor.h>
+#ifndef __ASSEMBLER__
 
 /*
  * low level task data that entry.S needs immediate access to
@@ -33,17 +33,10 @@
  * - if the contents of this structure are changed, the assembly constants must also be changed
  */
 struct thread_info {
-	struct task_struct	*task;		/* main task structure */
-	struct exec_domain	*exec_domain;	/* execution domain */
 	unsigned long		flags;		/* low level flags */
-	unsigned long		sys_call_table;	/* System call table address */
+	unsigned long		syscall_work;	/* SYSCALL_WORK_ flags */
 	unsigned int		cpu;		/* current CPU */
-	int			preempt_count;	/* 0 => preemptable, <0 => BUG */
-	struct restart_block	restart_block;
-	unsigned int		system_call;
-	__u64			user_timer;
-	__u64			system_timer;
-	unsigned long		last_break;	/* last breaking-event-address. */
+	unsigned char		sie;		/* running in SIE context */
 };
 
 /*
@@ -51,66 +44,42 @@ struct thread_info {
  */
 #define INIT_THREAD_INFO(tsk)			\
 {						\
-	.task		= &tsk,			\
-	.exec_domain	= &default_exec_domain,	\
 	.flags		= 0,			\
-	.cpu		= 0,			\
-	.preempt_count	= INIT_PREEMPT_COUNT,	\
-	.restart_block	= {			\
-		.fn = do_no_restart_syscall,	\
-	},					\
 }
 
-#define init_thread_info	(init_thread_union.thread_info)
-#define init_stack		(init_thread_union.stack)
+struct task_struct;
 
-/* how to get the thread information struct from C */
-static inline struct thread_info *current_thread_info(void)
-{
-	return (struct thread_info *) S390_lowcore.thread_info;
-}
-
-#define THREAD_SIZE_ORDER THREAD_ORDER
+void arch_setup_new_exec(void);
+#define arch_setup_new_exec arch_setup_new_exec
 
 #endif
 
 /*
  * thread information flags bit numbers
+ *
+ * Tell the generic TIF infrastructure which special bits s390 supports
  */
-#define TIF_SYSCALL		0	/* inside a system call */
-#define TIF_NOTIFY_RESUME	1	/* callback before returning to user */
-#define TIF_SIGPENDING		2	/* signal pending */
-#define TIF_NEED_RESCHED	3	/* rescheduling necessary */
-#define TIF_PER_TRAP		6	/* deliver sigtrap on return to user */
-#define TIF_MCCK_PENDING	7	/* machine check handling is pending */
-#define TIF_SYSCALL_TRACE	8	/* syscall trace active */
-#define TIF_SYSCALL_AUDIT	9	/* syscall auditing active */
-#define TIF_SECCOMP		10	/* secure computing */
-#define TIF_SYSCALL_TRACEPOINT	11	/* syscall tracepoint instrumentation */
-#define TIF_31BIT		17	/* 32bit process */
-#define TIF_MEMDIE		18	/* is terminating due to OOM killer */
-#define TIF_RESTORE_SIGMASK	19	/* restore signal mask in do_signal() */
-#define TIF_SINGLE_STEP		20	/* This task is single stepped */
+#define HAVE_TIF_NEED_RESCHED_LAZY
+#define HAVE_TIF_RESTORE_SIGMASK
+#define HAVE_TIF_POLLING_NRFLAG
 
-#define _TIF_SYSCALL		(1<<TIF_SYSCALL)
-#define _TIF_NOTIFY_RESUME	(1<<TIF_NOTIFY_RESUME)
-#define _TIF_SIGPENDING		(1<<TIF_SIGPENDING)
-#define _TIF_NEED_RESCHED	(1<<TIF_NEED_RESCHED)
-#define _TIF_PER_TRAP		(1<<TIF_PER_TRAP)
-#define _TIF_MCCK_PENDING	(1<<TIF_MCCK_PENDING)
-#define _TIF_SYSCALL_TRACE	(1<<TIF_SYSCALL_TRACE)
-#define _TIF_SYSCALL_AUDIT	(1<<TIF_SYSCALL_AUDIT)
-#define _TIF_SECCOMP		(1<<TIF_SECCOMP)
-#define _TIF_SYSCALL_TRACEPOINT	(1<<TIF_SYSCALL_TRACEPOINT)
-#define _TIF_31BIT		(1<<TIF_31BIT)
-#define _TIF_SINGLE_STEP	(1<<TIF_SINGLE_STEP)
+#include <asm-generic/thread_info_tif.h>
 
-#ifdef CONFIG_64BIT
-#define is_32bit_task()		(test_thread_flag(TIF_31BIT))
-#else
-#define is_32bit_task()		(1)
-#endif
+/* Architecture specific bits */
+#define TIF_ASCE_PRIMARY	16	/* primary asce is kernel asce */
+#define TIF_GUARDED_STORAGE	17	/* load guarded storage control block */
+#define TIF_ISOLATE_BP_GUEST	18	/* Run KVM guests with isolated BP */
+#define TIF_PER_TRAP		19	/* Need to handle PER trap on exit to usermode */
+#define TIF_SINGLE_STEP		21	/* This task is single stepped */
+#define TIF_BLOCK_STEP		22	/* This task is block stepped */
+#define TIF_UPROBE_SINGLESTEP	23	/* This task is uprobe single stepped */
 
-#define PREEMPT_ACTIVE		0x4000000
+#define _TIF_ASCE_PRIMARY	BIT(TIF_ASCE_PRIMARY)
+#define _TIF_GUARDED_STORAGE	BIT(TIF_GUARDED_STORAGE)
+#define _TIF_ISOLATE_BP_GUEST	BIT(TIF_ISOLATE_BP_GUEST)
+#define _TIF_PER_TRAP		BIT(TIF_PER_TRAP)
+#define _TIF_SINGLE_STEP	BIT(TIF_SINGLE_STEP)
+#define _TIF_BLOCK_STEP		BIT(TIF_BLOCK_STEP)
+#define _TIF_UPROBE_SINGLESTEP	BIT(TIF_UPROBE_SINGLESTEP)
 
 #endif /* _ASM_THREAD_INFO_H */

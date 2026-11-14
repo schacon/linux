@@ -33,26 +33,68 @@
 #include <linux/export.h>
 #include <rdma/ib_marshall.h>
 
-void ib_copy_ah_attr_to_user(struct ib_uverbs_ah_attr *dst,
-			     struct ib_ah_attr *src)
+#define OPA_DEFAULT_GID_PREFIX cpu_to_be64(0xfe80000000000000ULL)
+static int rdma_ah_conv_opa_to_ib(struct ib_device *dev,
+				  struct rdma_ah_attr *ib,
+				  struct rdma_ah_attr *opa)
 {
-	memcpy(dst->grh.dgid, src->grh.dgid.raw, sizeof src->grh.dgid);
-	dst->grh.flow_label        = src->grh.flow_label;
-	dst->grh.sgid_index        = src->grh.sgid_index;
-	dst->grh.hop_limit         = src->grh.hop_limit;
-	dst->grh.traffic_class     = src->grh.traffic_class;
-	memset(&dst->grh.reserved, 0, sizeof(dst->grh.reserved));
-	dst->dlid 	    	   = src->dlid;
-	dst->sl   	    	   = src->sl;
-	dst->src_path_bits 	   = src->src_path_bits;
-	dst->static_rate   	   = src->static_rate;
-	dst->is_global             = src->ah_flags & IB_AH_GRH ? 1 : 0;
-	dst->port_num 	    	   = src->port_num;
+	struct ib_port_attr port_attr;
+	int ret = 0;
+
+	/* Do structure copy and the over-write fields */
+	*ib = *opa;
+
+	ib->type = RDMA_AH_ATTR_TYPE_IB;
+	rdma_ah_set_grh(ib, NULL, 0, 0, 1, 0);
+
+	if (ib_query_port(dev, opa->port_num, &port_attr)) {
+		/* Set to default subnet to indicate error */
+		rdma_ah_set_subnet_prefix(ib, OPA_DEFAULT_GID_PREFIX);
+		ret = -EINVAL;
+	} else {
+		rdma_ah_set_subnet_prefix(ib,
+					  cpu_to_be64(port_attr.subnet_prefix));
+	}
+	rdma_ah_set_interface_id(ib, OPA_MAKE_ID(rdma_ah_get_dlid(opa)));
+	return ret;
+}
+
+void ib_copy_ah_attr_to_user(struct ib_device *device,
+			     struct ib_uverbs_ah_attr *dst,
+			     struct rdma_ah_attr *ah_attr)
+{
+	struct rdma_ah_attr *src = ah_attr;
+	struct rdma_ah_attr conv_ah;
+
+	memset(&dst->grh, 0, sizeof(dst->grh));
+
+	if ((ah_attr->type == RDMA_AH_ATTR_TYPE_OPA) &&
+	    (rdma_ah_get_dlid(ah_attr) > be16_to_cpu(IB_LID_PERMISSIVE)) &&
+	    (!rdma_ah_conv_opa_to_ib(device, &conv_ah, ah_attr)))
+		src = &conv_ah;
+
+	dst->dlid		   = rdma_ah_get_dlid(src);
+	dst->sl			   = rdma_ah_get_sl(src);
+	dst->src_path_bits	   = rdma_ah_get_path_bits(src);
+	dst->static_rate	   = rdma_ah_get_static_rate(src);
+	dst->is_global             = rdma_ah_get_ah_flags(src) &
+					IB_AH_GRH ? 1 : 0;
+	if (dst->is_global) {
+		const struct ib_global_route *grh = rdma_ah_read_grh(src);
+
+		memcpy(dst->grh.dgid, grh->dgid.raw, sizeof(grh->dgid));
+		dst->grh.flow_label        = grh->flow_label;
+		dst->grh.sgid_index        = grh->sgid_index;
+		dst->grh.hop_limit         = grh->hop_limit;
+		dst->grh.traffic_class     = grh->traffic_class;
+	}
+	dst->port_num		   = rdma_ah_get_port_num(src);
 	dst->reserved 		   = 0;
 }
 EXPORT_SYMBOL(ib_copy_ah_attr_to_user);
 
-void ib_copy_qp_attr_to_user(struct ib_uverbs_qp_attr *dst,
+void ib_copy_qp_attr_to_user(struct ib_device *device,
+			     struct ib_uverbs_qp_attr *dst,
 			     struct ib_qp_attr *src)
 {
 	dst->qp_state	        = src->qp_state;
@@ -71,8 +113,8 @@ void ib_copy_qp_attr_to_user(struct ib_uverbs_qp_attr *dst,
 	dst->max_recv_sge	= src->cap.max_recv_sge;
 	dst->max_inline_data	= src->cap.max_inline_data;
 
-	ib_copy_ah_attr_to_user(&dst->ah_attr, &src->ah_attr);
-	ib_copy_ah_attr_to_user(&dst->alt_ah_attr, &src->alt_ah_attr);
+	ib_copy_ah_attr_to_user(device, &dst->ah_attr, &src->ah_attr);
+	ib_copy_ah_attr_to_user(device, &dst->alt_ah_attr, &src->alt_ah_attr);
 
 	dst->pkey_index		= src->pkey_index;
 	dst->alt_pkey_index	= src->alt_pkey_index;
@@ -91,15 +133,15 @@ void ib_copy_qp_attr_to_user(struct ib_uverbs_qp_attr *dst,
 }
 EXPORT_SYMBOL(ib_copy_qp_attr_to_user);
 
-void ib_copy_path_rec_to_user(struct ib_user_path_rec *dst,
-			      struct ib_sa_path_rec *src)
+static void __ib_copy_path_rec_to_user(struct ib_user_path_rec *dst,
+				       struct sa_path_rec *src)
 {
-	memcpy(dst->dgid, src->dgid.raw, sizeof src->dgid);
-	memcpy(dst->sgid, src->sgid.raw, sizeof src->sgid);
+	memcpy(dst->dgid, src->dgid.raw, sizeof(src->dgid));
+	memcpy(dst->sgid, src->sgid.raw, sizeof(src->sgid));
 
-	dst->dlid		= src->dlid;
-	dst->slid		= src->slid;
-	dst->raw_traffic	= src->raw_traffic;
+	dst->dlid		= htons(ntohl(sa_path_get_dlid(src)));
+	dst->slid		= htons(ntohl(sa_path_get_slid(src)));
+	dst->raw_traffic	= sa_path_get_raw_traffic(src);
 	dst->flow_label		= src->flow_label;
 	dst->hop_limit		= src->hop_limit;
 	dst->traffic_class	= src->traffic_class;
@@ -114,31 +156,18 @@ void ib_copy_path_rec_to_user(struct ib_user_path_rec *dst,
 	dst->packet_life_time	= src->packet_life_time;
 	dst->preference		= src->preference;
 	dst->packet_life_time_selector = src->packet_life_time_selector;
+}
+
+void ib_copy_path_rec_to_user(struct ib_user_path_rec *dst,
+			      struct sa_path_rec *src)
+{
+	struct sa_path_rec rec;
+
+	if (src->rec_type == SA_PATH_REC_TYPE_OPA) {
+		sa_convert_path_opa_to_ib(&rec, src);
+		__ib_copy_path_rec_to_user(dst, &rec);
+		return;
+	}
+	__ib_copy_path_rec_to_user(dst, src);
 }
 EXPORT_SYMBOL(ib_copy_path_rec_to_user);
-
-void ib_copy_path_rec_from_user(struct ib_sa_path_rec *dst,
-				struct ib_user_path_rec *src)
-{
-	memcpy(dst->dgid.raw, src->dgid, sizeof dst->dgid);
-	memcpy(dst->sgid.raw, src->sgid, sizeof dst->sgid);
-
-	dst->dlid		= src->dlid;
-	dst->slid		= src->slid;
-	dst->raw_traffic	= src->raw_traffic;
-	dst->flow_label		= src->flow_label;
-	dst->hop_limit		= src->hop_limit;
-	dst->traffic_class	= src->traffic_class;
-	dst->reversible		= src->reversible;
-	dst->numb_path		= src->numb_path;
-	dst->pkey		= src->pkey;
-	dst->sl			= src->sl;
-	dst->mtu_selector	= src->mtu_selector;
-	dst->mtu		= src->mtu;
-	dst->rate_selector	= src->rate_selector;
-	dst->rate		= src->rate;
-	dst->packet_life_time	= src->packet_life_time;
-	dst->preference		= src->preference;
-	dst->packet_life_time_selector = src->packet_life_time_selector;
-}
-EXPORT_SYMBOL(ib_copy_path_rec_from_user);

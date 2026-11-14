@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Kernel module to match AH parameters. */
 
 /* (C) 2001-2002 Andras Kis-Szabo <kisza@sch.bme.hu>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
@@ -27,13 +24,7 @@ MODULE_AUTHOR("Andras Kis-Szabo <kisza@sch.bme.hu>");
 static inline bool
 spi_match(u_int32_t min, u_int32_t max, u_int32_t spi, bool invert)
 {
-	bool r;
-
-	pr_debug("spi_match:%c 0x%x <= 0x%x <= 0x%x\n",
-		 invert ? '!' : ' ', min, spi, max);
-	r = (spi >= min && spi <= max) ^ invert;
-	pr_debug(" result %s\n", r ? "PASS" : "FAILED");
-	return r;
+	return (spi >= min && spi <= max) ^ invert;
 }
 
 static bool ah_mt6(const struct sk_buff *skb, struct xt_action_param *par)
@@ -58,27 +49,14 @@ static bool ah_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 		return false;
 	}
 
-	hdrlen = (ah->hdrlen + 2) << 2;
+	hdrlen = ipv6_authlen(ah);
+	if (skb->len - ptr < hdrlen) {
+		/* Packet smaller than its length field */
+		par->hotdrop = true;
+		return false;
+	}
 
-	pr_debug("IPv6 AH LEN %u %u ", hdrlen, ah->hdrlen);
-	pr_debug("RES %04X ", ah->reserved);
-	pr_debug("SPI %u %08X\n", ntohl(ah->spi), ntohl(ah->spi));
-
-	pr_debug("IPv6 AH spi %02X ",
-		 spi_match(ahinfo->spis[0], ahinfo->spis[1],
-			   ntohl(ah->spi),
-			   !!(ahinfo->invflags & IP6T_AH_INV_SPI)));
-	pr_debug("len %02X %04X %02X ",
-		 ahinfo->hdrlen, hdrlen,
-		 (!ahinfo->hdrlen ||
-		  (ahinfo->hdrlen == hdrlen) ^
-		  !!(ahinfo->invflags & IP6T_AH_INV_LEN)));
-	pr_debug("res %02X %04X %02X\n",
-		 ahinfo->hdrres, ah->reserved,
-		 !(ahinfo->hdrres && ah->reserved));
-
-	return (ah != NULL) &&
-		spi_match(ahinfo->spis[0], ahinfo->spis[1],
+	return spi_match(ahinfo->spis[0], ahinfo->spis[1],
 			  ntohl(ah->spi),
 			  !!(ahinfo->invflags & IP6T_AH_INV_SPI)) &&
 		(!ahinfo->hdrlen ||
@@ -92,7 +70,7 @@ static int ah_mt6_check(const struct xt_mtchk_param *par)
 	const struct ip6t_ah *ahinfo = par->matchinfo;
 
 	if (ahinfo->invflags & ~IP6T_AH_INV_MASK) {
-		pr_debug("unknown flags %X\n", ahinfo->invflags);
+		pr_info_ratelimited("unknown flags %X\n", ahinfo->invflags);
 		return -EINVAL;
 	}
 	return 0;

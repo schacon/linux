@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  * Linux driver for digital TV devices equipped with B2C2 FlexcopII(b)/III
  * flexcop.c - main module part
- * Copyright (C) 2004-9 Patrick Boettcher <patrick.boettcher@desy.de>
+ * Copyright (C) 2004-9 Patrick Boettcher <patrick.boettcher@posteo.de>
  * based on skystar2-driver Copyright (C) 2003 Vadim Catana, skystar@moldova.cc
  *
  * Acknowledgements:
@@ -15,26 +16,12 @@
  *   Uwe Bugla, uwe.bugla at gmx.de (doing tests, restyling code, writing docu)
  *   Niklas Peinecke, peinecke at gdv.uni-hannover.de (hardware pid/mac
  *               filtering)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public License
- * as published by the Free Software Foundation; either version 2.1
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
 
 #include "flexcop.h"
 
 #define DRIVER_NAME "B2C2 FlexcopII/II(b)/III digital TV receiver chip"
-#define DRIVER_AUTHOR "Patrick Boettcher <patrick.boettcher@desy.de"
+#define DRIVER_AUTHOR "Patrick Boettcher <patrick.boettcher@posteo.de"
 
 #ifdef CONFIG_DVB_B2C2_FLEXCOP_DEBUG
 #define DEBSTATUS ""
@@ -46,8 +33,7 @@ int b2c2_flexcop_debug;
 EXPORT_SYMBOL_GPL(b2c2_flexcop_debug);
 module_param_named(debug, b2c2_flexcop_debug,  int, 0644);
 MODULE_PARM_DESC(debug,
-		"set debug level (1=info,2=tuner,4=i2c,8=ts,"
-		"16=sram,32=reg (|-able))."
+		"set debug level (1=info,2=tuner,4=i2c,8=ts,16=sram,32=reg,64=i2cdump (|-able))."
 		DEBSTATUS);
 #undef DEBSTATUS
 
@@ -184,7 +170,7 @@ static void flexcop_reset(struct flexcop_device *fc)
 	flexcop_ibi_value v210, v204;
 
 	/* reset the flexcop itself */
-	fc->write_ibi_reg(fc,ctrl_208,ibi_zero);
+	fc->write_ibi_reg(fc, ctrl_208, ibi_zero);
 
 	v210.raw = 0;
 	v210.sw_reset_210.reset_block_000 = 1;
@@ -197,17 +183,17 @@ static void flexcop_reset(struct flexcop_device *fc)
 	v210.sw_reset_210.reset_block_700 = 1;
 	v210.sw_reset_210.Block_reset_enable = 0xb2;
 	v210.sw_reset_210.Special_controls = 0xc259;
-	fc->write_ibi_reg(fc,sw_reset_210,v210);
+	fc->write_ibi_reg(fc, sw_reset_210, v210);
 	msleep(1);
 
 	/* reset the periphical devices */
 
-	v204 = fc->read_ibi_reg(fc,misc_204);
+	v204 = fc->read_ibi_reg(fc, misc_204);
 	v204.misc_204.Per_reset_sig = 0;
-	fc->write_ibi_reg(fc,misc_204,v204);
+	fc->write_ibi_reg(fc, misc_204, v204);
 	msleep(1);
 	v204.misc_204.Per_reset_sig = 1;
-	fc->write_ibi_reg(fc,misc_204,v204);
+	fc->write_ibi_reg(fc, misc_204, v204);
 }
 
 void flexcop_reset_block_300(struct flexcop_device *fc)
@@ -216,20 +202,19 @@ void flexcop_reset_block_300(struct flexcop_device *fc)
 			  v210 = fc->read_ibi_reg(fc, sw_reset_210);
 
 	deb_rdump("208: %08x, 210: %08x\n", v208_save.raw, v210.raw);
-	fc->write_ibi_reg(fc,ctrl_208,ibi_zero);
+	fc->write_ibi_reg(fc, ctrl_208, ibi_zero);
 
 	v210.sw_reset_210.reset_block_300 = 1;
 	v210.sw_reset_210.Block_reset_enable = 0xb2;
 
-	fc->write_ibi_reg(fc,sw_reset_210,v210);
-	fc->write_ibi_reg(fc,ctrl_208,v208_save);
+	fc->write_ibi_reg(fc, sw_reset_210, v210);
+	fc->write_ibi_reg(fc, ctrl_208, v208_save);
 }
 
 struct flexcop_device *flexcop_device_kmalloc(size_t bus_specific_len)
 {
 	void *bus;
-	struct flexcop_device *fc = kzalloc(sizeof(struct flexcop_device),
-				GFP_KERNEL);
+	struct flexcop_device *fc = kzalloc_obj(struct flexcop_device);
 	if (!fc) {
 		err("no memory");
 		return NULL;
@@ -280,8 +265,8 @@ int flexcop_device_initialize(struct flexcop_device *fc)
 	if (fc->get_mac_addr(fc, 0) == 0) {
 		u8 *b = fc->dvb_adapter.proposed_mac;
 		info("MAC address = %pM", b);
-		flexcop_set_mac_filter(fc,b);
-		flexcop_mac_filter_ctrl(fc,1);
+		flexcop_set_mac_filter(fc, b);
+		flexcop_mac_filter_ctrl(fc, 1);
 	} else
 		warn("reading of MAC address failed.\n");
 
@@ -289,7 +274,7 @@ int flexcop_device_initialize(struct flexcop_device *fc)
 	if (ret)
 		goto error;
 
-	flexcop_device_name(fc,"initialization of","complete");
+	flexcop_device_name(fc, "initialization of", "complete");
 	return 0;
 
 error:
@@ -305,20 +290,6 @@ void flexcop_device_exit(struct flexcop_device *fc)
 	flexcop_dvb_exit(fc);
 }
 EXPORT_SYMBOL(flexcop_device_exit);
-
-static int flexcop_module_init(void)
-{
-	info(DRIVER_NAME " loaded successfully");
-	return 0;
-}
-
-static void flexcop_module_cleanup(void)
-{
-	info(DRIVER_NAME " unloaded successfully");
-}
-
-module_init(flexcop_module_init);
-module_exit(flexcop_module_cleanup);
 
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_NAME);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * PC Watchdog Driver
  * by Ken Hollis (khollis@bitgate.com)
@@ -61,7 +62,7 @@
 #include <linux/delay.h>	/* For mdelay function */
 #include <linux/timer.h>	/* For timer related operations */
 #include <linux/jiffies.h>	/* For jiffies stuff */
-#include <linux/miscdevice.h>	/* For MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR) */
+#include <linux/miscdevice.h>	/* For struct miscdevice */
 #include <linux/watchdog.h>	/* For the watchdog specific items */
 #include <linux/reboot.h>	/* For kernel_power_off() */
 #include <linux/init.h>		/* For __init/__exit/... */
@@ -71,6 +72,7 @@
 #include <linux/spinlock.h>	/* For spin_lock/spin_unlock/... */
 #include <linux/uaccess.h>	/* For copy_to_user/put_user/... */
 #include <linux/io.h>		/* For inb/outb/... */
+#include <linux/stringify.h>	/* For __stringify */
 
 /* Module and version information */
 #define WATCHDOG_VERSION "1.20"
@@ -202,13 +204,13 @@ static int heartbeat = WATCHDOG_HEARTBEAT;
 module_param(heartbeat, int, 0);
 MODULE_PARM_DESC(heartbeat, "Watchdog heartbeat in seconds. "
 	"(2 <= heartbeat <= 7200 or 0=delay-time from dip-switches, default="
-				__MODULE_STRING(WATCHDOG_HEARTBEAT) ")");
+				__stringify(WATCHDOG_HEARTBEAT) ")");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 		"Watchdog cannot be stopped once started (default="
-				__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+				__stringify(WATCHDOG_NOWAYOUT) ")");
 
 /*
  *	Internal functions
@@ -367,7 +369,7 @@ static void pcwd_show_card_info(void)
 		pr_info("No previous trip detected - Cold boot or reset\n");
 }
 
-static void pcwd_timer_ping(unsigned long data)
+static void pcwd_timer_ping(struct timer_list *unused)
 {
 	int wdrst_stat;
 
@@ -431,7 +433,7 @@ static int pcwd_stop(void)
 	int stat_reg;
 
 	/* Stop the timer */
-	del_timer(&pcwd_private.timer);
+	timer_delete(&pcwd_private.timer);
 
 	/*  Disable the board  */
 	if (pcwd_private.revision == PCWD_REVISION_C) {
@@ -650,7 +652,7 @@ static long pcwd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return -EINVAL;
 
 		pcwd_keepalive();
-		/* Fall */
+		fallthrough;
 
 	case WDIOC_GETTIMEOUT:
 		return put_user(heartbeat, argp);
@@ -695,7 +697,7 @@ static int pcwd_open(struct inode *inode, struct file *file)
 	/* Activate */
 	pcwd_start();
 	pcwd_keepalive();
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int pcwd_close(struct inode *inode, struct file *file)
@@ -734,7 +736,7 @@ static int pcwd_temp_open(struct inode *inode, struct file *file)
 	if (!pcwd_private.supports_temp)
 		return -ENODEV;
 
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int pcwd_temp_close(struct inode *inode, struct file *file)
@@ -748,9 +750,9 @@ static int pcwd_temp_close(struct inode *inode, struct file *file)
 
 static const struct file_operations pcwd_fops = {
 	.owner		= THIS_MODULE,
-	.llseek		= no_llseek,
 	.write		= pcwd_write,
 	.unlocked_ioctl	= pcwd_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= pcwd_open,
 	.release	= pcwd_close,
 };
@@ -763,7 +765,6 @@ static struct miscdevice pcwd_miscdev = {
 
 static const struct file_operations pcwd_temp_fops = {
 	.owner		= THIS_MODULE,
-	.llseek		= no_llseek,
 	.read		= pcwd_temp_read,
 	.open		= pcwd_temp_open,
 	.release	= pcwd_temp_close,
@@ -833,7 +834,7 @@ static int pcwd_isa_match(struct device *dev, unsigned int id)
 			port0 = inb_p(base_addr);
 			port1 = inb_p(base_addr + 1);
 
-			/* Has either hearbeat bit changed?  */
+			/* Has either heartbeat bit changed?  */
 			if ((port0 ^ last_port0) & WD_HRTBT ||
 			    (port1 ^ last_port1) & WD_REVC_HRBT) {
 				retval = 1;
@@ -893,7 +894,7 @@ static int pcwd_isa_probe(struct device *dev, unsigned int id)
 	/* clear the "card caused reboot" flag */
 	pcwd_clear_status();
 
-	setup_timer(&pcwd_private.timer, pcwd_timer_ping, 0);
+	timer_setup(&pcwd_private.timer, pcwd_timer_ping, 0);
 
 	/*  Disable the board  */
 	pcwd_stop();
@@ -949,13 +950,10 @@ error_request_region:
 	return ret;
 }
 
-static int pcwd_isa_remove(struct device *dev, unsigned int id)
+static void pcwd_isa_remove(struct device *dev, unsigned int id)
 {
 	if (debug >= DEBUG)
 		pr_debug("pcwd_isa_remove id=%d\n", id);
-
-	if (!pcwd_private.io_addr)
-		return 1;
 
 	/*  Disable the board  */
 	if (!nowayout)
@@ -969,8 +967,6 @@ static int pcwd_isa_remove(struct device *dev, unsigned int id)
 			(pcwd_private.revision == PCWD_REVISION_A) ? 2 : 4);
 	pcwd_private.io_addr = 0x0000;
 	cards_found--;
-
-	return 0;
 }
 
 static void pcwd_isa_shutdown(struct device *dev, unsigned int id)
@@ -992,24 +988,10 @@ static struct isa_driver pcwd_isa_driver = {
 	},
 };
 
-static int __init pcwd_init_module(void)
-{
-	return isa_register_driver(&pcwd_isa_driver, PCWD_ISA_NR_CARDS);
-}
-
-static void __exit pcwd_cleanup_module(void)
-{
-	isa_unregister_driver(&pcwd_isa_driver);
-	pr_info("Watchdog Module Unloaded\n");
-}
-
-module_init(pcwd_init_module);
-module_exit(pcwd_cleanup_module);
+module_isa_driver(pcwd_isa_driver, PCWD_ISA_NR_CARDS);
 
 MODULE_AUTHOR("Ken Hollis <kenji@bitgate.com>, "
 		"Wim Van Sebroeck <wim@iguana.be>");
 MODULE_DESCRIPTION("Berkshire ISA-PC Watchdog driver");
 MODULE_VERSION(WATCHDOG_VERSION);
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);
-MODULE_ALIAS_MISCDEV(TEMP_MINOR);

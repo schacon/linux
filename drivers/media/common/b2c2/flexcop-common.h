@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Linux driver for digital TV devices equipped with B2C2 FlexcopII(b)/III
  * flexcop-common.h - common header file for device-specific source files
@@ -12,11 +13,10 @@
 
 #include "flexcop-reg.h"
 
-#include "dmxdev.h"
-#include "dvb_demux.h"
-#include "dvb_filter.h"
-#include "dvb_net.h"
-#include "dvb_frontend.h"
+#include <media/dmxdev.h>
+#include <media/dvb_demux.h>
+#include <media/dvb_net.h>
+#include <media/dvb_frontend.h>
 
 #define FC_MAX_FEED 256
 
@@ -91,6 +91,7 @@ struct flexcop_device {
 	int feedcount;
 	int pid_filtering;
 	int fullts_streaming_state;
+	int skip_6_hw_pid_filter;
 
 	/* bus specific callbacks */
 	flexcop_ibi_value(*read_ibi_reg) (struct flexcop_device *,
@@ -123,8 +124,6 @@ int flexcop_dma_allocate(struct pci_dev *pdev,
 void flexcop_dma_free(struct flexcop_dma *dma);
 
 int flexcop_dma_control_timer_irq(struct flexcop_device *fc,
-		flexcop_dma_index_t no, int onoff);
-int flexcop_dma_control_size_irq(struct flexcop_device *fc,
 		flexcop_dma_index_t no, int onoff);
 int flexcop_dma_config(struct flexcop_device *fc, struct flexcop_dma *dma,
 		flexcop_dma_index_t dma_idx);
@@ -169,8 +168,6 @@ int flexcop_sram_init(struct flexcop_device *fc);
 void flexcop_determine_revision(struct flexcop_device *fc);
 void flexcop_device_name(struct flexcop_device *fc,
 		const char *prefix, const char *suffix);
-void flexcop_dump_reg(struct flexcop_device *fc,
-		flexcop_ibi_register reg, int num);
 
 /* from flexcop-hw-filter.c */
 int flexcop_pid_feed_control(struct flexcop_device *fc,

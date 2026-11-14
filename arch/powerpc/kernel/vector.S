@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#include <linux/export.h>
+#include <linux/linkage.h>
 #include <asm/processor.h>
 #include <asm/ppc_asm.h>
 #include <asm/reg.h>
@@ -6,108 +9,59 @@
 #include <asm/thread_info.h>
 #include <asm/page.h>
 #include <asm/ptrace.h>
-
-#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
-/*
- * Wrapper to call load_up_altivec from C.
- * void do_load_up_altivec(struct pt_regs *regs);
- */
-_GLOBAL(do_load_up_altivec)
-	mflr	r0
-	std	r0, 16(r1)
-	stdu	r1, -112(r1)
-
-	subi	r6, r3, STACK_FRAME_OVERHEAD
-	/* load_up_altivec expects r12=MSR, r13=PACA, and returns
-	 * with r12 = new MSR.
-	 */
-	ld	r12,_MSR(r6)
-	GET_PACA(r13)
-	bl	load_up_altivec
-	std	r12,_MSR(r6)
-
-	ld	r0, 112+16(r1)
-	addi	r1, r1, 112
-	mtlr	r0
-	blr
-
-/* void do_load_up_transact_altivec(struct thread_struct *thread)
- *
- * This is similar to load_up_altivec but for the transactional version of the
- * vector regs.  It doesn't mess with the task MSR or valid flags.
- * Furthermore, VEC laziness is not supported with TM currently.
- */
-_GLOBAL(do_load_up_transact_altivec)
-	mfmsr	r6
-	oris	r5,r6,MSR_VEC@h
-	MTMSRD(r5)
-	isync
-
-	li	r4,1
-	stw	r4,THREAD_USED_VR(r3)
-
-	li	r10,THREAD_TRANSACT_VSCR
-	lvx	vr0,r10,r3
-	mtvscr	vr0
-	REST_32VRS_TRANSACT(0,r4,r3)
-
-	/* Disable VEC again. */
-	MTMSRD(r6)
-	isync
-
-	blr
-#endif
+#include <asm/asm-compat.h>
 
 /*
- * load_up_altivec(unused, unused, tsk)
+ * Load state from memory into VMX registers including VSCR.
+ * Assumes the caller has enabled VMX in the MSR.
+ */
+_GLOBAL(load_vr_state)
+	li	r4,VRSTATE_VSCR
+	lvx	v0,r4,r3
+	mtvscr	v0
+	REST_32VRS(0,r4,r3)
+	blr
+EXPORT_SYMBOL(load_vr_state)
+_ASM_NOKPROBE_SYMBOL(load_vr_state); /* used by restore_math */
+
+/*
+ * Store VMX state into memory, including VSCR.
+ * Assumes the caller has enabled VMX in the MSR.
+ */
+_GLOBAL(store_vr_state)
+	SAVE_32VRS(0, r4, r3)
+	mfvscr	v0
+	li	r4, VRSTATE_VSCR
+	stvx	v0, r4, r3
+	lvx	v0, 0, r3
+	blr
+EXPORT_SYMBOL(store_vr_state)
+
+/*
  * Disable VMX for the task which had it previously,
  * and save its vector registers in its thread_struct.
  * Enables the VMX for use in the kernel on return.
  * On SMP we know the VMX is free, since we give it up every
  * switch (ie, no lazy save of the vector registers).
+ *
+ * Note that on 32-bit this can only use registers that will be
+ * restored by fast_exception_return, i.e. r3 - r6, r10 and r11.
  */
 _GLOBAL(load_up_altivec)
 	mfmsr	r5			/* grab the current MSR */
+#ifdef CONFIG_PPC_BOOK3S_64
+	/* interrupt doesn't set MSR[RI] and HPT can fault on current access */
+	ori	r5,r5,MSR_RI
+#endif
 	oris	r5,r5,MSR_VEC@h
 	MTMSRD(r5)			/* enable use of AltiVec now */
 	isync
 
-/*
- * For SMP, we don't do lazy VMX switching because it just gets too
- * horrendously complex, especially when a task switches from one CPU
- * to another.  Instead we call giveup_altvec in switch_to.
- * VRSAVE isn't dealt with here, that is done in the normal context
- * switch code. Note that we could rely on vrsave value to eventually
- * avoid saving all of the VREGs here...
- */
-#ifndef CONFIG_SMP
-	LOAD_REG_ADDRBASE(r3, last_task_used_altivec)
-	toreal(r3)
-	PPC_LL	r4,ADDROFF(last_task_used_altivec)(r3)
-	PPC_LCMPI	0,r4,0
-	beq	1f
-
-	/* Save VMX state to last_task_used_altivec's THREAD struct */
-	toreal(r4)
-	addi	r4,r4,THREAD
-	SAVE_32VRS(0,r5,r4)
-	mfvscr	vr0
-	li	r10,THREAD_VSCR
-	stvx	vr0,r10,r4
-	/* Disable VMX for last_task_used_altivec */
-	PPC_LL	r5,PT_REGS(r4)
-	toreal(r5)
-	PPC_LL	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-	lis	r10,MSR_VEC@h
-	andc	r4,r4,r10
-	PPC_STL	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#endif /* CONFIG_SMP */
-
-	/* Hack: if we get an altivec unavailable trap with VRSAVE
-	 * set to all zeros, we assume this is a broken application
-	 * that fails to set it properly, and thus we switch it to
-	 * all 1's
+	/*
+	 * While userspace in general ignores VRSAVE, glibc uses it as a boolean
+	 * to optimise userspace context save/restore. Whenever we take an
+	 * altivec unavailable exception we must set VRSAVE to something non
+	 * zero. Set it to all 1s. See also the programming note in the ISA.
 	 */
 	mfspr	r4,SPRN_VRSAVE
 	cmpwi	0,r4,0
@@ -117,79 +71,46 @@ _GLOBAL(load_up_altivec)
 1:
 	/* enable use of VMX after return */
 #ifdef CONFIG_PPC32
-	mfspr	r5,SPRN_SPRG_THREAD		/* current task's THREAD (phys) */
+	addi	r5,r2,THREAD
 	oris	r9,r9,MSR_VEC@h
 #else
 	ld	r4,PACACURRENT(r13)
 	addi	r5,r4,THREAD		/* Get THREAD */
 	oris	r12,r12,MSR_VEC@h
 	std	r12,_MSR(r1)
+#ifdef CONFIG_PPC_BOOK3S_64
+	li	r4,0
+	stb	r4,PACASRR_VALID(r13)
+#endif
 #endif
 	li	r4,1
-	li	r10,THREAD_VSCR
+	stb	r4,THREAD_LOAD_VEC(r5)
+	addi	r6,r5,THREAD_VRSTATE
+	li	r10,VRSTATE_VSCR
 	stw	r4,THREAD_USED_VR(r5)
-	lvx	vr0,r10,r5
-	mtvscr	vr0
-	REST_32VRS(0,r4,r5)
-#ifndef CONFIG_SMP
-	/* Update last_task_used_altivec to 'current' */
-	subi	r4,r5,THREAD		/* Back to 'current' */
-	fromreal(r4)
-	PPC_STL	r4,ADDROFF(last_task_used_altivec)(r3)
-#endif /* CONFIG_SMP */
+	lvx	v0,r10,r6
+	mtvscr	v0
+	REST_32VRS(0,r4,r6)
 	/* restore registers and return */
 	blr
-
-_GLOBAL(giveup_altivec_notask)
-	mfmsr	r3
-	andis.	r4,r3,MSR_VEC@h
-	bnelr				/* Already enabled? */
-	oris	r3,r3,MSR_VEC@h
-	SYNC
-	MTMSRD(r3)			/* enable use of VMX now */
-	isync
-	blr
+_ASM_NOKPROBE_SYMBOL(load_up_altivec)
 
 /*
- * giveup_altivec(tsk)
- * Disable VMX for the task given as the argument,
- * and save the vector registers in its thread_struct.
- * Enables the VMX for use in the kernel on return.
+ * save_altivec(tsk)
+ * Save the vector registers to its thread_struct
  */
-_GLOBAL(giveup_altivec)
-	mfmsr	r5
-	oris	r5,r5,MSR_VEC@h
-	SYNC
-	MTMSRD(r5)			/* enable use of VMX now */
-	isync
-	PPC_LCMPI	0,r3,0
-	beqlr				/* if no previous owner, done */
+_GLOBAL(save_altivec)
 	addi	r3,r3,THREAD		/* want THREAD of task */
+	PPC_LL	r7,THREAD_VRSAVEAREA(r3)
 	PPC_LL	r5,PT_REGS(r3)
-	PPC_LCMPI	0,r5,0
-	SAVE_32VRS(0,r4,r3)
-	mfvscr	vr0
-	li	r4,THREAD_VSCR
-	stvx	vr0,r4,r3
-	beq	1f
-	PPC_LL	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-#ifdef CONFIG_VSX
-BEGIN_FTR_SECTION
-	lis	r3,(MSR_VEC|MSR_VSX)@h
-FTR_SECTION_ELSE
-	lis	r3,MSR_VEC@h
-ALT_FTR_SECTION_END_IFSET(CPU_FTR_VSX)
-#else
-	lis	r3,MSR_VEC@h
-#endif
-	andc	r4,r4,r3		/* disable FP for previous task */
-	PPC_STL	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#ifndef CONFIG_SMP
-	li	r5,0
-	LOAD_REG_ADDRBASE(r4,last_task_used_altivec)
-	PPC_STL	r5,ADDROFF(last_task_used_altivec)(r4)
-#endif /* CONFIG_SMP */
+	PPC_LCMPI	0,r7,0
+	bne	2f
+	addi	r7,r3,THREAD_VRSTATE
+2:	SAVE_32VRS(0,r4,r7)
+	mfvscr	v0
+	li	r4,VRSTATE_VSCR
+	stvx	v0,r4,r7
+	lvx	v0,0,r7
 	blr
 
 #ifdef CONFIG_VSX
@@ -212,20 +133,12 @@ _GLOBAL(load_up_vsx)
 	andis.	r5,r12,MSR_VEC@h
 	beql+	load_up_altivec		/* skip if already loaded */
 
-#ifndef CONFIG_SMP
-	ld	r3,last_task_used_vsx@got(r2)
-	ld	r4,0(r3)
-	cmpdi	0,r4,0
-	beq	1f
-	/* Disable VSX for last_task_used_vsx */
-	addi	r4,r4,THREAD
-	ld	r5,PT_REGS(r4)
-	ld	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-	lis	r6,MSR_VSX@h
-	andc	r6,r4,r6
-	std	r6,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#endif /* CONFIG_SMP */
+#ifdef CONFIG_PPC_BOOK3S_64
+	/* interrupt doesn't set MSR[RI] and HPT can fault on current access */
+	li	r5,MSR_RI
+	mtmsrd	r5,1
+#endif
+
 	ld	r4,PACACURRENT(r13)
 	addi	r4,r4,THREAD		/* Get THREAD */
 	li	r6,1
@@ -233,42 +146,9 @@ _GLOBAL(load_up_vsx)
 	/* enable use of VSX after return */
 	oris	r12,r12,MSR_VSX@h
 	std	r12,_MSR(r1)
-#ifndef CONFIG_SMP
-	/* Update last_task_used_vsx to 'current' */
-	ld	r4,PACACURRENT(r13)
-	std	r4,0(r3)
-#endif /* CONFIG_SMP */
-	b	fast_exception_return
-
-/*
- * __giveup_vsx(tsk)
- * Disable VSX for the task given as the argument.
- * Does NOT save vsx registers.
- * Enables the VSX for use in the kernel on return.
- */
-_GLOBAL(__giveup_vsx)
-	mfmsr	r5
-	oris	r5,r5,MSR_VSX@h
-	mtmsrd	r5			/* enable use of VSX now */
-	isync
-
-	cmpdi	0,r3,0
-	beqlr-				/* if no previous owner, done */
-	addi	r3,r3,THREAD		/* want THREAD of task */
-	ld	r5,PT_REGS(r3)
-	cmpdi	0,r5,0
-	beq	1f
-	ld	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-	lis	r3,MSR_VSX@h
-	andc	r4,r4,r3		/* disable VSX for previous task */
-	std	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#ifndef CONFIG_SMP
-	li	r5,0
-	ld	r4,last_task_used_vsx@got(r2)
-	std	r5,0(r4)
-#endif /* CONFIG_SMP */
-	blr
+	li	r4,0
+	stb	r4,PACASRR_VALID(r13)
+	b	fast_interrupt_return_srr
 
 #endif /* CONFIG_VSX */
 
@@ -278,8 +158,8 @@ _GLOBAL(__giveup_vsx)
  * usage of floating-point registers.  These routines must be called
  * with preempt disabled.
  */
-#ifdef CONFIG_PPC32
 	.data
+#ifdef CONFIG_PPC32
 fpzero:
 	.long	0
 fpone:
@@ -292,24 +172,29 @@ fphalf:
 	lfs	fr,name@l(r11)
 #else
 
-	.section ".toc","aw"
 fpzero:
-	.tc	FD_0_0[TC],0
+	.quad	0
 fpone:
-	.tc	FD_3ff00000_0[TC],0x3ff0000000000000	/* 1.0 */
+	.quad	0x3ff0000000000000	/* 1.0 */
 fphalf:
-	.tc	FD_3fe00000_0[TC],0x3fe0000000000000	/* 0.5 */
+	.quad	0x3fe0000000000000	/* 0.5 */
 
-#define LDCONST(fr, name)	\
-	lfd	fr,name@toc(r2)
+#ifdef CONFIG_PPC_KERNEL_PCREL
+#define LDCONST(fr, name)		\
+	pla	r11,name@pcrel;		\
+	lfd	fr,0(r11)
+#else
+#define LDCONST(fr, name)		\
+	addis	r11,r2,name@toc@ha;	\
+	lfd	fr,name@toc@l(r11)
 #endif
-
+#endif
 	.text
 /*
  * Internal routine to enable floating point and set FPSCR to 0.
  * Don't call it from C; it doesn't use the normal calling convention.
  */
-fpenable:
+SYM_FUNC_START_LOCAL(fpenable)
 #ifdef CONFIG_PPC32
 	stwu	r1,-64(r1)
 #else
@@ -326,6 +211,7 @@ fpenable:
 	mffs	fr31
 	MTFSF_L(fr1)
 	blr
+SYM_FUNC_END(fpenable)
 
 fpdisable:
 	mtlr	r12

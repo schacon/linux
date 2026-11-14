@@ -1,11 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file provides /sys/class/ieee80211/<wiphy name>/
  * and some default attributes.
  *
  * Copyright 2005-2006	Jiri Benc <jbenc@suse.cz>
  * Copyright 2006	Johannes Berg <johannes@sipsolutions.net>
- *
- * This file is GPLv2 as found in COPYING.
+ * Copyright (C) 2020-2021, 2023-2024, 2026 Intel Corporation
  */
 
 #include <linux/device.h>
@@ -30,7 +30,8 @@ static ssize_t name ## _show(struct device *dev,			\
 			      char *buf)				\
 {									\
 	return sprintf(buf, fmt "\n", dev_to_rdev(dev)->member);	\
-}
+}									\
+static DEVICE_ATTR_RO(name)
 
 SHOW_FMT(index, "%d", wiphy_idx);
 SHOW_FMT(macaddress, "%pM", wiphy.perm_addr);
@@ -38,37 +39,41 @@ SHOW_FMT(address_mask, "%pM", wiphy.addr_mask);
 
 static ssize_t name_show(struct device *dev,
 			 struct device_attribute *attr,
-			 char *buf) {
+			 char *buf)
+{
 	struct wiphy *wiphy = &dev_to_rdev(dev)->wiphy;
-	return sprintf(buf, "%s\n", dev_name(&wiphy->dev));
-}
 
+	return sprintf(buf, "%s\n", wiphy_name(wiphy));
+}
+static DEVICE_ATTR_RO(name);
 
 static ssize_t addresses_show(struct device *dev,
 			      struct device_attribute *attr,
 			      char *buf)
 {
 	struct wiphy *wiphy = &dev_to_rdev(dev)->wiphy;
-	char *start = buf;
-	int i;
+	int i, len = 0;
 
 	if (!wiphy->addresses)
-		return sprintf(buf, "%pM\n", wiphy->perm_addr);
+		return sysfs_emit(buf, "%pM\n", wiphy->perm_addr);
 
 	for (i = 0; i < wiphy->n_addresses; i++)
-		buf += sprintf(buf, "%pM\n", &wiphy->addresses[i].addr);
+		len += sysfs_emit_at(buf, len, "%pM\n",
+				     wiphy->addresses[i].addr);
 
-	return buf - start;
+	return len;
 }
+static DEVICE_ATTR_RO(addresses);
 
-static struct device_attribute ieee80211_dev_attrs[] = {
-	__ATTR_RO(index),
-	__ATTR_RO(macaddress),
-	__ATTR_RO(address_mask),
-	__ATTR_RO(addresses),
-	__ATTR_RO(name),
-	{}
+static struct attribute *ieee80211_attrs[] = {
+	&dev_attr_index.attr,
+	&dev_attr_macaddress.attr,
+	&dev_attr_address_mask.attr,
+	&dev_attr_addresses.attr,
+	&dev_attr_name.attr,
+	NULL,
 };
+ATTRIBUTE_GROUPS(ieee80211);
 
 static void wiphy_dev_release(struct device *dev)
 {
@@ -77,39 +82,49 @@ static void wiphy_dev_release(struct device *dev)
 	cfg80211_dev_free(rdev);
 }
 
-static int wiphy_uevent(struct device *dev, struct kobj_uevent_env *env)
-{
-	/* TODO, we probably need stuff here */
-	return 0;
-}
-
+#ifdef CONFIG_PM_SLEEP
 static void cfg80211_leave_all(struct cfg80211_registered_device *rdev)
 {
 	struct wireless_dev *wdev;
 
-	list_for_each_entry(wdev, &rdev->wdev_list, list)
-		cfg80211_leave(rdev, wdev);
+	list_for_each_entry(wdev, &rdev->wiphy.wdev_list, list)
+		cfg80211_leave(rdev, wdev, -1);
 }
 
-static int wiphy_suspend(struct device *dev, pm_message_t state)
+static int wiphy_suspend(struct device *dev)
 {
 	struct cfg80211_registered_device *rdev = dev_to_rdev(dev);
 	int ret = 0;
 
-	rdev->suspend_at = get_seconds();
+	rdev->suspend_at = ktime_get_boottime_seconds();
 
 	rtnl_lock();
-	if (rdev->wiphy.registered) {
-		if (!rdev->wowlan)
-			cfg80211_leave_all(rdev);
-		if (rdev->ops->suspend)
-			ret = rdev_suspend(rdev, rdev->wowlan);
-		if (ret == 1) {
-			/* Driver refuse to configure wowlan */
-			cfg80211_leave_all(rdev);
-			ret = rdev_suspend(rdev, NULL);
+	if (!rdev->wiphy.registered)
+		goto out_unlock_rtnl;
+
+	if (rdev->wiphy.wowlan_config) {
+		scoped_guard(wiphy, &rdev->wiphy) {
+			cfg80211_process_wiphy_works(rdev, NULL);
+			if (rdev->ops->suspend)
+				ret = rdev_suspend(rdev,
+						   rdev->wiphy.wowlan_config);
+			if (ret <= 0)
+				goto out_unlock_rtnl;
 		}
 	}
+
+	/* Driver refused to configure wowlan (ret = 1) or no wowlan */
+
+	cfg80211_leave_all(rdev);
+	scoped_guard(wiphy, &rdev->wiphy) {
+		cfg80211_process_rdev_events(rdev);
+		cfg80211_process_wiphy_works(rdev, NULL);
+		if (rdev->ops->suspend)
+			ret = rdev_suspend(rdev, NULL);
+	}
+out_unlock_rtnl:
+	if (ret == 0)
+		rdev->suspended = true;
 	rtnl_unlock();
 
 	return ret;
@@ -121,33 +136,42 @@ static int wiphy_resume(struct device *dev)
 	int ret = 0;
 
 	/* Age scan results with time spent in suspend */
-	cfg80211_bss_age(rdev, get_seconds() - rdev->suspend_at);
+	cfg80211_bss_age(rdev, ktime_get_boottime_seconds() - rdev->suspend_at);
 
-	if (rdev->ops->resume) {
-		rtnl_lock();
-		if (rdev->wiphy.registered)
-			ret = rdev_resume(rdev);
-		rtnl_unlock();
-	}
+	rtnl_lock();
+	wiphy_lock(&rdev->wiphy);
+	if (rdev->wiphy.registered && rdev->ops->resume)
+		ret = rdev_resume(rdev);
+	rdev->suspended = false;
+	queue_work(system_dfl_wq, &rdev->wiphy_work);
+	wiphy_unlock(&rdev->wiphy);
+
+	if (ret)
+		cfg80211_shutdown_all_interfaces(&rdev->wiphy);
+
+	rtnl_unlock();
 
 	return ret;
 }
 
-static const void *wiphy_namespace(struct device *d)
+static SIMPLE_DEV_PM_OPS(wiphy_pm_ops, wiphy_suspend, wiphy_resume);
+#define WIPHY_PM_OPS (&wiphy_pm_ops)
+#else
+#define WIPHY_PM_OPS NULL
+#endif
+
+static const struct ns_common *wiphy_namespace(const struct device *d)
 {
 	struct wiphy *wiphy = container_of(d, struct wiphy, dev);
 
-	return wiphy_net(wiphy);
+	return to_ns_common(wiphy_net(wiphy));
 }
 
 struct class ieee80211_class = {
 	.name = "ieee80211",
-	.owner = THIS_MODULE,
 	.dev_release = wiphy_dev_release,
-	.dev_attrs = ieee80211_dev_attrs,
-	.dev_uevent = wiphy_uevent,
-	.suspend = wiphy_suspend,
-	.resume = wiphy_resume,
+	.dev_groups = ieee80211_groups,
+	.pm = WIPHY_PM_OPS,
 	.ns_type = &net_ns_type_operations,
 	.namespace = wiphy_namespace,
 };

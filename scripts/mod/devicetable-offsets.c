@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+#define COMPILE_OFFSETS
+#include <linux/device-id/scmi.h>
 #include <linux/kbuild.h>
 #include <linux/mod_devicetable.h>
 
@@ -41,6 +44,7 @@ int main(void)
 	DEVID_FIELD(pci_device_id, subdevice);
 	DEVID_FIELD(pci_device_id, class);
 	DEVID_FIELD(pci_device_id, class_mask);
+	DEVID_FIELD(pci_device_id, override_only);
 
 	DEVID(ccw_device_id);
 	DEVID_FIELD(ccw_device_id, match_flags);
@@ -63,6 +67,8 @@ int main(void)
 
 	DEVID(acpi_device_id);
 	DEVID_FIELD(acpi_device_id, id);
+	DEVID_FIELD(acpi_device_id, cls);
+	DEVID_FIELD(acpi_device_id, cls_msk);
 
 	DEVID(pnp_device_id);
 	DEVID_FIELD(pnp_device_id, id);
@@ -136,8 +142,26 @@ int main(void)
 	DEVID(hv_vmbus_device_id);
 	DEVID_FIELD(hv_vmbus_device_id, guid);
 
+	DEVID(rpmsg_device_id);
+	DEVID_FIELD(rpmsg_device_id, name);
+
+	DEVID(scmi_device_id);
+	DEVID_FIELD(scmi_device_id, protocol_id);
+	DEVID_FIELD(scmi_device_id, name);
+
 	DEVID(i2c_device_id);
 	DEVID_FIELD(i2c_device_id, name);
+
+	DEVID(i3c_device_id);
+	DEVID_FIELD(i3c_device_id, match_flags);
+	DEVID_FIELD(i3c_device_id, dcr);
+	DEVID_FIELD(i3c_device_id, manuf_id);
+	DEVID_FIELD(i3c_device_id, part_id);
+	DEVID_FIELD(i3c_device_id, extra_info);
+
+	DEVID(slim_device_id);
+	DEVID_FIELD(slim_device_id, manf_id);
+	DEVID_FIELD(slim_device_id, prod_code);
 
 	DEVID(spi_device_id);
 	DEVID_FIELD(spi_device_id, name);
@@ -168,14 +192,105 @@ int main(void)
 	DEVID_FIELD(amba_id, id);
 	DEVID_FIELD(amba_id, mask);
 
+	DEVID(mips_cdmm_device_id);
+	DEVID_FIELD(mips_cdmm_device_id, type);
+
 	DEVID(x86_cpu_id);
 	DEVID_FIELD(x86_cpu_id, feature);
 	DEVID_FIELD(x86_cpu_id, family);
 	DEVID_FIELD(x86_cpu_id, model);
 	DEVID_FIELD(x86_cpu_id, vendor);
 
+	DEVID(cpu_feature);
+	DEVID_FIELD(cpu_feature, feature);
+
+	DEVID(mcb_device_id);
+	DEVID_FIELD(mcb_device_id, device);
+
 	DEVID(mei_cl_device_id);
 	DEVID_FIELD(mei_cl_device_id, name);
+	DEVID_FIELD(mei_cl_device_id, uuid);
+	DEVID_FIELD(mei_cl_device_id, version);
+
+	DEVID(rio_device_id);
+	DEVID_FIELD(rio_device_id, did);
+	DEVID_FIELD(rio_device_id, vid);
+	DEVID_FIELD(rio_device_id, asm_did);
+	DEVID_FIELD(rio_device_id, asm_vid);
+
+	DEVID(ulpi_device_id);
+	DEVID_FIELD(ulpi_device_id, vendor);
+	DEVID_FIELD(ulpi_device_id, product);
+
+	DEVID(hda_device_id);
+	DEVID_FIELD(hda_device_id, vendor_id);
+	DEVID_FIELD(hda_device_id, rev_id);
+	DEVID_FIELD(hda_device_id, api_version);
+
+	DEVID(sdw_device_id);
+	DEVID_FIELD(sdw_device_id, mfg_id);
+	DEVID_FIELD(sdw_device_id, part_id);
+	DEVID_FIELD(sdw_device_id, sdw_version);
+	DEVID_FIELD(sdw_device_id, class_id);
+
+	DEVID(fsl_mc_device_id);
+	DEVID_FIELD(fsl_mc_device_id, vendor);
+	DEVID_FIELD(fsl_mc_device_id, obj_type);
+
+	DEVID(tb_service_id);
+	DEVID_FIELD(tb_service_id, match_flags);
+	DEVID_FIELD(tb_service_id, protocol_key);
+	DEVID_FIELD(tb_service_id, protocol_id);
+	DEVID_FIELD(tb_service_id, protocol_version);
+	DEVID_FIELD(tb_service_id, protocol_revision);
+
+	DEVID(typec_device_id);
+	DEVID_FIELD(typec_device_id, svid);
+
+	DEVID(tee_client_device_id);
+	DEVID_FIELD(tee_client_device_id, uuid);
+
+	DEVID(wmi_device_id);
+	DEVID_FIELD(wmi_device_id, guid_string);
+
+	DEVID(mhi_device_id);
+	DEVID_FIELD(mhi_device_id, chan);
+
+	DEVID(auxiliary_device_id);
+	DEVID_FIELD(auxiliary_device_id, name);
+
+	DEVID(arm_smccc_device_id);
+	DEVID_FIELD(arm_smccc_device_id, func_id);
+
+	DEVID(ssam_device_id);
+	DEVID_FIELD(ssam_device_id, match_flags);
+	DEVID_FIELD(ssam_device_id, domain);
+	DEVID_FIELD(ssam_device_id, category);
+	DEVID_FIELD(ssam_device_id, target);
+	DEVID_FIELD(ssam_device_id, instance);
+	DEVID_FIELD(ssam_device_id, function);
+
+	DEVID(dfl_device_id);
+	DEVID_FIELD(dfl_device_id, type);
+	DEVID_FIELD(dfl_device_id, feature_id);
+
+	DEVID(ishtp_device_id);
+	DEVID_FIELD(ishtp_device_id, guid);
+
+	DEVID(cdx_device_id);
+	DEVID_FIELD(cdx_device_id, vendor);
+	DEVID_FIELD(cdx_device_id, device);
+	DEVID_FIELD(cdx_device_id, subvendor);
+	DEVID_FIELD(cdx_device_id, subdevice);
+	DEVID_FIELD(cdx_device_id, class);
+	DEVID_FIELD(cdx_device_id, class_mask);
+	DEVID_FIELD(cdx_device_id, override_only);
+
+	DEVID(vchiq_device_id);
+	DEVID_FIELD(vchiq_device_id, name);
+
+	DEVID(coreboot_device_id);
+	DEVID_FIELD(coreboot_device_id, tag);
 
 	return 0;
 }

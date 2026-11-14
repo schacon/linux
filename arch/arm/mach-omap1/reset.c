@@ -1,11 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * OMAP1 reset support
  */
 #include <linux/kernel.h>
 #include <linux/io.h>
+#include <linux/reboot.h>
 
-#include <mach/hardware.h>
-
+#include "hardware.h"
 #include "iomap.h"
 #include "common.h"
 
@@ -22,7 +23,7 @@
 #define OMAP_EXTWARM_RST_SRC_ID_SHIFT			5
 
 
-void omap1_restart(char mode, const char *cmd)
+void omap1_restart(enum reboot_mode mode, const char *cmd)
 {
 	/*
 	 * Workaround for 5912/1611b bug mentioned in sprz209d.pdf p. 28

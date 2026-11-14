@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * printf.c:  Internal prom library printf facility.
  *
@@ -24,22 +25,21 @@ prom_printf(char *fmt, ...)
 {
 	va_list args;
 	char ch, *bptr;
-	int i;
 
 	va_start(args, fmt);
 
 #ifdef CONFIG_KGDB
 	ppbuf[0] = 'O';
-	i = vsprintf(ppbuf + 1, fmt, args) + 1;
+	vsnprintf(ppbuf + 1, sizeof(ppbuf) - 1, fmt, args);
 #else
-	i = vsprintf(ppbuf, fmt, args);
+	vsnprintf(ppbuf, sizeof(ppbuf), fmt, args);
 #endif
 
 	bptr = ppbuf;
 
 #ifdef CONFIG_KGDB
 	if (kgdb_initialized) {
-		printk("kgdb_initialized = %d\n", kgdb_initialized);
+		pr_info("kgdb_initialized = %d\n", kgdb_initialized);
 		putpacket(bptr, 1);
 	} else
 #else

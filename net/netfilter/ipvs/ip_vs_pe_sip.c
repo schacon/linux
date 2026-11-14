@@ -1,5 +1,5 @@
-#define KMSG_COMPONENT "IPVS"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+// SPDX-License-Identifier: GPL-2.0-only
+#define pr_fmt(fmt) "IPVS: " fmt
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -65,36 +65,30 @@ static int get_callid(const char *dptr, unsigned int dataoff,
 static int
 ip_vs_sip_fill_param(struct ip_vs_conn_param *p, struct sk_buff *skb)
 {
-	struct sk_buff *reasm = skb_nfct_reasm(skb);
 	struct ip_vs_iphdr iph;
 	unsigned int dataoff, datalen, matchoff, matchlen;
 	const char *dptr;
 	int retc;
 
-	ip_vs_fill_iph_skb(p->af, skb, &iph);
+	retc = ip_vs_fill_iph_skb(p->af, skb, false, &iph);
 
 	/* Only useful with UDP */
-	if (iph.protocol != IPPROTO_UDP)
+	if (!retc || iph.protocol != IPPROTO_UDP)
 		return -EINVAL;
 	/* todo: IPv6 fragments:
 	 *       I think this only should be done for the first fragment. /HS
 	 */
-	if (reasm) {
-		skb = reasm;
-		dataoff = iph.thoff_reasm + sizeof(struct udphdr);
-	} else
-		dataoff = iph.len + sizeof(struct udphdr);
+	dataoff = iph.len + sizeof(struct udphdr);
 
 	if (dataoff >= skb->len)
 		return -EINVAL;
-	/* todo: Check if this will mess-up the reasm skb !!! /HS */
 	retc = skb_linearize(skb);
 	if (retc < 0)
 		return retc;
 	dptr = skb->data + dataoff;
 	datalen = skb->len - dataoff;
 
-	if (get_callid(dptr, dataoff, datalen, &matchoff, &matchlen))
+	if (get_callid(dptr, 0, datalen, &matchoff, &matchlen))
 		return -EINVAL;
 
 	/* N.B: pe_data is only set on success,
@@ -138,15 +132,29 @@ static bool ip_vs_sip_ct_match(const struct ip_vs_conn_param *p,
 }
 
 static u32 ip_vs_sip_hashkey_raw(const struct ip_vs_conn_param *p,
-				 u32 initval, bool inverse)
+				 struct ip_vs_rht *t, bool inverse)
 {
-	return jhash(p->pe_data, p->pe_data_len, initval);
+	return jhash(p->pe_data, p->pe_data_len, (u32)t->hash_key.key[0]);
 }
 
 static int ip_vs_sip_show_pe_data(const struct ip_vs_conn *cp, char *buf)
 {
 	memcpy(buf, cp->pe_data, cp->pe_data_len);
 	return cp->pe_data_len;
+}
+
+static struct ip_vs_conn *
+ip_vs_sip_conn_out(struct ip_vs_service *svc,
+		   struct ip_vs_dest *dest,
+		   struct sk_buff *skb,
+		   const struct ip_vs_iphdr *iph,
+		   __be16 dport,
+		   __be16 cport)
+{
+	if (likely(iph->protocol == IPPROTO_UDP))
+		return ip_vs_new_conn_out(svc, dest, skb, iph, dport, cport);
+	/* currently no need to handle other than UDP */
+	return NULL;
 }
 
 static struct ip_vs_pe ip_vs_sip_pe =
@@ -159,6 +167,7 @@ static struct ip_vs_pe ip_vs_sip_pe =
 	.ct_match =		ip_vs_sip_ct_match,
 	.hashkey_raw =		ip_vs_sip_hashkey_raw,
 	.show_pe_data =		ip_vs_sip_show_pe_data,
+	.conn_out =		ip_vs_sip_conn_out,
 };
 
 static int __init ip_vs_sip_init(void)
@@ -175,3 +184,4 @@ static void __exit ip_vs_sip_cleanup(void)
 module_init(ip_vs_sip_init);
 module_exit(ip_vs_sip_cleanup);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("ipvs sip helper");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Force feedback support for Zeroplus based devices
  *
@@ -5,19 +6,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 
@@ -62,33 +50,27 @@ static int zpff_play(struct input_dev *dev, void *data,
 	return 0;
 }
 
-static int zpff_init(struct hid_device *hid)
+static int zp_input_configured(struct hid_device *hid, struct hid_input *hidinput)
 {
 	struct zpff_device *zpff;
 	struct hid_report *report;
-	struct hid_input *hidinput = list_entry(hid->inputs.next,
-						struct hid_input, list);
-	struct list_head *report_list =
-			&hid->report_enum[HID_OUTPUT_REPORT].report_list;
 	struct input_dev *dev = hidinput->input;
-	int error;
+	int i, error;
 
-	if (list_empty(report_list)) {
-		hid_err(hid, "no output report found\n");
-		return -ENODEV;
+	if (!list_is_first(&hidinput->list, &hid->inputs))
+		return 0;
+
+	for (i = 0; i < 4; i++) {
+		report = hid_validate_values(hid, HID_OUTPUT_REPORT, 0, i, 1);
+		if (!report)
+			return -ENODEV;
 	}
 
-	report = list_entry(report_list->next, struct hid_report, list);
-
-	if (report->maxfield < 4) {
-		hid_err(hid, "not enough fields in report\n");
-		return -ENODEV;
-	}
-
-	zpff = kzalloc(sizeof(struct zpff_device), GFP_KERNEL);
+	zpff = kzalloc_obj(struct zpff_device);
 	if (!zpff)
 		return -ENOMEM;
 
+	zpff->report = report;
 	set_bit(FF_RUMBLE, dev->ffbit);
 
 	error = input_ff_create_memless(dev, zpff, zpff_play);
@@ -97,7 +79,6 @@ static int zpff_init(struct hid_device *hid)
 		return error;
 	}
 
-	zpff->report = report;
 	zpff->report->field[0]->value[0] = 0x00;
 	zpff->report->field[1]->value[0] = 0x02;
 	zpff->report->field[2]->value[0] = 0x00;
@@ -109,34 +90,12 @@ static int zpff_init(struct hid_device *hid)
 	return 0;
 }
 #else
-static inline int zpff_init(struct hid_device *hid)
+static inline int zp_input_configured(struct hid_device *hid,
+				      struct hid_input *hidinput)
 {
 	return 0;
 }
 #endif
-
-static int zp_probe(struct hid_device *hdev, const struct hid_device_id *id)
-{
-	int ret;
-
-	ret = hid_parse(hdev);
-	if (ret) {
-		hid_err(hdev, "parse failed\n");
-		goto err;
-	}
-
-	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT & ~HID_CONNECT_FF);
-	if (ret) {
-		hid_err(hdev, "hw start failed\n");
-		goto err;
-	}
-
-	zpff_init(hdev);
-
-	return 0;
-err:
-	return ret;
-}
 
 static const struct hid_device_id zp_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_ZEROPLUS, 0x0005) },
@@ -148,8 +107,9 @@ MODULE_DEVICE_TABLE(hid, zp_devices);
 static struct hid_driver zp_driver = {
 	.name = "zeroplus",
 	.id_table = zp_devices,
-	.probe = zp_probe,
+	.input_configured = zp_input_configured,
 };
 module_hid_driver(zp_driver);
 
+MODULE_DESCRIPTION("Force feedback support for Zeroplus based devices");
 MODULE_LICENSE("GPL");

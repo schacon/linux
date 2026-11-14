@@ -26,6 +26,19 @@ static unsigned int sh_clk_read(struct clk *clk)
 	return ioread32(clk->mapped_reg);
 }
 
+static unsigned int sh_clk_read_status(struct clk *clk)
+{
+	void __iomem *mapped_status = (phys_addr_t)clk->status_reg -
+		(phys_addr_t)clk->enable_reg + clk->mapped_reg;
+
+	if (clk->flags & CLK_ENABLE_REG_8BIT)
+		return ioread8(mapped_status);
+	else if (clk->flags & CLK_ENABLE_REG_16BIT)
+		return ioread16(mapped_status);
+
+	return ioread32(mapped_status);
+}
+
 static void sh_clk_write(int value, struct clk *clk)
 {
 	if (clk->flags & CLK_ENABLE_REG_8BIT)
@@ -39,6 +52,19 @@ static void sh_clk_write(int value, struct clk *clk)
 static int sh_clk_mstp_enable(struct clk *clk)
 {
 	sh_clk_write(sh_clk_read(clk) & ~(1 << clk->enable_bit), clk);
+	if (clk->status_reg) {
+		int i;
+
+		for (i = 1000;
+		     (sh_clk_read_status(clk) & (1 << clk->enable_bit)) && i;
+		     i--)
+			cpu_relax();
+		if (!i) {
+			pr_err("cpg: failed to enable %p[%d]\n",
+			       clk->enable_reg, clk->enable_bit);
+			return -ETIMEDOUT;
+		}
+	}
 	return 0;
 }
 
@@ -211,7 +237,7 @@ static int __init sh_clk_div_register_ops(struct clk *clks, int nr,
 	int k;
 
 	freq_table_size *= (nr_divs + 1);
-	freq_table = kzalloc(freq_table_size * nr, GFP_KERNEL);
+	freq_table = kcalloc(nr, freq_table_size, GFP_KERNEL);
 	if (!freq_table) {
 		pr_err("%s: unable to alloc memory\n", __func__);
 		return -ENOMEM;
@@ -433,7 +459,7 @@ int __init sh_clk_fsidiv_register(struct clk *clks, int nr)
 
 	for (i = 0; i < nr; i++) {
 
-		map = kzalloc(sizeof(struct clk_mapping), GFP_KERNEL);
+		map = kzalloc_obj(struct clk_mapping);
 		if (!map) {
 			pr_err("%s: unable to alloc memory\n", __func__);
 			return -ENOMEM;

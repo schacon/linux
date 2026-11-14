@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * drivers/net/ethernet/ibm/emac/tah.h
  *
@@ -12,11 +13,6 @@
  * Matt Porter <mporter@kernel.crashing.org>
  *
  * Copyright (c) 2005 Eugene Surovegin <ebs@ebshome.net>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #ifndef __IBM_NEWEMAC_TAH_H
@@ -72,13 +68,13 @@ struct tah_instance {
 
 #ifdef CONFIG_IBM_EMAC_TAH
 
-extern int tah_init(void);
-extern void tah_exit(void);
-extern int tah_attach(struct platform_device *ofdev, int channel);
-extern void tah_detach(struct platform_device *ofdev, int channel);
-extern void tah_reset(struct platform_device *ofdev);
-extern int tah_get_regs_len(struct platform_device *ofdev);
-extern void *tah_dump_regs(struct platform_device *ofdev, void *buf);
+int tah_init(void);
+void tah_exit(void);
+int tah_attach(struct platform_device *ofdev, int channel);
+void tah_detach(struct platform_device *ofdev, int channel);
+void tah_reset(struct platform_device *ofdev);
+int tah_get_regs_len(struct platform_device *ofdev);
+void *tah_dump_regs(struct platform_device *ofdev, void *buf);
 
 #else
 

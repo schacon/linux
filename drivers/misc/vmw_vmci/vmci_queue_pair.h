@@ -1,16 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * VMware VMCI Driver
  *
  * Copyright (C) 2012 VMware, Inc. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation version 2 and no later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * for more details.
  */
 
 #ifndef _VMCI_QUEUE_PAIR_H_
@@ -28,8 +20,8 @@ typedef int (*vmci_event_release_cb) (void *client_data);
 struct ppn_set {
 	u64 num_produce_pages;
 	u64 num_consume_pages;
-	u32 *produce_ppns;
-	u32 *consume_ppns;
+	u64 *produce_ppns;
+	u64 *consume_ppns;
 	bool initialized;
 };
 
@@ -112,7 +104,7 @@ struct vmci_qp_dtch_info {
 struct vmci_qp_page_store {
 	/* Reference to pages backing the queue pair. */
 	u64 pages;
-	/* Length of pageList/virtual addres range (in pages). */
+	/* Length of pageList/virtual address range (in pages). */
 	u32 len;
 };
 
@@ -144,24 +136,6 @@ static inline bool
 VMCI_QP_PAGESTORE_IS_WELLFORMED(struct vmci_qp_page_store *page_store)
 {
 	return page_store->len >= 2;
-}
-
-/*
- * Helper function to check if the non-blocking flag
- * is set for a given queue pair.
- */
-static inline bool vmci_can_block(u32 flags)
-{
-	return !(flags & VMCI_QPFLAG_NONBLOCK);
-}
-
-/*
- * Helper function to check if the queue pair is pinned
- * into memory.
- */
-static inline bool vmci_qp_pinned(u32 flags)
-{
-	return flags & VMCI_QPFLAG_PINNED;
 }
 
 void vmci_qp_broker_exit(void);

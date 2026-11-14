@@ -1,73 +1,112 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * arch/arm64/include/asm/arch_timer.h
  *
  * Copyright (C) 2012 ARM Ltd.
  * Author: Marc Zyngier <marc.zyngier@arm.com>
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #ifndef __ASM_ARCH_TIMER_H
 #define __ASM_ARCH_TIMER_H
 
 #include <asm/barrier.h>
+#include <asm/hwcap.h>
+#include <asm/sysreg.h>
 
+#include <linux/bug.h>
 #include <linux/init.h>
+#include <linux/jump_label.h>
+#include <linux/percpu.h>
 #include <linux/types.h>
 
 #include <clocksource/arm_arch_timer.h>
 
-static inline void arch_timer_reg_write(int access, int reg, u32 val)
-{
-	if (access == ARCH_TIMER_PHYS_ACCESS) {
-		switch (reg) {
-		case ARCH_TIMER_REG_CTRL:
-			asm volatile("msr cntp_ctl_el0,  %0" : : "r" (val));
-			break;
-		case ARCH_TIMER_REG_TVAL:
-			asm volatile("msr cntp_tval_el0, %0" : : "r" (val));
-			break;
-		default:
-			BUILD_BUG();
-		}
-	} else if (access == ARCH_TIMER_VIRT_ACCESS) {
-		switch (reg) {
-		case ARCH_TIMER_REG_CTRL:
-			asm volatile("msr cntv_ctl_el0,  %0" : : "r" (val));
-			break;
-		case ARCH_TIMER_REG_TVAL:
-			asm volatile("msr cntv_tval_el0, %0" : : "r" (val));
-			break;
-		default:
-			BUILD_BUG();
-		}
-	} else {
-		BUILD_BUG();
-	}
+#if IS_ENABLED(CONFIG_ARM_ARCH_TIMER_OOL_WORKAROUND)
+#define has_erratum_handler(h)						\
+	({								\
+		const struct arch_timer_erratum_workaround *__wa;	\
+		__wa = __this_cpu_read(timer_unstable_counter_workaround); \
+		(__wa && __wa->h);					\
+	})
 
-	isb();
+#define erratum_handler(h)						\
+	({								\
+		const struct arch_timer_erratum_workaround *__wa;	\
+		__wa = __this_cpu_read(timer_unstable_counter_workaround); \
+		(__wa && __wa->h) ? ({ isb(); __wa->h;}) : arch_timer_##h; \
+	})
+
+#else
+#define has_erratum_handler(h)			   false
+#define erratum_handler(h)			   (arch_timer_##h)
+#endif
+
+enum arch_timer_erratum_match_type {
+	ate_match_dt,
+	ate_match_local_cap_id,
+	ate_match_acpi_oem_info,
+};
+
+struct clock_event_device;
+
+struct arch_timer_erratum_workaround {
+	enum arch_timer_erratum_match_type match_type;
+	const void *id;
+	const char *desc;
+	u64 (*read_cntpct_el0)(void);
+	u64 (*read_cntvct_el0)(void);
+	int (*set_next_event_phys)(unsigned long, struct clock_event_device *);
+	int (*set_next_event_virt)(unsigned long, struct clock_event_device *);
+	bool disable_compat_vdso;
+};
+
+DECLARE_PER_CPU(const struct arch_timer_erratum_workaround *,
+		timer_unstable_counter_workaround);
+
+static inline notrace u64 arch_timer_read_cntpct_el0(void)
+{
+	u64 cnt;
+
+	asm volatile(ALTERNATIVE("isb\n mrs %0, cntpct_el0",
+				 "nop\n" __mrs_s("%0", SYS_CNTPCTSS_EL0),
+				 ARM64_HAS_ECV)
+		     : "=r" (cnt));
+
+	return cnt;
 }
 
-static inline u32 arch_timer_reg_read(int access, int reg)
+static inline notrace u64 arch_timer_read_cntvct_el0(void)
 {
-	u32 val;
+	u64 cnt;
 
+	asm volatile(ALTERNATIVE("isb\n mrs %0, cntvct_el0",
+				 "nop\n" __mrs_s("%0", SYS_CNTVCTSS_EL0),
+				 ARM64_HAS_ECV)
+		     : "=r" (cnt));
+
+	return cnt;
+}
+
+#define arch_timer_reg_read_stable(reg)					\
+	({								\
+		erratum_handler(read_ ## reg)();			\
+	})
+
+/*
+ * These register accessors are marked inline so the compiler can
+ * nicely work out which register we want, and chuck away the rest of
+ * the code.
+ */
+static __always_inline
+void arch_timer_reg_write_cp15(int access, enum arch_timer_reg reg, u64 val)
+{
 	if (access == ARCH_TIMER_PHYS_ACCESS) {
 		switch (reg) {
 		case ARCH_TIMER_REG_CTRL:
-			asm volatile("mrs %0,  cntp_ctl_el0" : "=r" (val));
+			write_sysreg(val, cntp_ctl_el0);
+			isb();
 			break;
-		case ARCH_TIMER_REG_TVAL:
-			asm volatile("mrs %0, cntp_tval_el0" : "=r" (val));
+		case ARCH_TIMER_REG_CVAL:
+			write_sysreg(val, cntp_cval_el0);
 			break;
 		default:
 			BUILD_BUG();
@@ -75,10 +114,11 @@ static inline u32 arch_timer_reg_read(int access, int reg)
 	} else if (access == ARCH_TIMER_VIRT_ACCESS) {
 		switch (reg) {
 		case ARCH_TIMER_REG_CTRL:
-			asm volatile("mrs %0,  cntv_ctl_el0" : "=r" (val));
+			write_sysreg(val, cntv_ctl_el0);
+			isb();
 			break;
-		case ARCH_TIMER_REG_TVAL:
-			asm volatile("mrs %0, cntv_tval_el0" : "=r" (val));
+		case ARCH_TIMER_REG_CVAL:
+			write_sysreg(val, cntv_cval_el0);
 			break;
 		default:
 			BUILD_BUG();
@@ -86,48 +126,79 @@ static inline u32 arch_timer_reg_read(int access, int reg)
 	} else {
 		BUILD_BUG();
 	}
+}
 
-	return val;
+static __always_inline
+u64 arch_timer_reg_read_cp15(int access, enum arch_timer_reg reg)
+{
+	if (access == ARCH_TIMER_PHYS_ACCESS) {
+		switch (reg) {
+		case ARCH_TIMER_REG_CTRL:
+			return read_sysreg(cntp_ctl_el0);
+		default:
+			BUILD_BUG();
+		}
+	} else if (access == ARCH_TIMER_VIRT_ACCESS) {
+		switch (reg) {
+		case ARCH_TIMER_REG_CTRL:
+			return read_sysreg(cntv_ctl_el0);
+		default:
+			BUILD_BUG();
+		}
+	}
+
+	BUILD_BUG();
+	unreachable();
 }
 
 static inline u32 arch_timer_get_cntfrq(void)
 {
-	u32 val;
-	asm volatile("mrs %0,   cntfrq_el0" : "=r" (val));
-	return val;
+	return read_sysreg(cntfrq_el0);
 }
 
-static inline void __cpuinit arch_counter_set_user_access(void)
+static inline u32 arch_timer_get_cntkctl(void)
 {
-	u32 cntkctl;
-
-	/* Disable user access to the timers and the physical counter. */
-	asm volatile("mrs	%0, cntkctl_el1" : "=r" (cntkctl));
-	cntkctl &= ~((3 << 8) | (1 << 0));
-
-	/* Enable user access to the virtual counter and frequency. */
-	cntkctl |= (1 << 1);
-	asm volatile("msr	cntkctl_el1, %0" : : "r" (cntkctl));
+	return read_sysreg(cntkctl_el1);
 }
 
-static inline u64 arch_counter_get_cntpct(void)
+static inline void arch_timer_set_cntkctl(u32 cntkctl)
 {
-	u64 cval;
-
+	write_sysreg(cntkctl, cntkctl_el1);
 	isb();
-	asm volatile("mrs %0, cntpct_el0" : "=r" (cval));
-
-	return cval;
 }
 
-static inline u64 arch_counter_get_cntvct(void)
+static __always_inline u64 __arch_counter_get_cntpct_stable(void)
 {
-	u64 cval;
+	u64 cnt;
 
-	isb();
-	asm volatile("mrs %0, cntvct_el0" : "=r" (cval));
+	cnt = arch_timer_reg_read_stable(cntpct_el0);
+	arch_counter_enforce_ordering(cnt);
+	return cnt;
+}
 
-	return cval;
+static __always_inline u64 __arch_counter_get_cntpct(void)
+{
+	u64 cnt = arch_timer_read_cntpct_el0();
+
+	arch_counter_enforce_ordering(cnt);
+	return cnt;
+}
+
+static __always_inline u64 __arch_counter_get_cntvct_stable(void)
+{
+	u64 cnt;
+
+	cnt = arch_timer_reg_read_stable(cntvct_el0);
+	arch_counter_enforce_ordering(cnt);
+	return cnt;
+}
+
+static __always_inline u64 __arch_counter_get_cntvct(void)
+{
+	u64 cnt = arch_timer_read_cntvct_el0();
+
+	arch_counter_enforce_ordering(cnt);
+	return cnt;
 }
 
 static inline int arch_timer_arch_init(void)
@@ -135,4 +206,16 @@ static inline int arch_timer_arch_init(void)
 	return 0;
 }
 
+static inline void arch_timer_set_evtstrm_feature(void)
+{
+	cpu_set_named_feature(EVTSTRM);
+#ifdef CONFIG_COMPAT
+	compat_elf_hwcap |= COMPAT_HWCAP_EVTSTRM;
+#endif
+}
+
+static inline bool arch_timer_have_evtstrm_feature(void)
+{
+	return cpu_have_named_feature(EVTSTRM);
+}
 #endif

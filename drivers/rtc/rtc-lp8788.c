@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * TI LP8788 MFD - rtc driver
  *
  * Copyright 2012 Texas Instruments
  *
  * Author: Milo(Woogyom) Kim <milo.kim@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/err.h>
@@ -289,7 +285,7 @@ static int lp8788_rtc_probe(struct platform_device *pdev)
 	struct lp8788_rtc *rtc;
 	struct device *dev = &pdev->dev;
 
-	rtc = devm_kzalloc(dev, sizeof(struct lp8788_rtc), GFP_KERNEL);
+	rtc = devm_kzalloc_obj(dev, struct lp8788_rtc);
 	if (!rtc)
 		return -ENOMEM;
 
@@ -297,7 +293,7 @@ static int lp8788_rtc_probe(struct platform_device *pdev)
 	rtc->alarm = lp->pdata ? lp->pdata->alarm_sel : DEFAULT_ALARM_SEL;
 	platform_set_drvdata(pdev, rtc);
 
-	device_init_wakeup(dev, 1);
+	device_init_wakeup(dev, true);
 
 	rtc->rdev = devm_rtc_device_register(dev, "lp8788_rtc",
 					&lp8788_rtc_ops, THIS_MODULE);
@@ -312,19 +308,10 @@ static int lp8788_rtc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int lp8788_rtc_remove(struct platform_device *pdev)
-{
-	platform_set_drvdata(pdev, NULL);
-
-	return 0;
-}
-
 static struct platform_driver lp8788_rtc_driver = {
 	.probe = lp8788_rtc_probe,
-	.remove = lp8788_rtc_remove,
 	.driver = {
 		.name = LP8788_DEV_RTC,
-		.owner = THIS_MODULE,
 	},
 };
 module_platform_driver(lp8788_rtc_driver);

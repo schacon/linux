@@ -14,11 +14,13 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/irq.h>
+#include <linux/irqdomain.h>
 #include <linux/smp.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -26,8 +28,6 @@
 #include <asm/machdep.h>
 #include <asm/ehv_pic.h>
 #include <asm/fsl_hcalls.h>
-
-#include "../../../kernel/irq/settings.h"
 
 static struct ehv_pic *global_ehv_pic;
 static DEFINE_SPINLOCK(ehv_pic_lock);
@@ -42,33 +42,33 @@ static u32 __iomem *mpic_percpu_base_vaddr;
  * Linux descriptor level callbacks
  */
 
-void ehv_pic_unmask_irq(struct irq_data *d)
+static void ehv_pic_unmask_irq(struct irq_data *d)
 {
 	unsigned int src = virq_to_hw(d->irq);
 
 	ev_int_set_mask(src, 0);
 }
 
-void ehv_pic_mask_irq(struct irq_data *d)
+static void ehv_pic_mask_irq(struct irq_data *d)
 {
 	unsigned int src = virq_to_hw(d->irq);
 
 	ev_int_set_mask(src, 1);
 }
 
-void ehv_pic_end_irq(struct irq_data *d)
+static void ehv_pic_end_irq(struct irq_data *d)
 {
 	unsigned int src = virq_to_hw(d->irq);
 
 	ev_int_eoi(src);
 }
 
-void ehv_pic_direct_end_irq(struct irq_data *d)
+static void ehv_pic_direct_end_irq(struct irq_data *d)
 {
 	out_be32(mpic_percpu_base_vaddr + MPIC_EOI / 4, 0);
 }
 
-int ehv_pic_set_affinity(struct irq_data *d, const struct cpumask *dest,
+static int ehv_pic_set_affinity(struct irq_data *d, const struct cpumask *dest,
 			 bool force)
 {
 	unsigned int src = virq_to_hw(d->irq);
@@ -109,20 +109,16 @@ static unsigned int ehv_pic_type_to_vecpri(unsigned int type)
 	}
 }
 
-int ehv_pic_set_irq_type(struct irq_data *d, unsigned int flow_type)
+static int ehv_pic_set_irq_type(struct irq_data *d, unsigned int flow_type)
 {
 	unsigned int src = virq_to_hw(d->irq);
-	struct irq_desc *desc = irq_to_desc(d->irq);
 	unsigned int vecpri, vold, vnew, prio, cpu_dest;
 	unsigned long flags;
 
 	if (flow_type == IRQ_TYPE_NONE)
 		flow_type = IRQ_TYPE_LEVEL_LOW;
 
-	irq_settings_clr_level(desc);
-	irq_settings_set_trigger_mask(desc, flow_type);
-	if (flow_type & (IRQ_TYPE_LEVEL_HIGH | IRQ_TYPE_LEVEL_LOW))
-		irq_settings_set_level(desc);
+	irqd_set_trigger_type(d, flow_type);
 
 	vecpri = ehv_pic_type_to_vecpri(flow_type);
 
@@ -143,7 +139,7 @@ int ehv_pic_set_irq_type(struct irq_data *d, unsigned int flow_type)
 	ev_int_set_config(src, vecpri, prio, cpu_dest);
 
 	spin_unlock_irqrestore(&ehv_pic_lock, flags);
-	return 0;
+	return IRQ_SET_MASK_OK_NOCOPY;
 }
 
 static struct irq_chip ehv_pic_irq_chip = {
@@ -160,7 +156,7 @@ static struct irq_chip ehv_pic_direct_eoi_irq_chip = {
 	.irq_set_type	= ehv_pic_set_irq_type,
 };
 
-/* Return an interrupt vector or NO_IRQ if no interrupt is pending. */
+/* Return an interrupt vector or 0 if no interrupt is pending. */
 unsigned int ehv_pic_get_irq(void)
 {
 	int irq;
@@ -173,19 +169,21 @@ unsigned int ehv_pic_get_irq(void)
 		ev_int_iack(0, &irq); /* legacy mode */
 
 	if (irq == 0xFFFF)    /* 0xFFFF --> no irq is pending */
-		return NO_IRQ;
+		return 0;
 
 	/*
 	 * this will also setup revmap[] in the slow path for the first
 	 * time, next calls will always use fast path by indexing revmap
 	 */
-	return irq_linear_revmap(global_ehv_pic->irqhost, irq);
+	return irq_find_mapping(global_ehv_pic->irqhost, irq);
 }
 
-static int ehv_pic_host_match(struct irq_domain *h, struct device_node *node)
+static int ehv_pic_host_match(struct irq_domain *h, struct device_node *node,
+			      enum irq_domain_bus_token bus_token)
 {
 	/* Exact match, unless ehv_pic node is NULL */
-	return h->of_node == NULL || h->of_node == node;
+	struct device_node *of_node = irq_domain_get_of_node(h);
+	return of_node == NULL || of_node == node;
 }
 
 static int ehv_pic_host_map(struct irq_domain *h, unsigned int virq,
@@ -258,7 +256,6 @@ void __init ehv_pic_init(void)
 {
 	struct device_node *np, *np2;
 	struct ehv_pic *ehv_pic;
-	int coreint_flag = 1;
 
 	np = of_find_compatible_node(NULL, NULL, "epapr,hv-pic");
 	if (!np) {
@@ -266,17 +263,15 @@ void __init ehv_pic_init(void)
 		return;
 	}
 
-	if (!of_find_property(np, "has-external-proxy", NULL))
-		coreint_flag = 0;
-
-	ehv_pic = kzalloc(sizeof(struct ehv_pic), GFP_KERNEL);
+	ehv_pic = kzalloc_obj(struct ehv_pic);
 	if (!ehv_pic) {
 		of_node_put(np);
 		return;
 	}
 
-	ehv_pic->irqhost = irq_domain_add_linear(np, NR_EHV_PIC_INTS,
-						 &ehv_pic_host_ops, ehv_pic);
+	ehv_pic->irqhost = irq_domain_create_linear(of_fwnode_handle(np),
+						    NR_EHV_PIC_INTS,
+						    &ehv_pic_host_ops, ehv_pic);
 	if (!ehv_pic->irqhost) {
 		of_node_put(np);
 		kfree(ehv_pic);
@@ -294,8 +289,8 @@ void __init ehv_pic_init(void)
 
 	ehv_pic->hc_irq = ehv_pic_irq_chip;
 	ehv_pic->hc_irq.irq_set_affinity = ehv_pic_set_affinity;
-	ehv_pic->coreint_flag = coreint_flag;
+	ehv_pic->coreint_flag = of_property_read_bool(np, "has-external-proxy");
 
 	global_ehv_pic = ehv_pic;
-	irq_set_default_host(global_ehv_pic->irqhost);
+	irq_set_default_domain(global_ehv_pic->irqhost);
 }

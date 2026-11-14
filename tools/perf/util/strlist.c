@@ -1,7 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * (c) 2009 Arnaldo Carvalho de Melo <acme@redhat.com>
- *
- * Licensed under the GPLv2.
  */
 
 #include "strlist.h"
@@ -9,22 +8,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <linux/zalloc.h>
 
 static
-struct rb_node *strlist__node_new(struct rblist *rblist, const void *entry)
+struct rb_node *strlist__node_new(struct rblist *rblist __maybe_unused, const void *entry)
 {
 	const char *s = entry;
 	struct rb_node *rc = NULL;
-	struct strlist *strlist = container_of(rblist, struct strlist, rblist);
 	struct str_node *snode = malloc(sizeof(*snode));
 
 	if (snode != NULL) {
-		if (strlist->dupstr) {
-			s = strdup(s);
-			if (s == NULL)
-				goto out_delete;
-		}
-		snode->s = s;
+		snode->s = strdup(s);
+		if (snode->s == NULL)
+			goto out_delete;
 		rc = &snode->rb_node;
 	}
 
@@ -35,20 +32,18 @@ out_delete:
 	return NULL;
 }
 
-static void str_node__delete(struct str_node *snode, bool dupstr)
+static void str_node__delete(struct str_node *snode)
 {
-	if (dupstr)
-		free((void *)snode->s);
+	zfree((char **)&snode->s);
 	free(snode);
 }
 
 static
-void strlist__node_delete(struct rblist *rblist, struct rb_node *rb_node)
+void strlist__node_delete(struct rblist *rblist __maybe_unused, struct rb_node *rb_node)
 {
-	struct strlist *slist = container_of(rblist, struct strlist, rblist);
 	struct str_node *snode = container_of(rb_node, struct str_node, rb_node);
 
-	str_node__delete(snode, slist->dupstr);
+	str_node__delete(snode);
 }
 
 static int strlist__node_cmp(struct rb_node *rb_node, const void *entry)
@@ -71,7 +66,7 @@ int strlist__load(struct strlist *slist, const char *filename)
 	FILE *fp = fopen(filename, "r");
 
 	if (fp == NULL)
-		return errno;
+		return -errno;
 
 	while (fgets(entry, sizeof(entry), fp) != NULL) {
 		const size_t len = strlen(entry);
@@ -107,43 +102,79 @@ struct str_node *strlist__find(struct strlist *slist, const char *entry)
 	return snode;
 }
 
-static int strlist__parse_list_entry(struct strlist *slist, const char *s)
+static int strlist__parse_list_entry(struct strlist *slist, const char *s,
+				     const char *subst_dir)
 {
+	int err;
+	char *subst = NULL;
+
 	if (strncmp(s, "file://", 7) == 0)
 		return strlist__load(slist, s + 7);
 
-	return strlist__add(slist, s);
+	if (subst_dir) {
+		err = -ENOMEM;
+		if (asprintf(&subst, "%s/%s", subst_dir, s) < 0)
+			goto out;
+
+		if (access(subst, F_OK) == 0) {
+			err = strlist__load(slist, subst);
+			goto out;
+		}
+
+		if (slist->file_only) {
+			err = -ENOENT;
+			goto out;
+		}
+	}
+
+	err = strlist__add(slist, s);
+out:
+	free(subst);
+	return err;
 }
 
-int strlist__parse_list(struct strlist *slist, const char *s)
+static int strlist__parse_list(struct strlist *slist, const char *list, const char *subst_dir)
 {
-	char *sep;
+	char *sep, *s = strdup(list), *sdup = s;
 	int err;
+
+	if (s == NULL)
+		return -ENOMEM;
 
 	while ((sep = strchr(s, ',')) != NULL) {
 		*sep = '\0';
-		err = strlist__parse_list_entry(slist, s);
-		*sep = ',';
+		err = strlist__parse_list_entry(slist, s, subst_dir);
 		if (err != 0)
 			return err;
 		s = sep + 1;
 	}
 
-	return *s ? strlist__parse_list_entry(slist, s) : 0;
+	err = *s ? strlist__parse_list_entry(slist, s, subst_dir) : 0;
+	free(sdup);
+	return err;
 }
 
-struct strlist *strlist__new(bool dupstr, const char *list)
+struct strlist *strlist__new(const char *list, const struct strlist_config *config)
 {
 	struct strlist *slist = malloc(sizeof(*slist));
 
 	if (slist != NULL) {
+		bool file_only = false;
+		const char *dirname = NULL;
+
+		if (config) {
+			dirname = config->dirname;
+			file_only = config->file_only;
+		}
+
 		rblist__init(&slist->rblist);
 		slist->rblist.node_cmp    = strlist__node_cmp;
 		slist->rblist.node_new    = strlist__node_new;
 		slist->rblist.node_delete = strlist__node_delete;
 
-		slist->dupstr	 = dupstr;
-		if (list && strlist__parse_list(slist, list) != 0)
+		slist->file_only = file_only;
+
+		if (list && strlist__parse_list(slist, list, dirname) != 0)
 			goto out_error;
 	}
 

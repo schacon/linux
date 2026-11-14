@@ -1,26 +1,10 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
  * dir.h
  *
  * Function prototypes
  *
  * Copyright (C) 2002, 2004 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
 
 #ifndef OCFS2_DIR_H
@@ -72,7 +56,7 @@ static inline int ocfs2_add_entry(handle_t *handle,
 				  struct buffer_head *parent_fe_bh,
 				  struct ocfs2_dir_lookup_result *lookup)
 {
-	return __ocfs2_add_entry(handle, dentry->d_parent->d_inode,
+	return __ocfs2_add_entry(handle, d_inode(dentry->d_parent),
 				 dentry->d_name.name, dentry->d_name.len,
 				 inode, blkno, parent_fe_bh, lookup);
 }
@@ -92,9 +76,8 @@ int ocfs2_find_files_on_disk(const char *name,
 			     struct ocfs2_dir_lookup_result *res);
 int ocfs2_lookup_ino_from_name(struct inode *dir, const char *name,
 			       int namelen, u64 *blkno);
-int ocfs2_readdir(struct file *filp, void *dirent, filldir_t filldir);
-int ocfs2_dir_foreach(struct inode *inode, loff_t *f_pos, void *priv,
-		      filldir_t filldir);
+int ocfs2_readdir(struct file *file, struct dir_context *ctx);
+int ocfs2_dir_foreach(struct inode *inode, struct dir_context *ctx);
 int ocfs2_prepare_dir_for_insert(struct ocfs2_super *osb,
 				 struct inode *dir,
 				 struct buffer_head *parent_fe_bh,

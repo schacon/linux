@@ -1,18 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Simple pointer stack
  *
  * (c) 2010 Arnaldo Carvalho de Melo <acme@redhat.com>
  */
 
-#include "util.h"
 #include "pstack.h"
+#include "debug.h"
 #include <linux/kernel.h>
+#include <linux/zalloc.h>
 #include <stdlib.h>
+#include <string.h>
 
 struct pstack {
 	unsigned short	top;
 	unsigned short	max_nr_entries;
-	void		*entries[0];
+	void		*entries[];
 };
 
 struct pstack *pstack__new(unsigned short max_nr_entries)
@@ -60,16 +63,9 @@ void pstack__push(struct pstack *pstack, void *key)
 	pstack->entries[pstack->top++] = key;
 }
 
-void *pstack__pop(struct pstack *pstack)
+void *pstack__peek(struct pstack *pstack)
 {
-	void *ret;
-
-	if (pstack->top == 0) {
-		pr_err("%s: underflow!\n", __func__);
+	if (pstack->top == 0)
 		return NULL;
-	}
-
-	ret = pstack->entries[--pstack->top];
-	pstack->entries[pstack->top] = NULL;
-	return ret;
+	return pstack->entries[pstack->top - 1];
 }

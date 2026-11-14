@@ -1,81 +1,57 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * DBAu1000/1500/1100 PBAu1100/1500 board support
  *
  * Copyright 2000, 2008 MontaVista Software Inc.
  * Author: MontaVista Software, Inc. <source@mvista.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
+#include <linux/clk.h>
 #include <linux/dma-mapping.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
+#include <linux/gpio/machine.h>
+#include <linux/gpio/property.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/leds.h>
 #include <linux/mmc/host.h>
-#include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/pm.h>
 #include <linux/spi/spi.h>
-#include <linux/spi/spi_gpio.h>
-#include <linux/spi/ads7846.h>
 #include <asm/mach-au1x00/au1000.h>
+#include <asm/mach-au1x00/gpio-au1000.h>
 #include <asm/mach-au1x00/au1000_dma.h>
 #include <asm/mach-au1x00/au1100_mmc.h>
 #include <asm/mach-db1x00/bcsr.h>
 #include <asm/reboot.h>
 #include <prom.h>
+
+#include "db1xxx.h"
 #include "platform.h"
 
 #define F_SWAPPED (bcsr_read(BCSR_STATUS) & BCSR_STATUS_DB1000_SWAPBOOT)
 
-struct pci_dev;
+const char *get_system_type(void);
 
-static const char *board_type_str(void)
-{
-	switch (BCSR_WHOAMI_BOARD(bcsr_read(BCSR_WHOAMI))) {
-	case BCSR_WHOAMI_DB1000:
-		return "DB1000";
-	case BCSR_WHOAMI_DB1500:
-		return "DB1500";
-	case BCSR_WHOAMI_DB1100:
-		return "DB1100";
-	case BCSR_WHOAMI_PB1500:
-	case BCSR_WHOAMI_PB1500R2:
-		return "PB1500";
-	case BCSR_WHOAMI_PB1100:
-		return "PB1100";
-	default:
-		return "(unknown)";
-	}
-}
-
-const char *get_system_type(void)
-{
-	return board_type_str();
-}
-
-void __init board_setup(void)
+int __init db1000_board_setup(void)
 {
 	/* initialize board register space */
 	bcsr_init(DB1000_BCSR_PHYS_ADDR,
 		  DB1000_BCSR_PHYS_ADDR + DB1000_BCSR_HEXLED_OFS);
 
-	printk(KERN_INFO "AMD Alchemy %s Board\n", board_type_str());
+	switch (BCSR_WHOAMI_BOARD(bcsr_read(BCSR_WHOAMI))) {
+	case BCSR_WHOAMI_DB1000:
+	case BCSR_WHOAMI_DB1500:
+	case BCSR_WHOAMI_DB1100:
+	case BCSR_WHOAMI_PB1500:
+	case BCSR_WHOAMI_PB1500R2:
+	case BCSR_WHOAMI_PB1100:
+		pr_info("AMD Alchemy %s Board\n", get_system_type());
+		return 0;
+	}
+	return -ENODEV;
 }
-
 
 static int db1500_map_pci_irq(const struct pci_dev *d, u8 slot, u8 pin)
 {
@@ -93,6 +69,8 @@ static int db1500_map_pci_irq(const struct pci_dev *d, u8 slot, u8 pin)
 	}
 	return -1;
 }
+
+static u64 au1xxx_all_dmamask = DMA_BIT_MASK(32);
 
 static struct resource alchemy_pci_host_res[] = {
 	[0] = {
@@ -114,17 +92,10 @@ static struct platform_device db1500_pci_host_dev = {
 	.resource	= alchemy_pci_host_res,
 };
 
-static int __init db1500_pci_init(void)
+int __init db1500_pci_setup(void)
 {
-	int id = BCSR_WHOAMI_BOARD(bcsr_read(BCSR_WHOAMI));
-	if ((id == BCSR_WHOAMI_DB1500) || (id == BCSR_WHOAMI_PB1500) ||
-	    (id == BCSR_WHOAMI_PB1500R2))
-		return platform_device_register(&db1500_pci_host_dev);
-	return 0;
+	return platform_device_register(&db1500_pci_host_dev);
 }
-/* must be arch_initcall; MIPS PCI scans busses in a subsys_initcall */
-arch_initcall(db1500_pci_init);
-
 
 static struct resource au1100_lcd_resources[] = {
 	[0] = {
@@ -139,13 +110,11 @@ static struct resource au1100_lcd_resources[] = {
 	}
 };
 
-static u64 au1100_lcd_dmamask = DMA_BIT_MASK(32);
-
 static struct platform_device au1100_lcd_device = {
 	.name		= "au1100-lcd",
 	.id		= 0,
 	.dev = {
-		.dma_mask		= &au1100_lcd_dmamask,
+		.dma_mask		= &au1xxx_all_dmamask,
 		.coherent_dma_mask	= DMA_BIT_MASK(32),
 	},
 	.num_resources	= ARRAY_SIZE(au1100_lcd_resources),
@@ -189,18 +158,18 @@ static struct platform_device db1x00_codec_dev = {
 
 static struct platform_device db1x00_audio_dev = {
 	.name		= "db1000-audio",
+	.dev = {
+		.dma_mask		= &au1xxx_all_dmamask,
+		.coherent_dma_mask	= DMA_BIT_MASK(32),
+	},
 };
 
 /******************************************************************************/
 
+#ifdef CONFIG_MMC_AU1X
 static irqreturn_t db1100_mmc_cd(int irq, void *ptr)
 {
-	void (*mmc_cd)(struct mmc_host *, unsigned long);
-	/* link against CONFIG_MMC=m */
-	mmc_cd = symbol_get(mmc_detect_change);
-	mmc_cd(ptr, msecs_to_jiffies(500));
-	symbol_put(mmc_detect_change);
-
+	mmc_detect_change(ptr, msecs_to_jiffies(500));
 	return IRQ_HANDLED;
 }
 
@@ -357,13 +326,11 @@ static struct resource au1100_mmc0_resources[] = {
 	}
 };
 
-static u64 au1xxx_mmc_dmamask =	 DMA_BIT_MASK(32);
-
 static struct platform_device db1100_mmc0_dev = {
 	.name		= "au1xxx-mmc",
 	.id		= 0,
 	.dev = {
-		.dma_mask		= &au1xxx_mmc_dmamask,
+		.dma_mask		= &au1xxx_all_dmamask,
 		.coherent_dma_mask	= DMA_BIT_MASK(32),
 		.platform_data		= &db1100_mmc_platdata[0],
 	},
@@ -398,79 +365,26 @@ static struct platform_device db1100_mmc1_dev = {
 	.name		= "au1xxx-mmc",
 	.id		= 1,
 	.dev = {
-		.dma_mask		= &au1xxx_mmc_dmamask,
+		.dma_mask		= &au1xxx_all_dmamask,
 		.coherent_dma_mask	= DMA_BIT_MASK(32),
 		.platform_data		= &db1100_mmc_platdata[1],
 	},
 	.num_resources	= ARRAY_SIZE(au1100_mmc1_res),
 	.resource	= au1100_mmc1_res,
 };
+#endif /* CONFIG_MMC_AU1X */
 
 /******************************************************************************/
 
-static void db1000_irda_set_phy_mode(int mode)
-{
-	unsigned short mask = BCSR_RESETS_IRDA_MODE_MASK | BCSR_RESETS_FIR_SEL;
-
-	switch (mode) {
-	case AU1000_IRDA_PHY_MODE_OFF:
-		bcsr_mod(BCSR_RESETS, mask, BCSR_RESETS_IRDA_MODE_OFF);
-		break;
-	case AU1000_IRDA_PHY_MODE_SIR:
-		bcsr_mod(BCSR_RESETS, mask, BCSR_RESETS_IRDA_MODE_FULL);
-		break;
-	case AU1000_IRDA_PHY_MODE_FIR:
-		bcsr_mod(BCSR_RESETS, mask, BCSR_RESETS_IRDA_MODE_FULL |
-					    BCSR_RESETS_FIR_SEL);
-		break;
-	}
-}
-
-static struct au1k_irda_platform_data db1000_irda_platdata = {
-	.set_phy_mode	= db1000_irda_set_phy_mode,
+static const struct property_entry db1100_ads7846_props[] = {
+	PROPERTY_ENTRY_U16("ti,vref_min", 3300),
+	PROPERTY_ENTRY_GPIO("pendown-gpios", &alchemy_gpio2_node, 21, GPIO_ACTIVE_LOW),
+	{ }
 };
 
-static struct resource au1000_irda_res[] = {
-	[0] = {
-		.start	= AU1000_IRDA_PHYS_ADDR,
-		.end	= AU1000_IRDA_PHYS_ADDR + 0x0fff,
-		.flags	= IORESOURCE_MEM,
-	},
-	[1] = {
-		.start	= AU1000_IRDA_TX_INT,
-		.end	= AU1000_IRDA_TX_INT,
-		.flags	= IORESOURCE_IRQ,
-	},
-	[2] = {
-		.start	= AU1000_IRDA_RX_INT,
-		.end	= AU1000_IRDA_RX_INT,
-		.flags	= IORESOURCE_IRQ,
-	},
-};
-
-static struct platform_device db1000_irda_dev = {
-	.name	= "au1000-irda",
-	.id	= -1,
-	.dev	= {
-		.platform_data = &db1000_irda_platdata,
-	},
-	.resource	= au1000_irda_res,
-	.num_resources	= ARRAY_SIZE(au1000_irda_res),
-};
-
-/******************************************************************************/
-
-static struct ads7846_platform_data db1100_touch_pd = {
-	.model		= 7846,
-	.vref_mv	= 3300,
-	.gpio_pendown	= 21,
-};
-
-static struct spi_gpio_platform_data db1100_spictl_pd = {
-	.sck		= 209,
-	.mosi		= 208,
-	.miso		= 207,
-	.num_chipselect = 1,
+static const struct software_node db1100_ads7846_swnode = {
+	.name		= "ads7846",
+	.properties	= db1100_ads7846_props,
 };
 
 static struct spi_board_info db1100_spi_info[] __initdata = {
@@ -481,19 +395,32 @@ static struct spi_board_info db1100_spi_info[] __initdata = {
 		.chip_select	 = 0,
 		.mode		 = 0,
 		.irq		 = AU1100_GPIO21_INT,
-		.platform_data	 = &db1100_touch_pd,
-		.controller_data = (void *)210, /* for spi_gpio: CS# GPIO210 */
+		.swnode		 = &db1100_ads7846_swnode,
 	},
 };
 
-static struct platform_device db1100_spi_dev = {
+/*
+ * Alchemy GPIO 2 has its base at 200 so the GPIO lines
+ * 207 thru 210 are GPIOs at offset 7 thru 10 at this chip.
+ */
+static const struct property_entry db1100_spi_dev_properties[] __initconst = {
+	PROPERTY_ENTRY_GPIO("miso-gpios",
+			    &alchemy_gpio2_node, 7, GPIO_ACTIVE_HIGH),
+	PROPERTY_ENTRY_GPIO("mosi-gpios",
+			    &alchemy_gpio2_node, 8, GPIO_ACTIVE_HIGH),
+	PROPERTY_ENTRY_GPIO("sck-gpios",
+			    &alchemy_gpio2_node, 9, GPIO_ACTIVE_HIGH),
+	PROPERTY_ENTRY_GPIO("cs-gpios",
+			    &alchemy_gpio2_node, 10, GPIO_ACTIVE_HIGH),
+	{ }
+};
+
+static const struct platform_device_info db1100_spi_dev_info __initconst = {
 	.name		= "spi_gpio",
 	.id		= 0,
-	.dev		= {
-		.platform_data	= &db1100_spictl_pd,
-	},
+	.dma_mask	= DMA_BIT_MASK(32),
+	.properties	= db1100_spi_dev_properties,
 };
-
 
 static struct platform_device *db1x00_devs[] = {
 	&db1x00_codec_dev,
@@ -502,69 +429,80 @@ static struct platform_device *db1x00_devs[] = {
 	&db1x00_audio_dev,
 };
 
-static struct platform_device *db1000_devs[] = {
-	&db1000_irda_dev,
-};
-
 static struct platform_device *db1100_devs[] = {
 	&au1100_lcd_device,
+#ifdef CONFIG_MMC_AU1X
 	&db1100_mmc0_dev,
 	&db1100_mmc1_dev,
-	&db1000_irda_dev,
+#endif
 };
 
-static int __init db1000_dev_init(void)
+int __init db1000_dev_setup(void)
 {
 	int board = BCSR_WHOAMI_BOARD(bcsr_read(BCSR_WHOAMI));
 	int c0, c1, d0, d1, s0, s1, flashsize = 32,  twosocks = 1;
+	int err;
 	unsigned long pfc;
+	struct clk *c, *p;
+	struct platform_device *spi_dev;
 
 	if (board == BCSR_WHOAMI_DB1500) {
 		c0 = AU1500_GPIO2_INT;
 		c1 = AU1500_GPIO5_INT;
-		d0 = AU1500_GPIO0_INT;
-		d1 = AU1500_GPIO3_INT;
+		d0 = 0;	/* GPIO number, NOT irq! */
+		d1 = 3; /* GPIO number, NOT irq! */
 		s0 = AU1500_GPIO1_INT;
 		s1 = AU1500_GPIO4_INT;
 	} else if (board == BCSR_WHOAMI_DB1100) {
 		c0 = AU1100_GPIO2_INT;
 		c1 = AU1100_GPIO5_INT;
-		d0 = AU1100_GPIO0_INT;
-		d1 = AU1100_GPIO3_INT;
+		d0 = 0; /* GPIO number, NOT irq! */
+		d1 = 3; /* GPIO number, NOT irq! */
 		s0 = AU1100_GPIO1_INT;
 		s1 = AU1100_GPIO4_INT;
 
+		gpio_request(19, "sd0_cd");
+		gpio_request(20, "sd1_cd");
 		gpio_direction_input(19);	/* sd0 cd# */
 		gpio_direction_input(20);	/* sd1 cd# */
-		gpio_direction_input(21);	/* touch pendown# */
-		gpio_direction_input(207);	/* SPI MISO */
-		gpio_direction_output(208, 0);	/* SPI MOSI */
-		gpio_direction_output(209, 1);	/* SPI SCK */
-		gpio_direction_output(210, 1);	/* SPI CS# */
 
 		/* spi_gpio on SSI0 pins */
-		pfc = __raw_readl((void __iomem *)SYS_PINFUNC);
+		pfc = alchemy_rdsys(AU1000_SYS_PINFUNC);
 		pfc |= (1 << 0);	/* SSI0 pins as GPIOs */
-		__raw_writel(pfc, (void __iomem *)SYS_PINFUNC);
-		wmb();
+		alchemy_wrsys(pfc, AU1000_SYS_PINFUNC);
 
 		spi_register_board_info(db1100_spi_info,
 					ARRAY_SIZE(db1100_spi_info));
 
+		/* link LCD clock to AUXPLL */
+		p = clk_get(NULL, "auxpll_clk");
+		c = clk_get(NULL, "lcd_intclk");
+		if (!IS_ERR(c) && !IS_ERR(p)) {
+			clk_set_parent(c, p);
+			clk_set_rate(c, clk_get_rate(p));
+		}
+		if (!IS_ERR(c))
+			clk_put(c);
+		if (!IS_ERR(p))
+			clk_put(p);
+
 		platform_add_devices(db1100_devs, ARRAY_SIZE(db1100_devs));
-		platform_device_register(&db1100_spi_dev);
+
+		spi_dev = platform_device_register_full(&db1100_spi_dev_info);
+		err = PTR_ERR_OR_ZERO(spi_dev);
+		if (err)
+			pr_err("failed to register SPI controller: %d\n", err);
 	} else if (board == BCSR_WHOAMI_DB1000) {
 		c0 = AU1000_GPIO2_INT;
 		c1 = AU1000_GPIO5_INT;
-		d0 = AU1000_GPIO0_INT;
-		d1 = AU1000_GPIO3_INT;
+		d0 = 0; /* GPIO number, NOT irq! */
+		d1 = 3; /* GPIO number, NOT irq! */
 		s0 = AU1000_GPIO1_INT;
 		s1 = AU1000_GPIO4_INT;
-		platform_add_devices(db1000_devs, ARRAY_SIZE(db1000_devs));
 	} else if ((board == BCSR_WHOAMI_PB1500) ||
 		   (board == BCSR_WHOAMI_PB1500R2)) {
 		c0 = AU1500_GPIO203_INT;
-		d0 = AU1500_GPIO201_INT;
+		d0 = 1; /* GPIO number, NOT irq! */
 		s0 = AU1500_GPIO202_INT;
 		twosocks = 0;
 		flashsize = 64;
@@ -577,7 +515,7 @@ static int __init db1000_dev_init(void)
 		 */
 	} else if (board == BCSR_WHOAMI_PB1100) {
 		c0 = AU1100_GPIO11_INT;
-		d0 = AU1100_GPIO9_INT;
+		d0 = 9; /* GPIO number, NOT irq! */
 		s0 = AU1100_GPIO10_INT;
 		twosocks = 0;
 		flashsize = 64;
@@ -594,7 +532,6 @@ static int __init db1000_dev_init(void)
 	} else
 		return 0; /* unknown board, no further dev setup to do */
 
-	irq_set_irq_type(d0, IRQ_TYPE_EDGE_BOTH);
 	irq_set_irq_type(c0, IRQ_TYPE_LEVEL_LOW);
 	irq_set_irq_type(s0, IRQ_TYPE_LEVEL_LOW);
 
@@ -608,7 +545,6 @@ static int __init db1000_dev_init(void)
 		c0, d0, /*s0*/0, 0, 0);
 
 	if (twosocks) {
-		irq_set_irq_type(d1, IRQ_TYPE_EDGE_BOTH);
 		irq_set_irq_type(c1, IRQ_TYPE_LEVEL_LOW);
 		irq_set_irq_type(s1, IRQ_TYPE_LEVEL_LOW);
 
@@ -626,4 +562,3 @@ static int __init db1000_dev_init(void)
 	db1x_register_norflash(flashsize << 20, 4 /* 32bit */, F_SWAPPED);
 	return 0;
 }
-device_initcall(db1000_dev_init);

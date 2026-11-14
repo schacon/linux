@@ -1,15 +1,10 @@
-/**
- * tpci200.h
- *
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
  * driver for the carrier TEWS TPCI-200
  *
  * Copyright (C) 2009-2012 CERN (www.cern.ch)
  * Author: Nicolas Serafini, EIC2 SA
  * Author: Samuel Iglesias Gonsalvez <siglesias@igalia.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; version 2 of the License.
  */
 
 #ifndef _TPCI200_H_
@@ -150,7 +145,6 @@ struct tpci200_slot {
  */
 struct tpci200_infos {
 	struct pci_dev			*pdev;
-	struct pci_device_id		*id_table;
 	struct tpci200_regs __iomem	*interface_regs;
 	void __iomem			*cfg_regs;
 	struct ipack_bus_device		*ipack_bus;

@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * OSS compatible sequencer driver
  *
  * Copyright (C) 1998,99 Takashi Iwai <tiwai@suse.de>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include "seq_oss_device.h"
@@ -26,6 +13,7 @@
 #include <sound/seq_oss_legacy.h>
 #include "seq_oss_readq.h"
 #include "seq_oss_writeq.h"
+#include <linux/nospec.h>
 
 
 /*
@@ -51,8 +39,10 @@ static int set_echo_event(struct seq_oss_devinfo *dp, union evrec *rec, struct s
  */
 
 int
-snd_seq_oss_process_event(struct seq_oss_devinfo *dp, union evrec *q, struct snd_seq_event *ev)
+snd_seq_oss_process_event(struct seq_oss_devinfo *dp, union evrec *q,
+			  struct snd_seq_event *ev, snd_use_lock_t **lockp)
 {
+	*lockp = NULL;
 	switch (q->s.code) {
 	case SEQ_EXTENDED:
 		return extended_event(dp, q, ev);
@@ -81,7 +71,7 @@ snd_seq_oss_process_event(struct seq_oss_devinfo *dp, union evrec *q, struct snd
 		if (snd_seq_oss_midi_open(dp, q->s.dev, SNDRV_SEQ_OSS_FILE_WRITE))
 			break;
 		if (snd_seq_oss_midi_filemode(dp, q->s.dev) & SNDRV_SEQ_OSS_FILE_WRITE)
-			return snd_seq_oss_midi_putc(dp, q->s.dev, q->s.parm1, ev);
+			return snd_seq_oss_midi_putc(dp, q->s.dev, q->s.parm1, ev, lockp);
 		break;
 
 	case SEQ_ECHO:
@@ -287,10 +277,10 @@ note_on_event(struct seq_oss_devinfo *dp, int dev, int ch, int note, int vel, st
 {
 	struct seq_oss_synthinfo *info;
 
-	if (!snd_seq_oss_synth_is_valid(dp, dev))
+	info = snd_seq_oss_synth_info(dp, dev);
+	if (!info)
 		return -ENXIO;
 
-	info = &dp->synths[dev];
 	switch (info->arg.event_passing) {
 	case SNDRV_SEQ_OSS_PROCESS_EVENTS:
 		if (! info->ch || ch < 0 || ch >= info->nr_voices) {
@@ -298,19 +288,18 @@ note_on_event(struct seq_oss_devinfo *dp, int dev, int ch, int note, int vel, st
 			return set_note_event(dp, dev, SNDRV_SEQ_EVENT_NOTEON, ch, note, vel, ev);
 		}
 
+		ch = array_index_nospec(ch, info->nr_voices);
 		if (note == 255 && info->ch[ch].note >= 0) {
 			/* volume control */
 			int type;
-			//if (! vel)
-				/* set volume to zero -- note off */
-			//	type = SNDRV_SEQ_EVENT_NOTEOFF;
-			//else
-				if (info->ch[ch].vel)
+
+			if (info->ch[ch].vel)
 				/* sample already started -- volume change */
 				type = SNDRV_SEQ_EVENT_KEYPRESS;
 			else
 				/* sample not started -- start now */
 				type = SNDRV_SEQ_EVENT_NOTEON;
+
 			info->ch[ch].vel = vel;
 			return set_note_event(dp, dev, type, ch, info->ch[ch].note, vel, ev);
 		} else if (note >= 128)
@@ -347,10 +336,10 @@ note_off_event(struct seq_oss_devinfo *dp, int dev, int ch, int note, int vel, s
 {
 	struct seq_oss_synthinfo *info;
 
-	if (!snd_seq_oss_synth_is_valid(dp, dev))
+	info = snd_seq_oss_synth_info(dp, dev);
+	if (!info)
 		return -ENXIO;
 
-	info = &dp->synths[dev];
 	switch (info->arg.event_passing) {
 	case SNDRV_SEQ_OSS_PROCESS_EVENTS:
 		if (! info->ch || ch < 0 || ch >= info->nr_voices) {
@@ -358,6 +347,7 @@ note_off_event(struct seq_oss_devinfo *dp, int dev, int ch, int note, int vel, s
 			return set_note_event(dp, dev, SNDRV_SEQ_EVENT_NOTEON, ch, note, vel, ev);
 		}
 
+		ch = array_index_nospec(ch, info->nr_voices);
 		if (info->ch[ch].note >= 0) {
 			note = info->ch[ch].note;
 			info->ch[ch].vel = 0;
@@ -381,7 +371,7 @@ note_off_event(struct seq_oss_devinfo *dp, int dev, int ch, int note, int vel, s
 static int
 set_note_event(struct seq_oss_devinfo *dp, int dev, int type, int ch, int note, int vel, struct snd_seq_event *ev)
 {
-	if (! snd_seq_oss_synth_is_valid(dp, dev))
+	if (!snd_seq_oss_synth_info(dp, dev))
 		return -ENXIO;
 	
 	ev->type = type;
@@ -399,7 +389,7 @@ set_note_event(struct seq_oss_devinfo *dp, int dev, int type, int ch, int note, 
 static int
 set_control_event(struct seq_oss_devinfo *dp, int dev, int type, int ch, int param, int val, struct snd_seq_event *ev)
 {
-	if (! snd_seq_oss_synth_is_valid(dp, dev))
+	if (!snd_seq_oss_synth_info(dp, dev))
 		return -ENXIO;
 	
 	ev->type = type;
@@ -435,6 +425,9 @@ snd_seq_oss_event_input(struct snd_seq_event *ev, int direct, void *private_data
 	struct seq_oss_devinfo *dp = (struct seq_oss_devinfo *)private_data;
 	union evrec *rec;
 
+	if (!dp || !smp_load_acquire(&dp->initialized))
+		return 0; /* ignored */
+
 	if (ev->type != SNDRV_SEQ_EVENT_ECHO)
 		return snd_seq_oss_midi_input(ev, direct, private_data);
 
@@ -443,8 +436,12 @@ snd_seq_oss_event_input(struct snd_seq_event *ev, int direct, void *private_data
 
 	rec = (union evrec*)&ev->data;
 	if (rec->s.code == SEQ_SYNCTIMER) {
+		struct seq_oss_writeq *writeq = READ_ONCE(dp->writeq);
+
+		if (!writeq)
+			return 0;
 		/* sync echo back */
-		snd_seq_oss_writeq_wakeup(dp->writeq, rec->t.time);
+		snd_seq_oss_writeq_wakeup(writeq, rec->t.time);
 		
 	} else {
 		/* echo back event */

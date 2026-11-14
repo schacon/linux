@@ -41,9 +41,6 @@
 
 #define VALIDATE_TID 1
 
-void *cxgb_alloc_mem(unsigned long size);
-void cxgb_free_mem(void *addr);
-
 /*
  * Map an ATID or STID to their entries in the corresponding TID tables.
  */
@@ -109,6 +106,4 @@ static inline struct t3c_tid_entry *lookup_atid(const struct tid_info *t,
 	return &e->t3c_tid;
 }
 
-int attach_t3cdev(struct t3cdev *dev);
-void detach_t3cdev(struct t3cdev *dev);
 #endif

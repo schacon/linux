@@ -84,9 +84,9 @@ csio_reg_rnode(struct csio_rnode *rn)
 
 	ln->num_reg_rnodes++;
 	rport = rn->rport;
-	spin_lock_irq(shost->host_lock);
+	spin_lock_irq(&shost->host_lock);
 	*((struct csio_rnode **)rport->dd_data) = rn;
-	spin_unlock_irq(shost->host_lock);
+	spin_unlock_irq(&shost->host_lock);
 
 	sp = &rn->rn_sparm;
 	rport->maxframe_size = ntohs(sp->csp.sp_bb_data);
@@ -274,11 +274,23 @@ csio_get_host_speed(struct Scsi_Host *shost)
 
 	spin_lock_irq(&hw->lock);
 	switch (hw->pport[ln->portid].link_speed) {
-	case FW_PORT_CAP_SPEED_1G:
+	case FW_PORT_CAP32_SPEED_1G:
 		fc_host_speed(shost) = FC_PORTSPEED_1GBIT;
 		break;
-	case FW_PORT_CAP_SPEED_10G:
+	case FW_PORT_CAP32_SPEED_10G:
 		fc_host_speed(shost) = FC_PORTSPEED_10GBIT;
+		break;
+	case FW_PORT_CAP32_SPEED_25G:
+		fc_host_speed(shost) = FC_PORTSPEED_25GBIT;
+		break;
+	case FW_PORT_CAP32_SPEED_40G:
+		fc_host_speed(shost) = FC_PORTSPEED_40GBIT;
+		break;
+	case FW_PORT_CAP32_SPEED_50G:
+		fc_host_speed(shost) = FC_PORTSPEED_50GBIT;
+		break;
+	case FW_PORT_CAP32_SPEED_100G:
+		fc_host_speed(shost) = FC_PORTSPEED_100GBIT;
 		break;
 	default:
 		fc_host_speed(shost) = FC_PORTSPEED_UNKNOWN;
@@ -451,9 +463,9 @@ csio_fcoe_alloc_vnp(struct csio_hw *hw, struct csio_lnode *ln)
 
 	/* Process Mbox response of VNP command */
 	rsp = (struct fw_fcoe_vnp_cmd *)(mbp->mb);
-	if (FW_CMD_RETVAL_GET(ntohl(rsp->alloc_to_len16)) != FW_SUCCESS) {
+	if (FW_CMD_RETVAL_G(ntohl(rsp->alloc_to_len16)) != FW_SUCCESS) {
 		csio_ln_err(ln, "FCOE VNP ALLOC cmd returned 0x%x!\n",
-			    FW_CMD_RETVAL_GET(ntohl(rsp->alloc_to_len16)));
+			    FW_CMD_RETVAL_G(ntohl(rsp->alloc_to_len16)));
 		ret = -EINVAL;
 		goto out_free;
 	}
@@ -485,7 +497,6 @@ out:
 static int
 csio_fcoe_free_vnp(struct csio_hw *hw, struct csio_lnode *ln)
 {
-	struct csio_lnode *pln;
 	struct csio_mb  *mbp;
 	struct fw_fcoe_vnp_cmd *rsp;
 	int ret = 0;
@@ -501,8 +512,6 @@ csio_fcoe_free_vnp(struct csio_hw *hw, struct csio_lnode *ln)
 		ret = -ENOMEM;
 		goto out;
 	}
-
-	pln = ln->pln;
 
 	csio_fcoe_vnp_free_init_mb(ln, mbp, CSIO_MB_DEFAULT_TMO,
 				   ln->fcf_flowid, ln->vnp_flowid,
@@ -526,9 +535,9 @@ csio_fcoe_free_vnp(struct csio_hw *hw, struct csio_lnode *ln)
 
 	/* Process Mbox response of VNP command */
 	rsp = (struct fw_fcoe_vnp_cmd *)(mbp->mb);
-	if (FW_CMD_RETVAL_GET(ntohl(rsp->alloc_to_len16)) != FW_SUCCESS) {
+	if (FW_CMD_RETVAL_G(ntohl(rsp->alloc_to_len16)) != FW_SUCCESS) {
 		csio_ln_err(ln, "FCOE VNP FREE cmd returned 0x%x!\n",
-			    FW_CMD_RETVAL_GET(ntohl(rsp->alloc_to_len16)));
+			    FW_CMD_RETVAL_G(ntohl(rsp->alloc_to_len16)));
 		ret = -EINVAL;
 	}
 
@@ -582,12 +591,12 @@ csio_vport_create(struct fc_vport *fc_vport, bool disable)
 	}
 
 	fc_vport_set_state(fc_vport, FC_VPORT_INITIALIZING);
+	ln->fc_vport = fc_vport;
 
 	if (csio_fcoe_alloc_vnp(hw, ln))
 		goto error;
 
 	*(struct csio_lnode **)fc_vport->dd_data = ln;
-	ln->fc_vport = fc_vport;
 	if (!fc_vport->node_name)
 		fc_vport->node_name = wwn_to_u64(csio_ln_wwnn(ln));
 	if (!fc_vport->port_name)
@@ -621,7 +630,7 @@ csio_vport_delete(struct fc_vport *fc_vport)
 	/* Quiesce ios and send remove event to lnode */
 	scsi_block_requests(shost);
 	spin_lock_irq(&hw->lock);
-	csio_scsim_cleanup_io_lnode(csio_hw_to_scsim(hw), ln);
+	csio_scsim_cleanup_io_lnode(hw, ln);
 	csio_lnode_close(ln);
 	spin_unlock_irq(&hw->lock);
 	scsi_unblock_requests(shost);
@@ -646,7 +655,7 @@ csio_vport_disable(struct fc_vport *fc_vport, bool disable)
 		/* Quiesce ios and send stop event to lnode */
 		scsi_block_requests(shost);
 		spin_lock_irq(&hw->lock);
-		csio_scsim_cleanup_io_lnode(csio_hw_to_scsim(hw), ln);
+		csio_scsim_cleanup_io_lnode(hw, ln);
 		csio_lnode_stop(ln);
 		spin_unlock_irq(&hw->lock);
 		scsi_unblock_requests(shost);

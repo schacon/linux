@@ -1,9 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation.
  *
- * Copyright (C) 2010 John Crispin <blogic@openwrt.org>
+ * Copyright (C) 2010 John Crispin <john@phrozen.org>
  */
 
 #ifndef _LTQ_FALCON_H__
@@ -22,7 +20,7 @@
 
 /*
  * during early_printk no ioremap possible at this early stage
- * lets use KSEG1 instead
+ * let's use KSEG1 instead
  */
 #define LTQ_ASC0_BASE_ADDR	0x1E100C00
 #define LTQ_EARLY_ASC		KSEG1ADDR(LTQ_ASC0_BASE_ADDR)
@@ -57,7 +55,7 @@ extern __iomem void *ltq_sys1_membase;
 #define ltq_sys1_w32_mask(clear, set, reg)   \
 	ltq_sys1_w32((ltq_sys1_r32(reg) & ~(clear)) | (set), reg)
 
-/* allow the gpio and pinctrl drivers to talk to eachother */
+/* allow the gpio and pinctrl drivers to talk to each other */
 extern int pinctrl_falcon_get_range_size(int id);
 extern void pinctrl_falcon_add_gpio_range(struct pinctrl_gpio_range *range);
 

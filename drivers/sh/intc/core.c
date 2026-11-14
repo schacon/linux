@@ -65,9 +65,9 @@ void intc_set_prio_level(unsigned int irq, unsigned int level)
 	raw_spin_unlock_irqrestore(&intc_big_lock, flags);
 }
 
-static void intc_redirect_irq(unsigned int irq, struct irq_desc *desc)
+static void intc_redirect_irq(struct irq_desc *desc)
 {
-	generic_handle_irq((unsigned int)irq_get_handler_data(irq));
+	generic_handle_irq((unsigned int)irq_desc_get_handler_data(desc));
 }
 
 static void __init intc_register_irq(struct intc_desc *desc,
@@ -79,12 +79,6 @@ static void __init intc_register_irq(struct intc_desc *desc,
 	struct irq_data *irq_data;
 	unsigned int data[2], primary;
 	unsigned long flags;
-
-	/*
-	 * Register the IRQ position with the global IRQ map, then insert
-	 * it in to the radix tree.
-	 */
-	irq_reserve_irq(irq);
 
 	raw_spin_lock_irqsave(&intc_big_lock, flags);
 	radix_tree_insert(&d->tree, enum_id, intc_irq_xlate_get(irq));
@@ -106,8 +100,8 @@ static void __init intc_register_irq(struct intc_desc *desc,
 		primary = 1;
 
 	if (!data[0] && !data[1])
-		pr_warning("missing unique irq mask for irq %d (vect 0x%04x)\n",
-			   irq, irq2evt(irq));
+		pr_warn("missing unique irq mask for irq %d (vect 0x%04x)\n",
+			irq, irq2evt(irq));
 
 	data[0] = data[0] ? data[0] : intc_get_mask_handle(desc, d, enum_id, 1);
 	data[1] = data[1] ? data[1] : intc_get_prio_handle(desc, d, enum_id, 1);
@@ -185,6 +179,21 @@ static unsigned int __init save_reg(struct intc_desc_int *d,
 	return 0;
 }
 
+static bool __init intc_map(struct irq_domain *domain, int irq)
+{
+	if (!irq_to_desc(irq) && irq_alloc_desc_at(irq, NUMA_NO_NODE) != irq) {
+		pr_err("uname to allocate IRQ %d\n", irq);
+		return false;
+	}
+
+	if (irq_domain_associate(domain, irq, irq)) {
+		pr_err("domain association failure\n");
+		return false;
+	}
+
+	return true;
+}
+
 int __init register_intc_controller(struct intc_desc *desc)
 {
 	unsigned int i, k, smp;
@@ -195,12 +204,11 @@ int __init register_intc_controller(struct intc_desc *desc)
 	pr_info("Registered controller '%s' with %u IRQs\n",
 		desc->name, hw->nr_vectors);
 
-	d = kzalloc(sizeof(*d), GFP_NOWAIT);
+	d = kzalloc_obj(*d, GFP_NOWAIT);
 	if (!d)
 		goto err0;
 
 	INIT_LIST_HEAD(&d->list);
-	list_add_tail(&d->list, &intc_list);
 
 	raw_spin_lock_init(&d->lock);
 	INIT_RADIX_TREE(&d->tree, GFP_ATOMIC);
@@ -209,8 +217,7 @@ int __init register_intc_controller(struct intc_desc *desc)
 
 	if (desc->num_resources) {
 		d->nr_windows = desc->num_resources;
-		d->window = kzalloc(d->nr_windows * sizeof(*d->window),
-				    GFP_NOWAIT);
+		d->window = kzalloc_objs(*d->window, d->nr_windows, GFP_NOWAIT);
 		if (!d->window)
 			goto err1;
 
@@ -219,8 +226,8 @@ int __init register_intc_controller(struct intc_desc *desc)
 			WARN_ON(resource_type(res) != IORESOURCE_MEM);
 			d->window[k].phys = res->start;
 			d->window[k].size = resource_size(res);
-			d->window[k].virt = ioremap_nocache(res->start,
-							 resource_size(res));
+			d->window[k].virt = ioremap(res->start,
+						    resource_size(res));
 			if (!d->window[k].virt)
 				goto err2;
 		}
@@ -236,12 +243,12 @@ int __init register_intc_controller(struct intc_desc *desc)
 	d->nr_reg += hw->ack_regs ? hw->nr_ack_regs : 0;
 	d->nr_reg += hw->subgroups ? hw->nr_subgroups : 0;
 
-	d->reg = kzalloc(d->nr_reg * sizeof(*d->reg), GFP_NOWAIT);
+	d->reg = kzalloc_objs(*d->reg, d->nr_reg, GFP_NOWAIT);
 	if (!d->reg)
 		goto err2;
 
 #ifdef CONFIG_SMP
-	d->smp = kzalloc(d->nr_reg * sizeof(*d->smp), GFP_NOWAIT);
+	d->smp = kzalloc_objs(*d->smp, d->nr_reg, GFP_NOWAIT);
 	if (!d->smp)
 		goto err3;
 #endif
@@ -259,8 +266,7 @@ int __init register_intc_controller(struct intc_desc *desc)
 	}
 
 	if (hw->prio_regs) {
-		d->prio = kzalloc(hw->nr_vectors * sizeof(*d->prio),
-				  GFP_NOWAIT);
+		d->prio = kzalloc_objs(*d->prio, hw->nr_vectors, GFP_NOWAIT);
 		if (!d->prio)
 			goto err4;
 
@@ -269,22 +275,15 @@ int __init register_intc_controller(struct intc_desc *desc)
 			k += save_reg(d, k, hw->prio_regs[i].set_reg, smp);
 			k += save_reg(d, k, hw->prio_regs[i].clr_reg, smp);
 		}
-
-		sort(d->prio, hw->nr_prio_regs, sizeof(*d->prio),
-		     intc_handle_int_cmp, NULL);
 	}
 
 	if (hw->sense_regs) {
-		d->sense = kzalloc(hw->nr_vectors * sizeof(*d->sense),
-				   GFP_NOWAIT);
+		d->sense = kzalloc_objs(*d->sense, hw->nr_vectors, GFP_NOWAIT);
 		if (!d->sense)
 			goto err5;
 
 		for (i = 0; i < hw->nr_sense_regs; i++)
 			k += save_reg(d, k, hw->sense_regs[i].reg, 0);
-
-		sort(d->sense, hw->nr_sense_regs, sizeof(*d->sense),
-		     intc_handle_int_cmp, NULL);
 	}
 
 	if (hw->subgroups)
@@ -317,24 +316,12 @@ int __init register_intc_controller(struct intc_desc *desc)
 	for (i = 0; i < hw->nr_vectors; i++) {
 		struct intc_vect *vect = hw->vectors + i;
 		unsigned int irq = evt2irq(vect->vect);
-		int res;
 
 		if (!vect->enum_id)
 			continue;
 
-		res = irq_create_identity_mapping(d->domain, irq);
-		if (unlikely(res)) {
-			if (res == -EEXIST) {
-				res = irq_domain_associate(d->domain, irq, irq);
-				if (unlikely(res)) {
-					pr_err("domain association failure\n");
-					continue;
-				}
-			} else {
-				pr_err("can't identity map IRQ %d\n", irq);
-				continue;
-			}
-		}
+		if (!intc_map(d->domain, irq))
+			continue;
 
 		intc_irq_xlate_set(irq, vect->enum_id, d);
 		intc_register_irq(desc, d, vect->enum_id, irq);
@@ -351,31 +338,23 @@ int __init register_intc_controller(struct intc_desc *desc)
 			 * IRQ support, each vector still needs to have
 			 * its own backing irq_desc.
 			 */
-			res = irq_create_identity_mapping(d->domain, irq2);
-			if (unlikely(res)) {
-				if (res == -EEXIST) {
-					res = irq_domain_associate(d->domain,
-								   irq2, irq2);
-					if (unlikely(res)) {
-						pr_err("domain association "
-						       "failure\n");
-						continue;
-					}
-				} else {
-					pr_err("can't identity map IRQ %d\n",
-					       irq);
-					continue;
-				}
-			}
+			if (!intc_map(d->domain, irq2))
+				continue;
 
 			vect2->enum_id = 0;
 
 			/* redirect this interrupts to the first one */
 			irq_set_chip(irq2, &dummy_irq_chip);
-			irq_set_chained_handler(irq2, intc_redirect_irq);
-			irq_set_handler_data(irq2, (void *)irq);
+			irq_set_chained_handler_and_data(irq2,
+							 intc_redirect_irq,
+							 (void *)irq);
 		}
 	}
+
+	sort(d->prio, d->nr_prio, sizeof(*d->prio),
+	     intc_handle_int_cmp, NULL);
+	sort(d->sense, d->nr_sense, sizeof(*d->sense),
+	     intc_handle_int_cmp, NULL);
 
 	intc_subgroup_init(desc, d);
 
@@ -385,6 +364,7 @@ int __init register_intc_controller(struct intc_desc *desc)
 
 	d->skip_suspend = desc->skip_syscore_suspend;
 
+	list_add_tail(&d->list, &intc_list);
 	nr_intc_controllers++;
 
 	return 0;
@@ -410,7 +390,7 @@ err0:
 	return -ENOMEM;
 }
 
-static int intc_suspend(void)
+static int intc_suspend(void *data)
 {
 	struct intc_desc_int *d;
 
@@ -436,7 +416,7 @@ static int intc_suspend(void)
 	return 0;
 }
 
-static void intc_resume(void)
+static void intc_resume(void *data)
 {
 	struct intc_desc_int *d;
 
@@ -466,12 +446,16 @@ static void intc_resume(void)
 	}
 }
 
-struct syscore_ops intc_syscore_ops = {
+static const struct syscore_ops intc_syscore_ops = {
 	.suspend	= intc_suspend,
 	.resume		= intc_resume,
 };
 
-struct bus_type intc_subsys = {
+static struct syscore intc_syscore = {
+	.ops = &intc_syscore_ops,
+};
+
+const struct bus_type intc_subsys = {
 	.name		= "intc",
 	.dev_name	= "intc",
 };
@@ -493,7 +477,7 @@ static int __init register_intc_devs(void)
 	struct intc_desc_int *d;
 	int error;
 
-	register_syscore_ops(&intc_syscore_ops);
+	register_syscore(&intc_syscore);
 
 	error = subsys_system_register(&intc_subsys, NULL);
 	if (!error) {

@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Analog devices AD5360, AD5361, AD5362, AD5363, AD5370, AD5371, AD5373
  * multi-channel Digital to Analog Converters driver
  *
  * Copyright 2011 Analog Devices Inc.
- *
- * Licensed under the GPL-2.
  */
 
 #include <linux/device.h>
@@ -68,6 +67,7 @@ struct ad5360_chip_info {
  * @chip_info:		chip model specific constants, available modes etc
  * @vref_reg:		vref supply regulators
  * @ctrl:		control register cache
+ * @lock:		lock to protect the data buffer during SPI ops
  * @data:		spi transfer buffers
  */
 
@@ -76,15 +76,16 @@ struct ad5360_state {
 	const struct ad5360_chip_info	*chip_info;
 	struct regulator_bulk_data	vref_reg[3];
 	unsigned int			ctrl;
+	struct mutex			lock;
 
 	/*
-	 * DMA (thus cache coherency maintenance) requires the
+	 * DMA (thus cache coherency maintenance) may require the
 	 * transfer buffers to live in their own cache lines.
 	 */
 	union {
 		__be32 d32;
 		u8 d8[4];
-	} data[2] ____cacheline_aligned;
+	} data[2] __aligned(IIO_DMA_MINALIGN);
 };
 
 enum ad5360_type {
@@ -107,7 +108,12 @@ enum ad5360_type {
 		BIT(IIO_CHAN_INFO_OFFSET) |				\
 		BIT(IIO_CHAN_INFO_CALIBSCALE) |			\
 		BIT(IIO_CHAN_INFO_CALIBBIAS),			\
-	.scan_type = IIO_ST('u', (bits), 16, 16 - (bits))	\
+	.scan_type = {						\
+		.sign = 'u',					\
+		.realbits = (bits),				\
+		.storagebits = 16,				\
+		.shift = 16 - (bits),				\
+	},							\
 }
 
 static const struct ad5360_chip_info ad5360_chip_info_tbl[] = {
@@ -200,13 +206,10 @@ static int ad5360_write_unlocked(struct iio_dev *indio_dev,
 static int ad5360_write(struct iio_dev *indio_dev, unsigned int cmd,
 	unsigned int addr, unsigned int val, unsigned int shift)
 {
-	int ret;
+	struct ad5360_state *st = iio_priv(indio_dev);
 
-	mutex_lock(&indio_dev->mlock);
-	ret = ad5360_write_unlocked(indio_dev, cmd, addr, val, shift);
-	mutex_unlock(&indio_dev->mlock);
-
-	return ret;
+	guard(mutex)(&st->lock);
+	return ad5360_write_unlocked(indio_dev, cmd, addr, val, shift);
 }
 
 static int ad5360_read(struct iio_dev *indio_dev, unsigned int type,
@@ -225,7 +228,7 @@ static int ad5360_read(struct iio_dev *indio_dev, unsigned int type,
 		},
 	};
 
-	mutex_lock(&indio_dev->mlock);
+	guard(mutex)(&st->lock);
 
 	st->data[0].d32 = cpu_to_be32(AD5360_CMD(AD5360_CMD_SPECIAL_FUNCTION) |
 		AD5360_ADDR(AD5360_REG_SF_READBACK) |
@@ -233,12 +236,10 @@ static int ad5360_read(struct iio_dev *indio_dev, unsigned int type,
 		AD5360_READBACK_ADDR(addr));
 
 	ret = spi_sync_transfer(st->spi, t, ARRAY_SIZE(t));
-	if (ret >= 0)
-		ret = be32_to_cpu(st->data[1].d32) & 0xffff;
+	if (ret < 0)
+		return ret;
 
-	mutex_unlock(&indio_dev->mlock);
-
-	return ret;
+	return be32_to_cpu(st->data[1].d32) & 0xffff;
 }
 
 static ssize_t ad5360_read_dac_powerdown(struct device *dev,
@@ -248,26 +249,21 @@ static ssize_t ad5360_read_dac_powerdown(struct device *dev,
 	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
 	struct ad5360_state *st = iio_priv(indio_dev);
 
-	return sprintf(buf, "%d\n", (bool)(st->ctrl & AD5360_SF_CTRL_PWR_DOWN));
+	return sysfs_emit(buf, "%d\n", (bool)(st->ctrl & AD5360_SF_CTRL_PWR_DOWN));
 }
 
 static int ad5360_update_ctrl(struct iio_dev *indio_dev, unsigned int set,
 	unsigned int clr)
 {
 	struct ad5360_state *st = iio_priv(indio_dev);
-	unsigned int ret;
 
-	mutex_lock(&indio_dev->mlock);
+	guard(mutex)(&st->lock);
 
 	st->ctrl |= set;
 	st->ctrl &= ~clr;
 
-	ret = ad5360_write_unlocked(indio_dev, AD5360_CMD_SPECIAL_FUNCTION,
-			AD5360_REG_SF_CTRL, st->ctrl, 0);
-
-	mutex_unlock(&indio_dev->mlock);
-
-	return ret;
+	return ad5360_write_unlocked(indio_dev, AD5360_CMD_SPECIAL_FUNCTION,
+				     AD5360_REG_SF_CTRL, st->ctrl, 0);
 }
 
 static ssize_t ad5360_write_dac_powerdown(struct device *dev,
@@ -277,7 +273,7 @@ static ssize_t ad5360_write_dac_powerdown(struct device *dev,
 	bool pwr_down;
 	int ret;
 
-	ret = strtobool(buf, &pwr_down);
+	ret = kstrtobool(buf, &pwr_down);
 	if (ret)
 		return ret;
 
@@ -379,15 +375,14 @@ static int ad5360_read_raw(struct iio_dev *indio_dev,
 		*val = ret >> chan->scan_type.shift;
 		return IIO_VAL_INT;
 	case IIO_CHAN_INFO_SCALE:
-		/* vout = 4 * vref * dac_code */
-		scale_uv = ad5360_get_channel_vref(st, chan->channel) * 4 * 100;
+		scale_uv = ad5360_get_channel_vref(st, chan->channel);
 		if (scale_uv < 0)
 			return scale_uv;
 
-		scale_uv >>= (chan->scan_type.realbits);
-		*val =  scale_uv / 100000;
-		*val2 = (scale_uv % 100000) * 10;
-		return IIO_VAL_INT_PLUS_MICRO;
+		/* vout = 4 * vref * dac_code */
+		*val = scale_uv * 4 / 1000;
+		*val2 = chan->scan_type.realbits;
+		return IIO_VAL_FRACTIONAL_LOG2;
 	case IIO_CHAN_INFO_CALIBBIAS:
 		ret = ad5360_read(indio_dev, AD5360_READBACK_OFFSET,
 			chan->address);
@@ -421,7 +416,6 @@ static const struct iio_info ad5360_info = {
 	.read_raw = ad5360_read_raw,
 	.write_raw = ad5360_write_raw,
 	.attrs = &ad5360_attribute_group,
-	.driver_module = THIS_MODULE,
 };
 
 static const char * const ad5360_vref_name[] = {
@@ -434,8 +428,8 @@ static int ad5360_alloc_channels(struct iio_dev *indio_dev)
 	struct iio_chan_spec *channels;
 	unsigned int i;
 
-	channels = kcalloc(st->chip_info->num_channels,
-			   sizeof(struct iio_chan_spec), GFP_KERNEL);
+	channels = kzalloc_objs(struct iio_chan_spec,
+				st->chip_info->num_channels);
 
 	if (!channels)
 		return -ENOMEM;
@@ -459,7 +453,7 @@ static int ad5360_probe(struct spi_device *spi)
 	unsigned int i;
 	int ret;
 
-	indio_dev = iio_device_alloc(sizeof(*st));
+	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
 	if (indio_dev == NULL) {
 		dev_err(&spi->dev, "Failed to allocate iio device\n");
 		return  -ENOMEM;
@@ -471,22 +465,23 @@ static int ad5360_probe(struct spi_device *spi)
 	st->chip_info = &ad5360_chip_info_tbl[type];
 	st->spi = spi;
 
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->info = &ad5360_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->num_channels = st->chip_info->num_channels;
 
+	mutex_init(&st->lock);
+
 	ret = ad5360_alloc_channels(indio_dev);
 	if (ret) {
 		dev_err(&spi->dev, "Failed to allocate channel spec: %d\n", ret);
-		goto error_free;
+		return ret;
 	}
 
 	for (i = 0; i < st->chip_info->num_vrefs; ++i)
 		st->vref_reg[i].supply = ad5360_vref_name[i];
 
-	ret = regulator_bulk_get(&st->spi->dev, st->chip_info->num_vrefs,
+	ret = devm_regulator_bulk_get(&st->spi->dev, st->chip_info->num_vrefs,
 		st->vref_reg);
 	if (ret) {
 		dev_err(&spi->dev, "Failed to request vref regulators: %d\n", ret);
@@ -496,7 +491,7 @@ static int ad5360_probe(struct spi_device *spi)
 	ret = regulator_bulk_enable(st->chip_info->num_vrefs, st->vref_reg);
 	if (ret) {
 		dev_err(&spi->dev, "Failed to enable vref regulators: %d\n", ret);
-		goto error_free_reg;
+		goto error_free_channels;
 	}
 
 	ret = iio_device_register(indio_dev);
@@ -509,17 +504,13 @@ static int ad5360_probe(struct spi_device *spi)
 
 error_disable_reg:
 	regulator_bulk_disable(st->chip_info->num_vrefs, st->vref_reg);
-error_free_reg:
-	regulator_bulk_free(st->chip_info->num_vrefs, st->vref_reg);
 error_free_channels:
 	kfree(indio_dev->channels);
-error_free:
-	iio_device_free(indio_dev);
 
 	return ret;
 }
 
-static int ad5360_remove(struct spi_device *spi)
+static void ad5360_remove(struct spi_device *spi)
 {
 	struct iio_dev *indio_dev = spi_get_drvdata(spi);
 	struct ad5360_state *st = iio_priv(indio_dev);
@@ -529,30 +520,24 @@ static int ad5360_remove(struct spi_device *spi)
 	kfree(indio_dev->channels);
 
 	regulator_bulk_disable(st->chip_info->num_vrefs, st->vref_reg);
-	regulator_bulk_free(st->chip_info->num_vrefs, st->vref_reg);
-
-	iio_device_free(indio_dev);
-
-	return 0;
 }
 
 static const struct spi_device_id ad5360_ids[] = {
-	{ "ad5360", ID_AD5360 },
-	{ "ad5361", ID_AD5361 },
-	{ "ad5362", ID_AD5362 },
-	{ "ad5363", ID_AD5363 },
-	{ "ad5370", ID_AD5370 },
-	{ "ad5371", ID_AD5371 },
-	{ "ad5372", ID_AD5372 },
-	{ "ad5373", ID_AD5373 },
-	{}
+	{ .name = "ad5360", .driver_data = ID_AD5360 },
+	{ .name = "ad5361", .driver_data = ID_AD5361 },
+	{ .name = "ad5362", .driver_data = ID_AD5362 },
+	{ .name = "ad5363", .driver_data = ID_AD5363 },
+	{ .name = "ad5370", .driver_data = ID_AD5370 },
+	{ .name = "ad5371", .driver_data = ID_AD5371 },
+	{ .name = "ad5372", .driver_data = ID_AD5372 },
+	{ .name = "ad5373", .driver_data = ID_AD5373 },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad5360_ids);
 
 static struct spi_driver ad5360_driver = {
 	.driver = {
 		   .name = "ad5360",
-		   .owner = THIS_MODULE,
 	},
 	.probe = ad5360_probe,
 	.remove = ad5360_remove,

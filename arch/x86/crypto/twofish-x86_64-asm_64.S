@@ -1,26 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /***************************************************************************
 *   Copyright (C) 2006 by Joachim Fritschi, <jfritschi@freenet.de>        *
 *                                                                         *
-*   This program is free software; you can redistribute it and/or modify  *
-*   it under the terms of the GNU General Public License as published by  *
-*   the Free Software Foundation; either version 2 of the License, or     *
-*   (at your option) any later version.                                   *
-*                                                                         *
-*   This program is distributed in the hope that it will be useful,       *
-*   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
-*   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
-*   GNU General Public License for more details.                          *
-*                                                                         *
-*   You should have received a copy of the GNU General Public License     *
-*   along with this program; if not, write to the                         *
-*   Free Software Foundation, Inc.,                                       *
-*   59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.             *
 ***************************************************************************/
 
 .file "twofish-x86_64-asm.S"
 .text
 
 #include <linux/linkage.h>
+#include <linux/cfi_types.h>
 #include <asm/asm-offsets.h>
 
 #define a_offset	0
@@ -215,7 +203,7 @@
 	xor	%r8d,		d ## D;\
 	ror	$1,		d ## D;
 
-ENTRY(twofish_enc_blk)
+SYM_TYPED_FUNC_START(twofish_enc_blk)
 	pushq    R1
 
 	/* %rdi contains the ctx address */
@@ -264,11 +252,11 @@ ENTRY(twofish_enc_blk)
 	movq	R1,	8(%rsi)
 
 	popq	R1
-	movq	$1,%rax
-	ret
-ENDPROC(twofish_enc_blk)
+	movl	$1,%eax
+	RET
+SYM_FUNC_END(twofish_enc_blk)
 
-ENTRY(twofish_dec_blk)
+SYM_TYPED_FUNC_START(twofish_dec_blk)
 	pushq    R1
 
 	/* %rdi contains the ctx address */
@@ -316,6 +304,6 @@ ENTRY(twofish_dec_blk)
 	movq	R1,	8(%rsi)
 
 	popq	R1
-	movq	$1,%rax
-	ret
-ENDPROC(twofish_dec_blk)
+	movl	$1,%eax
+	RET
+SYM_FUNC_END(twofish_dec_blk)

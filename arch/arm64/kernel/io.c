@@ -1,19 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Based on arch/arm/kernel/io.c
  *
  * Copyright (C) 2012 ARM Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/export.h>
@@ -21,44 +10,43 @@
 #include <linux/io.h>
 
 /*
- * Copy data from IO memory space to "real" memory space.
+ * This generates a memcpy that works on a from/to address which is aligned to
+ * bits. Count is in terms of the number of bits sized quantities to copy. It
+ * optimizes to use the STR groupings when possible so that it is WC friendly.
  */
-void __memcpy_fromio(void *to, const volatile void __iomem *from, size_t count)
-{
-	unsigned char *t = to;
-	while (count) {
-		count--;
-		*t = readb(from);
-		t++;
-		from++;
-	}
-}
-EXPORT_SYMBOL(__memcpy_fromio);
+#define memcpy_toio_aligned(to, from, count, bits)                        \
+	({                                                                \
+		volatile u##bits __iomem *_to = to;                       \
+		const u##bits *_from = from;                              \
+		size_t _count = count;                                    \
+		const u##bits *_end_from = _from + ALIGN_DOWN(_count, 8); \
+                                                                          \
+		for (; _from < _end_from; _from += 8, _to += 8)           \
+			__const_memcpy_toio_aligned##bits(_to, _from, 8); \
+		if ((_count % 8) >= 4) {                                  \
+			__const_memcpy_toio_aligned##bits(_to, _from, 4); \
+			_from += 4;                                       \
+			_to += 4;                                         \
+		}                                                         \
+		if ((_count % 4) >= 2) {                                  \
+			__const_memcpy_toio_aligned##bits(_to, _from, 2); \
+			_from += 2;                                       \
+			_to += 2;                                         \
+		}                                                         \
+		if (_count % 2)                                           \
+			__const_memcpy_toio_aligned##bits(_to, _from, 1); \
+	})
 
-/*
- * Copy data from "real" memory space to IO memory space.
- */
-void __memcpy_toio(volatile void __iomem *to, const void *from, size_t count)
+void __iowrite64_copy_full(void __iomem *to, const void *from, size_t count)
 {
-	const unsigned char *f = from;
-	while (count) {
-		count--;
-		writeb(*f, to);
-		f++;
-		to++;
-	}
+	memcpy_toio_aligned(to, from, count, 64);
+	dgh();
 }
-EXPORT_SYMBOL(__memcpy_toio);
+EXPORT_SYMBOL(__iowrite64_copy_full);
 
-/*
- * "memset" on IO memory space.
- */
-void __memset_io(volatile void __iomem *dst, int c, size_t count)
+void __iowrite32_copy_full(void __iomem *to, const void *from, size_t count)
 {
-	while (count) {
-		count--;
-		writeb(c, dst);
-		dst++;
-	}
+	memcpy_toio_aligned(to, from, count, 32);
+	dgh();
 }
-EXPORT_SYMBOL(__memset_io);
+EXPORT_SYMBOL(__iowrite32_copy_full);

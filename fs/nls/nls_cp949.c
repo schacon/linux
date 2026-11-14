@@ -13927,7 +13927,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_cp949(void)
@@ -13943,5 +13942,6 @@ static void __exit exit_nls_cp949(void)
 module_init(init_nls_cp949)
 module_exit(exit_nls_cp949)
 
+MODULE_DESCRIPTION("NLS Korean charset (CP949, EUC-KR)");
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_ALIAS_NLS(euc-kr);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	nv_tco 0.01:	TCO timer driver for NV chipsets
  *
@@ -6,12 +7,7 @@
  *	Based off i8xx_tco.c:
  *	(c) Copyright 2000 kernel concepts <nils@kernelconcepts.de>, All Rights
  *	Reserved.
- *				http://www.kernelconcepts.de
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
+ *				https://www.kernelconcepts.de
  *
  *	TCO timer driver for NV chipsets
  *	based on softdog.c by Alan Cox <alan@redhat.com>
@@ -36,6 +32,7 @@
 #include <linux/platform_device.h>
 #include <linux/uaccess.h>
 #include <linux/io.h>
+#include <linux/stringify.h>
 
 #include "nv_tco.h"
 
@@ -59,12 +56,12 @@ static struct platform_device *nv_tco_platform_device;
 static int heartbeat = WATCHDOG_HEARTBEAT;  /* in seconds */
 module_param(heartbeat, int, 0);
 MODULE_PARM_DESC(heartbeat, "Watchdog heartbeat in seconds. (2<heartbeat<39, "
-			    "default=" __MODULE_STRING(WATCHDOG_HEARTBEAT) ")");
+			    "default=" __stringify(WATCHDOG_HEARTBEAT) ")");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started"
-		" (default=" __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+		" (default=" __stringify(WATCHDOG_NOWAYOUT) ")");
 
 /*
  * Some TCO specific functions
@@ -161,7 +158,7 @@ static int nv_tco_open(struct inode *inode, struct file *file)
 	/* Reload and activate timer */
 	tco_timer_keepalive();
 	tco_timer_start();
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int nv_tco_release(struct inode *inode, struct file *file)
@@ -254,7 +251,7 @@ static long nv_tco_ioctl(struct file *file, unsigned int cmd,
 		if (tco_timer_set_heartbeat(new_heartbeat))
 			return -EINVAL;
 		tco_timer_keepalive();
-		/* Fall through */
+		fallthrough;
 	case WDIOC_GETTIMEOUT:
 		return put_user(heartbeat, p);
 	default:
@@ -268,9 +265,9 @@ static long nv_tco_ioctl(struct file *file, unsigned int cmd,
 
 static const struct file_operations nv_tco_fops = {
 	.owner =		THIS_MODULE,
-	.llseek =		no_llseek,
 	.write =		nv_tco_write,
 	.unlocked_ioctl =	nv_tco_ioctl,
+	.compat_ioctl =		compat_ptr_ioctl,
 	.open =			nv_tco_open,
 	.release =		nv_tco_release,
 };
@@ -289,10 +286,14 @@ static struct miscdevice nv_tco_miscdev = {
  * register a pci_driver, because someone else might one day
  * want to register another driver on the same PCI id.
  */
-static DEFINE_PCI_DEVICE_TABLE(tco_pci_tbl) = {
+static const struct pci_device_id tco_pci_tbl[] = {
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP51_SMBUS,
 	  PCI_ANY_ID, PCI_ANY_ID, },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP55_SMBUS,
+	  PCI_ANY_ID, PCI_ANY_ID, },
+	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP78S_SMBUS,
+	  PCI_ANY_ID, PCI_ANY_ID, },
+	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_NFORCE_MCP79_SMBUS,
 	  PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0, },			/* End of list */
 };
@@ -445,12 +446,10 @@ static void nv_tco_cleanup(void)
 	release_region(tcobase, 0x10);
 }
 
-static int nv_tco_remove(struct platform_device *dev)
+static void nv_tco_remove(struct platform_device *dev)
 {
 	if (tcobase)
 		nv_tco_cleanup();
-
-	return 0;
 }
 
 static void nv_tco_shutdown(struct platform_device *dev)
@@ -471,7 +470,6 @@ static struct platform_driver nv_tco_driver = {
 	.remove		= nv_tco_remove,
 	.shutdown	= nv_tco_shutdown,
 	.driver		= {
-		.owner	= THIS_MODULE,
 		.name	= TCO_MODULE_NAME,
 	},
 };
@@ -513,4 +511,3 @@ module_exit(nv_tco_cleanup_module);
 MODULE_AUTHOR("Mike Waychison");
 MODULE_DESCRIPTION("TCO timer driver for NV chipsets");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);

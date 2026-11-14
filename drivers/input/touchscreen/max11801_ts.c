@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for MAXI MAX11801 - A Resistive touch screen controller with
  * i2c interface
@@ -6,11 +7,6 @@
  * Author: Zhang Jiejing <jiejing.zhang@freescale.com>
  *
  * Based on mcs5000_ts.c
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 /*
@@ -33,7 +29,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/input.h>
@@ -135,7 +130,6 @@ static irqreturn_t max11801_ts_interrupt(int irq, void *dev_id)
 
 		switch (buf[1] & EVENT_TAG_MASK) {
 		case EVENT_INIT:
-			/* fall through */
 		case EVENT_MIDDLE:
 			input_report_abs(data->input_dev, ABS_X, x);
 			input_report_abs(data->input_dev, ABS_Y, y);
@@ -174,19 +168,17 @@ static void max11801_ts_phy_init(struct max11801_data *data)
 	max11801_write_reg(client, OP_MODE_CONF_REG, 0x36);
 }
 
-static int max11801_ts_probe(struct i2c_client *client,
-				       const struct i2c_device_id *id)
+static int max11801_ts_probe(struct i2c_client *client)
 {
 	struct max11801_data *data;
 	struct input_dev *input_dev;
 	int error;
 
-	data = kzalloc(sizeof(struct max11801_data), GFP_KERNEL);
-	input_dev = input_allocate_device();
+	data = devm_kzalloc_obj(&client->dev, *data);
+	input_dev = devm_input_allocate_device(&client->dev);
 	if (!data || !input_dev) {
 		dev_err(&client->dev, "Failed to allocate memory\n");
-		error = -ENOMEM;
-		goto err_free_mem;
+		return -ENOMEM;
 	}
 
 	data->client = client;
@@ -194,65 +186,50 @@ static int max11801_ts_probe(struct i2c_client *client,
 
 	input_dev->name = "max11801_ts";
 	input_dev->id.bustype = BUS_I2C;
-	input_dev->dev.parent = &client->dev;
 
 	__set_bit(EV_ABS, input_dev->evbit);
 	__set_bit(EV_KEY, input_dev->evbit);
 	__set_bit(BTN_TOUCH, input_dev->keybit);
 	input_set_abs_params(input_dev, ABS_X, 0, MAX11801_MAX_X, 0, 0);
 	input_set_abs_params(input_dev, ABS_Y, 0, MAX11801_MAX_Y, 0, 0);
-	input_set_drvdata(input_dev, data);
 
 	max11801_ts_phy_init(data);
 
-	error = request_threaded_irq(client->irq, NULL, max11801_ts_interrupt,
-				     IRQF_TRIGGER_LOW | IRQF_ONESHOT,
-				     "max11801_ts", data);
+	error = devm_request_threaded_irq(&client->dev, client->irq, NULL,
+					  max11801_ts_interrupt,
+					  IRQF_TRIGGER_LOW | IRQF_ONESHOT,
+					  "max11801_ts", data);
 	if (error) {
 		dev_err(&client->dev, "Failed to register interrupt\n");
-		goto err_free_mem;
+		return error;
 	}
 
 	error = input_register_device(data->input_dev);
 	if (error)
-		goto err_free_irq;
-
-	i2c_set_clientdata(client, data);
-	return 0;
-
-err_free_irq:
-	free_irq(client->irq, data);
-err_free_mem:
-	input_free_device(input_dev);
-	kfree(data);
-	return error;
-}
-
-static int max11801_ts_remove(struct i2c_client *client)
-{
-	struct max11801_data *data = i2c_get_clientdata(client);
-
-	free_irq(client->irq, data);
-	input_unregister_device(data->input_dev);
-	kfree(data);
+		return error;
 
 	return 0;
 }
 
 static const struct i2c_device_id max11801_ts_id[] = {
-	{"max11801", 0},
+	{ .name = "max11801" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max11801_ts_id);
 
+static const struct of_device_id max11801_ts_dt_ids[] = {
+	{ .compatible = "maxim,max11801" },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, max11801_ts_dt_ids);
+
 static struct i2c_driver max11801_ts_driver = {
 	.driver = {
 		.name	= "max11801_ts",
-		.owner	= THIS_MODULE,
+		.of_match_table = max11801_ts_dt_ids,
 	},
 	.id_table	= max11801_ts_id,
 	.probe		= max11801_ts_probe,
-	.remove		= max11801_ts_remove,
 };
 
 module_i2c_driver(max11801_ts_driver);

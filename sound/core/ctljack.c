@@ -1,16 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Helper functions for jack-detection kcontrols
  *
  * Copyright (c) 2011 Takashi Iwai <tiwai@suse.de>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
 #include <linux/kernel.h>
 #include <linux/export.h>
+#include <linux/string.h>
 #include <sound/core.h>
 #include <sound/control.h>
 
@@ -23,7 +20,7 @@ static int jack_detect_kctl_get(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static struct snd_kcontrol_new jack_detect_kctl = {
+static const struct snd_kcontrol_new jack_detect_kctl = {
 	/* name is filled later */
 	.iface = SNDRV_CTL_ELEM_IFACE_CARD,
 	.access = SNDRV_CTL_ELEM_ACCESS_READ,
@@ -31,19 +28,56 @@ static struct snd_kcontrol_new jack_detect_kctl = {
 	.get = jack_detect_kctl_get,
 };
 
+static int get_available_index(struct snd_card *card, const char *name)
+{
+	struct snd_ctl_elem_id sid;
+
+	memset(&sid, 0, sizeof(sid));
+
+	sid.index = 0;
+	sid.iface = SNDRV_CTL_ELEM_IFACE_CARD;
+	strscpy(sid.name, name, sizeof(sid.name));
+
+	guard(rwsem_read)(&card->controls_rwsem);
+	while (snd_ctl_find_id(card, &sid)) {
+		sid.index++;
+		/* reset numid; otherwise snd_ctl_find_id() hits this again */
+		sid.numid = 0;
+	}
+
+	return sid.index;
+}
+
+static void jack_kctl_name_gen(char *name, const char *src_name, size_t size)
+{
+	size_t count = strlen(src_name);
+	const char *suf = " Jack";
+	size_t suf_len = strlen(suf);
+	bool append_suf = true;
+
+	if (count >= suf_len)
+		append_suf = strncmp(&src_name[count - suf_len], suf, suf_len) != 0;
+
+	if (append_suf)
+		snprintf(name, size, "%s%s", src_name, suf);
+	else
+		strscpy(name, src_name, size);
+}
+
 struct snd_kcontrol *
-snd_kctl_jack_new(const char *name, int idx, void *private_data)
+snd_kctl_jack_new(const char *name, struct snd_card *card)
 {
 	struct snd_kcontrol *kctl;
-	kctl = snd_ctl_new1(&jack_detect_kctl, private_data);
+
+	kctl = snd_ctl_new1(&jack_detect_kctl, NULL);
 	if (!kctl)
 		return NULL;
-	snprintf(kctl->id.name, sizeof(kctl->id.name), "%s Jack", name);
-	kctl->id.index = idx;
+
+	jack_kctl_name_gen(kctl->id.name, name, sizeof(kctl->id.name));
+	kctl->id.index = get_available_index(card, kctl->id.name);
 	kctl->private_value = 0;
 	return kctl;
 }
-EXPORT_SYMBOL_GPL(snd_kctl_jack_new);
 
 void snd_kctl_jack_report(struct snd_card *card,
 			  struct snd_kcontrol *kctl, bool status)
@@ -53,4 +87,3 @@ void snd_kctl_jack_report(struct snd_card *card,
 	kctl->private_value = status;
 	snd_ctl_notify(card, SNDRV_CTL_EVENT_MASK_VALUE, &kctl->id);
 }
-EXPORT_SYMBOL_GPL(snd_kctl_jack_report);

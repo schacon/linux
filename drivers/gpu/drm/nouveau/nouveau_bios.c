@@ -22,14 +22,13 @@
  * SOFTWARE.
  */
 
-#include <subdev/bios.h>
-
-#include <drm/drmP.h>
-
-#include "nouveau_drm.h"
+#include "nouveau_drv.h"
+#include "nouveau_bios.h"
 #include "nouveau_reg.h"
 #include "dispnv04/hw.h"
 #include "nouveau_encoder.h"
+
+#include <subdev/gsp.h>
 
 #include <linux/io-mapping.h>
 #include <linux/firmware.h>
@@ -43,11 +42,6 @@
 
 #define BIOSLOG(sip, fmt, arg...) NV_DEBUG(sip->dev, fmt, ##arg)
 #define LOG_OLD_VALUE(x)
-
-struct init_exec {
-	bool execute;
-	bool repeat;
-};
 
 static bool nv_cksum(const uint8_t *data, unsigned int length)
 {
@@ -114,6 +108,9 @@ static int call_lvds_manufacturer_script(struct drm_device *dev, struct dcb_outp
 	struct nvbios *bios = &drm->vbios;
 	uint8_t sub = bios->data[bios->fp.xlated_entry + script] + (bios->fp.link_c_increment && dcbent->or & DCB_OUTPUT_C ? 1 : 0);
 	uint16_t scriptofs = ROM16(bios->data[bios->init_script_tbls_ptr + sub * 2]);
+#ifdef __powerpc__
+	struct pci_dev *pdev = to_pci_dev(dev->dev);
+#endif
 
 	if (!bios->fp.xlated_entry || !sub || !scriptofs)
 		return -EINVAL;
@@ -127,8 +124,8 @@ static int call_lvds_manufacturer_script(struct drm_device *dev, struct dcb_outp
 #ifdef __powerpc__
 	/* Powerbook specific quirks */
 	if (script == LVDS_RESET &&
-	    (dev->pci_device == 0x0179 || dev->pci_device == 0x0189 ||
-	     dev->pci_device == 0x0329))
+	    (pdev->device == 0x0179 || pdev->device == 0x0189 ||
+	     pdev->device == 0x0329))
 		nv_write_tmds(dev, dcbent->or, 0, 0x02, 0x72);
 #endif
 
@@ -217,7 +214,7 @@ int call_lvds_script(struct drm_device *dev, struct dcb_output *dcbent, int head
 	 */
 
 	struct nouveau_drm *drm = nouveau_drm(dev);
-	struct nouveau_device *device = nv_device(drm->device);
+	struct nvif_object *device = &drm->client.device.object;
 	struct nvbios *bios = &drm->vbios;
 	uint8_t lvds_ver = bios->data[bios->fp.lvdsmanufacturerpointer];
 	uint32_t sel_clk_binding, sel_clk;
@@ -240,7 +237,7 @@ int call_lvds_script(struct drm_device *dev, struct dcb_output *dcbent, int head
 	NV_INFO(drm, "Calling LVDS script %d:\n", script);
 
 	/* don't let script change pll->head binding */
-	sel_clk_binding = nv_rd32(device, NV_PRAMDAC_SEL_CLK) & 0x50000;
+	sel_clk_binding = nvif_rd32(device, NV_PRAMDAC_SEL_CLK) & 0x50000;
 
 	if (lvds_ver < 0x30)
 		ret = call_lvds_manufacturer_script(dev, dcbent, head, script);
@@ -252,7 +249,7 @@ int call_lvds_script(struct drm_device *dev, struct dcb_output *dcbent, int head
 	sel_clk = NVReadRAMDAC(dev, 0, NV_PRAMDAC_SEL_CLK) & ~0x50000;
 	NVWriteRAMDAC(dev, 0, NV_PRAMDAC_SEL_CLK, sel_clk | sel_clk_binding);
 	/* some scripts set a value in NV_PBUS_POWERCTRL_2 and break video overlay */
-	nv_wr32(device, NV_PBUS_POWERCTRL_2, 0);
+	nvif_wr32(device, NV_PBUS_POWERCTRL_2, 0);
 
 	return ret;
 }
@@ -320,12 +317,13 @@ static int parse_lvds_manufacturer_table_header(struct drm_device *dev, struct n
 static int
 get_fp_strap(struct drm_device *dev, struct nvbios *bios)
 {
-	struct nouveau_device *device = nouveau_dev(dev);
+	struct nouveau_drm *drm = nouveau_drm(dev);
+	struct nvif_object *device = &drm->client.device.object;
 
 	/*
 	 * The fp strap is normally dictated by the "User Strap" in
 	 * PEXTDEV_BOOT_0[20:16], but on BMP cards when bit 2 of the
-	 * Internal_Flags struct at 0x48 is set, the user strap gets overriden
+	 * Internal_Flags struct at 0x48 is set, the user strap gets overridden
 	 * by the PCI subsystem ID during POST, but not before the previous user
 	 * strap has been committed to CR58 for CR57=0xf on head A, which may be
 	 * read and used instead
@@ -334,10 +332,13 @@ get_fp_strap(struct drm_device *dev, struct nvbios *bios)
 	if (bios->major_version < 5 && bios->data[0x48] & 0x4)
 		return NVReadVgaCrtc5758(dev, 0, 0xf) & 0xf;
 
-	if (device->card_type >= NV_50)
-		return (nv_rd32(device, NV_PEXTDEV_BOOT_0) >> 24) & 0xf;
+	if (drm->client.device.info.family >= NV_DEVICE_INFO_V0_MAXWELL)
+		return nvif_rd32(device, 0x001800) & 0x0000000f;
 	else
-		return (nv_rd32(device, NV_PEXTDEV_BOOT_0) >> 16) & 0xf;
+	if (drm->client.device.info.family >= NV_DEVICE_INFO_V0_TESLA)
+		return (nvif_rd32(device, NV_PEXTDEV_BOOT_0) >> 24) & 0xf;
+	else
+		return (nvif_rd32(device, NV_PEXTDEV_BOOT_0) >> 16) & 0xf;
 }
 
 static int parse_fp_mode_table(struct drm_device *dev, struct nvbios *bios)
@@ -349,11 +350,8 @@ static int parse_fp_mode_table(struct drm_device *dev, struct nvbios *bios)
 	struct lvdstableheader lth;
 
 	if (bios->fp.fptablepointer == 0x0) {
-		/* Apple cards don't have the fp table; the laptops use DDC */
-		/* The table is also missing on some x86 IGPs */
-#ifndef __powerpc__
-		NV_ERROR(drm, "Pointer to flat panel table invalid\n");
-#endif
+		/* Most laptop cards lack an fp table. They use DDC. */
+		NV_DEBUG(drm, "Pointer to flat panel table invalid\n");
 		bios->digital_min_front_porch = 0x4b;
 		return 0;
 	}
@@ -636,7 +634,7 @@ int run_tmds_table(struct drm_device *dev, struct dcb_output *dcbent, int head, 
 	 */
 
 	struct nouveau_drm *drm = nouveau_drm(dev);
-	struct nouveau_device *device = nv_device(drm->device);
+	struct nvif_object *device = &drm->client.device.object;
 	struct nvbios *bios = &drm->vbios;
 	int cv = bios->chip_version;
 	uint16_t clktable = 0, scriptptr;
@@ -670,7 +668,7 @@ int run_tmds_table(struct drm_device *dev, struct dcb_output *dcbent, int head, 
 	}
 
 	/* don't let script change pll->head binding */
-	sel_clk_binding = nv_rd32(device, NV_PRAMDAC_SEL_CLK) & 0x50000;
+	sel_clk_binding = nvif_rd32(device, NV_PRAMDAC_SEL_CLK) & 0x50000;
 	run_digital_op_script(dev, scriptptr, dcbent, head, pxclk >= 165000);
 	sel_clk = NVReadRAMDAC(dev, 0, NV_PRAMDAC_SEL_CLK) & ~0x50000;
 	NVWriteRAMDAC(dev, 0, NV_PRAMDAC_SEL_CLK, sel_clk | sel_clk_binding);
@@ -936,7 +934,7 @@ static int parse_bit_tmds_tbl_entry(struct drm_device *dev, struct nvbios *bios,
 
 	tmdstableptr = ROM16(bios->data[bitentry->offset]);
 	if (!tmdstableptr) {
-		NV_ERROR(drm, "Pointer to TMDS table invalid\n");
+		NV_INFO(drm, "Pointer to TMDS table not found\n");
 		return -EINVAL;
 	}
 
@@ -1253,14 +1251,14 @@ olddcb_table(struct drm_device *dev)
 	struct nouveau_drm *drm = nouveau_drm(dev);
 	u8 *dcb = NULL;
 
-	if (nv_device(drm->device)->card_type > NV_04)
+	if (drm->client.device.info.family > NV_DEVICE_INFO_V0_TNT)
 		dcb = ROMPTR(dev, drm->vbios.data[0x36]);
 	if (!dcb) {
 		NV_WARN(drm, "No DCB data found in VBIOS\n");
 		return NULL;
 	}
 
-	if (dcb[0] >= 0x41) {
+	if (dcb[0] >= 0x42) {
 		NV_WARN(drm, "DCB version 0x%02x unknown\n", dcb[0]);
 		return NULL;
 	} else
@@ -1399,6 +1397,7 @@ parse_dcb20_entry(struct drm_device *dev, struct dcb_table *dcb,
 		  uint32_t conn, uint32_t conf, struct dcb_output *entry)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
+	int link = 0;
 
 	entry->type = conn & 0xf;
 	entry->i2c_index = (conn >> 4) & 0xf;
@@ -1444,6 +1443,7 @@ parse_dcb20_entry(struct drm_device *dev, struct dcb_table *dcb,
 			if (conf & 0x4)
 				entry->lvdsconf.use_power_scripts = true;
 			entry->lvdsconf.sor.link = (conf & 0x00000030) >> 4;
+			link = entry->lvdsconf.sor.link;
 		}
 		if (conf & mask) {
 			/*
@@ -1474,32 +1474,42 @@ parse_dcb20_entry(struct drm_device *dev, struct dcb_table *dcb,
 		case 0:
 			entry->dpconf.link_bw = 162000;
 			break;
-		default:
+		case 1:
 			entry->dpconf.link_bw = 270000;
+			break;
+		case 2:
+			entry->dpconf.link_bw = 540000;
+			break;
+		case 3:
+		default:
+			entry->dpconf.link_bw = 810000;
 			break;
 		}
 		switch ((conf & 0x0f000000) >> 24) {
 		case 0xf:
+		case 0x4:
 			entry->dpconf.link_nr = 4;
 			break;
 		case 0x3:
+		case 0x2:
 			entry->dpconf.link_nr = 2;
 			break;
 		default:
 			entry->dpconf.link_nr = 1;
 			break;
 		}
+		link = entry->dpconf.sor.link;
 		break;
 	case DCB_OUTPUT_TMDS:
 		if (dcb->version >= 0x40) {
 			entry->tmdsconf.sor.link = (conf & 0x00000030) >> 4;
 			entry->extdev = (conf & 0x0000ff00) >> 8;
+			link = entry->tmdsconf.sor.link;
 		}
 		else if (dcb->version >= 0x30)
 			entry->tmdsconf.slave_addr = (conf & 0x00000700) >> 8;
 		else if (dcb->version >= 0x22)
 			entry->tmdsconf.slave_addr = (conf & 0x00000070) >> 4;
-
 		break;
 	case DCB_OUTPUT_EOL:
 		/* weird g80 mobile type that "nv" treats as a terminator */
@@ -1523,6 +1533,9 @@ parse_dcb20_entry(struct drm_device *dev, struct dcb_table *dcb,
 	if (conf & 0x100000)
 		entry->i2c_upper_default = true;
 
+	entry->hasht = (entry->extdev << 8) | (entry->location << 4) |
+			entry->type;
+	entry->hashm = (entry->heads << 8) | (link << 6) | entry->or;
 	return true;
 }
 
@@ -1660,7 +1673,7 @@ apply_dcb_encoder_quirks(struct drm_device *dev, int idx, u32 *conn, u32 *conf)
 	 */
 	if (nv_match_device(dev, 0x0201, 0x1462, 0x8851)) {
 		if (*conn == 0xf2005014 && *conf == 0xffffffff) {
-			fabricate_dcb_output(dcb, DCB_OUTPUT_TMDS, 1, 1, 1);
+			fabricate_dcb_output(dcb, DCB_OUTPUT_TMDS, 1, 1, DCB_OUTPUT_B);
 			return false;
 		}
 	}
@@ -1746,26 +1759,26 @@ fabricate_dcb_encoder_table(struct drm_device *dev, struct nvbios *bios)
 #ifdef __powerpc__
 	/* Apple iMac G4 NV17 */
 	if (of_machine_is_compatible("PowerMac4,5")) {
-		fabricate_dcb_output(dcb, DCB_OUTPUT_TMDS, 0, all_heads, 1);
-		fabricate_dcb_output(dcb, DCB_OUTPUT_ANALOG, 1, all_heads, 2);
+		fabricate_dcb_output(dcb, DCB_OUTPUT_TMDS, 0, all_heads, DCB_OUTPUT_B);
+		fabricate_dcb_output(dcb, DCB_OUTPUT_ANALOG, 1, all_heads, DCB_OUTPUT_C);
 		return;
 	}
 #endif
 
 	/* Make up some sane defaults */
 	fabricate_dcb_output(dcb, DCB_OUTPUT_ANALOG,
-			     bios->legacy.i2c_indices.crt, 1, 1);
+			     bios->legacy.i2c_indices.crt, 1, DCB_OUTPUT_B);
 
 	if (nv04_tv_identify(dev, bios->legacy.i2c_indices.tv) >= 0)
 		fabricate_dcb_output(dcb, DCB_OUTPUT_TV,
 				     bios->legacy.i2c_indices.tv,
-				     all_heads, 0);
+				     all_heads, DCB_OUTPUT_A);
 
 	else if (bios->tmds.output0_script_ptr ||
 		 bios->tmds.output1_script_ptr)
 		fabricate_dcb_output(dcb, DCB_OUTPUT_TMDS,
 				     bios->legacy.i2c_indices.panel,
-				     all_heads, 1);
+				     all_heads, DCB_OUTPUT_B);
 }
 
 static int
@@ -1786,6 +1799,8 @@ parse_dcb_entry(struct drm_device *dev, void *data, int idx, u8 *outp)
 			ret = parse_dcb20_entry(dev, dcb, conn, conf, entry);
 		else
 			ret = parse_dcb15_entry(dev, dcb, conn, conf, entry);
+		entry->id = idx;
+
 		if (!ret)
 			return 1; /* stop parsing */
 
@@ -1878,18 +1893,16 @@ parse_dcb_table(struct drm_device *dev, struct nvbios *bios)
 	if (dcb->version < 0x21)
 		merge_like_dcb_entries(dev, dcb);
 
-	if (!dcb->entries)
-		return -ENXIO;
-
 	/* dump connector table entries to log, if any exist */
 	idx = -1;
 	while ((conn = olddcb_conn(dev, ++idx))) {
 		if (conn[0] != 0xff) {
-			NV_INFO(drm, "DCB conn %02d: ", idx);
 			if (olddcb_conntab(dev)[3] < 4)
-				pr_cont("%04x\n", ROM16(conn[0]));
+				NV_INFO(drm, "DCB conn %02d: %04x\n",
+					idx, ROM16(conn[0]));
 			else
-				pr_cont("%08x\n", ROM32(conn[0]));
+				NV_INFO(drm, "DCB conn %02d: %08x\n",
+					idx, ROM32(conn[0]));
 		}
 	}
 	dcb_fake_connectors(bios);
@@ -1908,7 +1921,7 @@ static int load_nv17_hwsq_ucode_entry(struct drm_device *dev, struct nvbios *bio
 	 */
 
 	struct nouveau_drm *drm = nouveau_drm(dev);
-	struct nouveau_device *device = nv_device(drm->device);
+	struct nvif_object *device = &drm->client.device.object;
 	uint8_t bytes_to_write;
 	uint16_t hwsq_entry_offset;
 	int i;
@@ -1931,15 +1944,15 @@ static int load_nv17_hwsq_ucode_entry(struct drm_device *dev, struct nvbios *bio
 	hwsq_entry_offset = hwsq_offset + 2 + entry * bytes_to_write;
 
 	/* set sequencer control */
-	nv_wr32(device, 0x00001304, ROM32(bios->data[hwsq_entry_offset]));
+	nvif_wr32(device, 0x00001304, ROM32(bios->data[hwsq_entry_offset]));
 	bytes_to_write -= 4;
 
 	/* write ucode */
 	for (i = 0; i < bytes_to_write; i += 4)
-		nv_wr32(device, 0x00001400 + i, ROM32(bios->data[hwsq_entry_offset + i + 4]));
+		nvif_wr32(device, 0x00001400 + i, ROM32(bios->data[hwsq_entry_offset + i + 4]));
 
 	/* twiddle NV_PBUS_DEBUG_4 */
-	nv_wr32(device, NV_PBUS_DEBUG_4, nv_rd32(device, NV_PBUS_DEBUG_4) | 0x18);
+	nvif_wr32(device, NV_PBUS_DEBUG_4, nvif_rd32(device, NV_PBUS_DEBUG_4) | 0x18);
 
 	return 0;
 }
@@ -1956,7 +1969,7 @@ static int load_nv17_hw_sequencer_ucode(struct drm_device *dev,
 	 * The microcode entries are found by the "HWSQ" signature.
 	 */
 
-	const uint8_t hwsq_signature[] = { 'H', 'W', 'S', 'Q' };
+	static const uint8_t hwsq_signature[] = { 'H', 'W', 'S', 'Q' };
 	const int sz = sizeof(hwsq_signature);
 	int hwsq_offset;
 
@@ -1972,7 +1985,7 @@ uint8_t *nouveau_bios_embedded_edid(struct drm_device *dev)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
 	struct nvbios *bios = &drm->vbios;
-	const uint8_t edid_sig[] = {
+	static const uint8_t edid_sig[] = {
 			0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00 };
 	uint16_t offset = 0;
 	uint16_t newoffset;
@@ -2002,7 +2015,7 @@ uint8_t *nouveau_bios_embedded_edid(struct drm_device *dev)
 static bool NVInitVBIOS(struct drm_device *dev)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
-	struct nouveau_bios *bios = nouveau_bios(drm->device);
+	struct nvkm_bios *bios = nvxx_bios(drm);
 	struct nvbios *legacy = &drm->vbios;
 
 	memset(legacy, 0, sizeof(struct nvbios));
@@ -2032,7 +2045,6 @@ nouveau_run_vbios_init(struct drm_device *dev)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
 	struct nvbios *bios = &drm->vbios;
-	int ret = 0;
 
 	/* Reset the BIOS head to 0. */
 	bios->state.crtchead = 0;
@@ -2045,7 +2057,7 @@ nouveau_run_vbios_init(struct drm_device *dev)
 		bios->fp.lvds_init_run = false;
 	}
 
-	return ret;
+	return 0;
 }
 
 static bool
@@ -2054,19 +2066,14 @@ nouveau_bios_posted(struct drm_device *dev)
 	struct nouveau_drm *drm = nouveau_drm(dev);
 	unsigned htotal;
 
-	if (nv_device(drm->device)->card_type >= NV_50) {
-		if (NVReadVgaCrtc(dev, 0, 0x00) == 0 &&
-		    NVReadVgaCrtc(dev, 0, 0x1a) == 0)
-			return false;
+	if (drm->client.device.info.family >= NV_DEVICE_INFO_V0_TESLA)
 		return true;
-	}
 
 	htotal  = NVReadVgaCrtc(dev, 0, 0x06);
 	htotal |= (NVReadVgaCrtc(dev, 0, 0x07) & 0x01) << 8;
 	htotal |= (NVReadVgaCrtc(dev, 0, 0x07) & 0x20) << 4;
 	htotal |= (NVReadVgaCrtc(dev, 0, 0x25) & 0x01) << 10;
 	htotal |= (NVReadVgaCrtc(dev, 0, 0x41) & 0x01) << 11;
-
 	return (htotal != 0);
 }
 
@@ -2077,12 +2084,36 @@ nouveau_bios_init(struct drm_device *dev)
 	struct nvbios *bios = &drm->vbios;
 	int ret;
 
+	/* only relevant for PCI devices */
+	if (!dev_is_pci(dev->dev))
+		return 0;
+
+	if (nvkm_gsp_rm(nvxx_device(drm)->gsp)) {
+		struct nvkm_bios *nvkm_bios = nvxx_bios(drm);
+
+		/*
+		 * If this GPU has an nvkm_device_chip.bios entry, then the VBIOS
+		 * data was already read by the nvkm layer during nvkm_bios_new().
+		 * Point the legacy DRM-level VBIOS structure at the same buffer
+		 * so that any remaining legacy code can access it. This exposes
+		 * the VBIOS via the DRM debugfs entries.
+		 */
+		if (nvkm_bios) {
+			bios->data = nvkm_bios->data;
+			bios->length = nvkm_bios->size;
+		}
+
+		return 0;
+	}
+
 	if (!NVInitVBIOS(dev))
 		return -ENODEV;
 
-	ret = parse_dcb_table(dev, bios);
-	if (ret)
-		return ret;
+	if (drm->client.device.info.family < NV_DEVICE_INFO_V0_TESLA) {
+		ret = parse_dcb_table(dev, bios);
+		if (ret)
+			return ret;
+	}
 
 	if (!bios->major_version)	/* we don't run version 0 bios */
 		return 0;

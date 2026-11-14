@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Roccat Kone[+] driver for Linux
  *
@@ -5,10 +6,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
 /*
@@ -28,8 +25,6 @@
 #include "hid-roccat-koneplus.h"
 
 static uint profile_numbers[5] = {0, 1, 2, 3, 4};
-
-static struct class *koneplus_class;
 
 static void koneplus_profile_activated(struct koneplus_device *koneplus,
 		uint new_profile)
@@ -87,8 +82,7 @@ static ssize_t koneplus_sysfs_read(struct file *fp, struct kobject *kobj,
 		char *buf, loff_t off, size_t count,
 		size_t real_size, uint command)
 {
-	struct device *dev =
-			container_of(kobj, struct device, kobj)->parent->parent;
+	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct koneplus_device *koneplus = hid_get_drvdata(dev_get_drvdata(dev));
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	int retval;
@@ -113,8 +107,7 @@ static ssize_t koneplus_sysfs_write(struct file *fp, struct kobject *kobj,
 		void const *buf, loff_t off, size_t count,
 		size_t real_size, uint command)
 {
-	struct device *dev =
-			container_of(kobj, struct device, kobj)->parent->parent;
+	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct koneplus_device *koneplus = hid_get_drvdata(dev_get_drvdata(dev));
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	int retval;
@@ -135,8 +128,8 @@ static ssize_t koneplus_sysfs_write(struct file *fp, struct kobject *kobj,
 
 #define KONEPLUS_SYSFS_W(thingy, THINGY) \
 static ssize_t koneplus_sysfs_write_ ## thingy(struct file *fp, \
-		struct kobject *kobj, struct bin_attribute *attr, char *buf, \
-		loff_t off, size_t count) \
+		struct kobject *kobj, const struct bin_attribute *attr, \
+		char *buf, loff_t off, size_t count) \
 { \
 	return koneplus_sysfs_write(fp, kobj, buf, off, count, \
 			KONEPLUS_SIZE_ ## THINGY, KONEPLUS_COMMAND_ ## THINGY); \
@@ -144,8 +137,8 @@ static ssize_t koneplus_sysfs_write_ ## thingy(struct file *fp, \
 
 #define KONEPLUS_SYSFS_R(thingy, THINGY) \
 static ssize_t koneplus_sysfs_read_ ## thingy(struct file *fp, \
-		struct kobject *kobj, struct bin_attribute *attr, char *buf, \
-		loff_t off, size_t count) \
+		struct kobject *kobj, const struct bin_attribute *attr, \
+		char *buf, loff_t off, size_t count) \
 { \
 	return koneplus_sysfs_read(fp, kobj, buf, off, count, \
 			KONEPLUS_SIZE_ ## THINGY, KONEPLUS_COMMAND_ ## THINGY); \
@@ -156,7 +149,8 @@ KONEPLUS_SYSFS_W(thingy, THINGY) \
 KONEPLUS_SYSFS_R(thingy, THINGY)
 
 #define KONEPLUS_BIN_ATTRIBUTE_RW(thingy, THINGY) \
-{ \
+KONEPLUS_SYSFS_RW(thingy, THINGY); \
+static const struct bin_attribute bin_attr_##thingy = { \
 	.attr = { .name = #thingy, .mode = 0660 }, \
 	.size = KONEPLUS_SIZE_ ## THINGY, \
 	.read = koneplus_sysfs_read_ ## thingy, \
@@ -164,35 +158,35 @@ KONEPLUS_SYSFS_R(thingy, THINGY)
 }
 
 #define KONEPLUS_BIN_ATTRIBUTE_R(thingy, THINGY) \
-{ \
+KONEPLUS_SYSFS_R(thingy, THINGY); \
+static const struct bin_attribute bin_attr_##thingy = { \
 	.attr = { .name = #thingy, .mode = 0440 }, \
 	.size = KONEPLUS_SIZE_ ## THINGY, \
 	.read = koneplus_sysfs_read_ ## thingy, \
 }
 
 #define KONEPLUS_BIN_ATTRIBUTE_W(thingy, THINGY) \
-{ \
+KONEPLUS_SYSFS_W(thingy, THINGY); \
+static const struct bin_attribute bin_attr_##thingy = { \
 	.attr = { .name = #thingy, .mode = 0220 }, \
 	.size = KONEPLUS_SIZE_ ## THINGY, \
 	.write = koneplus_sysfs_write_ ## thingy \
 }
-
-KONEPLUS_SYSFS_W(control, CONTROL)
-KONEPLUS_SYSFS_RW(info, INFO)
-KONEPLUS_SYSFS_W(talk, TALK)
-KONEPLUS_SYSFS_W(macro, MACRO)
-KONEPLUS_SYSFS_RW(sensor, SENSOR)
-KONEPLUS_SYSFS_RW(tcu, TCU)
-KONEPLUS_SYSFS_R(tcu_image, TCU_IMAGE)
-KONEPLUS_SYSFS_RW(profile_settings, PROFILE_SETTINGS)
-KONEPLUS_SYSFS_RW(profile_buttons, PROFILE_BUTTONS)
+KONEPLUS_BIN_ATTRIBUTE_W(control, CONTROL);
+KONEPLUS_BIN_ATTRIBUTE_W(talk, TALK);
+KONEPLUS_BIN_ATTRIBUTE_W(macro, MACRO);
+KONEPLUS_BIN_ATTRIBUTE_R(tcu_image, TCU_IMAGE);
+KONEPLUS_BIN_ATTRIBUTE_RW(info, INFO);
+KONEPLUS_BIN_ATTRIBUTE_RW(sensor, SENSOR);
+KONEPLUS_BIN_ATTRIBUTE_RW(tcu, TCU);
+KONEPLUS_BIN_ATTRIBUTE_RW(profile_settings, PROFILE_SETTINGS);
+KONEPLUS_BIN_ATTRIBUTE_RW(profile_buttons, PROFILE_BUTTONS);
 
 static ssize_t koneplus_sysfs_read_profilex_settings(struct file *fp,
-		struct kobject *kobj, struct bin_attribute *attr, char *buf,
-		loff_t off, size_t count)
+		struct kobject *kobj, const struct bin_attribute *attr,
+		char *buf, loff_t off, size_t count)
 {
-	struct device *dev =
-			container_of(kobj, struct device, kobj)->parent->parent;
+	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	ssize_t retval;
 
@@ -207,11 +201,10 @@ static ssize_t koneplus_sysfs_read_profilex_settings(struct file *fp,
 }
 
 static ssize_t koneplus_sysfs_read_profilex_buttons(struct file *fp,
-		struct kobject *kobj, struct bin_attribute *attr, char *buf,
-		loff_t off, size_t count)
+		struct kobject *kobj, const struct bin_attribute *attr,
+		char *buf, loff_t off, size_t count)
 {
-	struct device *dev =
-			container_of(kobj, struct device, kobj)->parent->parent;
+	struct device *dev = kobj_to_dev(kobj)->parent->parent;
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	ssize_t retval;
 
@@ -225,12 +218,31 @@ static ssize_t koneplus_sysfs_read_profilex_buttons(struct file *fp,
 			KONEPLUS_COMMAND_PROFILE_BUTTONS);
 }
 
+#define PROFILE_ATTR(number)						\
+static const struct bin_attribute bin_attr_profile##number##_settings = {	\
+	.attr = { .name = "profile" #number "_settings", .mode = 0440 },	\
+	.size = KONEPLUS_SIZE_PROFILE_SETTINGS,				\
+	.read = koneplus_sysfs_read_profilex_settings,		\
+	.private = &profile_numbers[number-1],				\
+};									\
+static const struct bin_attribute bin_attr_profile##number##_buttons = {	\
+	.attr = { .name = "profile" #number "_buttons", .mode = 0440 },	\
+	.size = KONEPLUS_SIZE_PROFILE_BUTTONS,				\
+	.read = koneplus_sysfs_read_profilex_buttons,		\
+	.private = &profile_numbers[number-1],				\
+};
+PROFILE_ATTR(1);
+PROFILE_ATTR(2);
+PROFILE_ATTR(3);
+PROFILE_ATTR(4);
+PROFILE_ATTR(5);
+
 static ssize_t koneplus_sysfs_show_actual_profile(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct koneplus_device *koneplus =
 			hid_get_drvdata(dev_get_drvdata(dev->parent->parent));
-	return snprintf(buf, PAGE_SIZE, "%d\n", koneplus->actual_profile);
+	return sysfs_emit(buf, "%d\n", koneplus->actual_profile);
 }
 
 static ssize_t koneplus_sysfs_set_actual_profile(struct device *dev,
@@ -246,7 +258,7 @@ static ssize_t koneplus_sysfs_set_actual_profile(struct device *dev,
 	koneplus = hid_get_drvdata(dev_get_drvdata(dev));
 	usb_dev = interface_to_usbdev(to_usb_interface(dev));
 
-	retval = strict_strtoul(buf, 10, &profile);
+	retval = kstrtoul(buf, 10, &profile);
 	if (retval)
 		return retval;
 
@@ -274,6 +286,12 @@ static ssize_t koneplus_sysfs_set_actual_profile(struct device *dev,
 
 	return size;
 }
+static DEVICE_ATTR(actual_profile, 0660,
+		   koneplus_sysfs_show_actual_profile,
+		   koneplus_sysfs_set_actual_profile);
+static DEVICE_ATTR(startup_profile, 0660,
+		   koneplus_sysfs_show_actual_profile,
+		   koneplus_sysfs_set_actual_profile);
 
 static ssize_t koneplus_sysfs_show_firmware_version(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -291,92 +309,54 @@ static ssize_t koneplus_sysfs_show_firmware_version(struct device *dev,
 			&info, KONEPLUS_SIZE_INFO);
 	mutex_unlock(&koneplus->koneplus_lock);
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", info.firmware_version);
+	return sysfs_emit(buf, "%d\n", info.firmware_version);
 }
+static DEVICE_ATTR(firmware_version, 0440,
+		   koneplus_sysfs_show_firmware_version, NULL);
 
-static struct device_attribute koneplus_attributes[] = {
-	__ATTR(actual_profile, 0660,
-			koneplus_sysfs_show_actual_profile,
-			koneplus_sysfs_set_actual_profile),
-	__ATTR(startup_profile, 0660,
-			koneplus_sysfs_show_actual_profile,
-			koneplus_sysfs_set_actual_profile),
-	__ATTR(firmware_version, 0440,
-			koneplus_sysfs_show_firmware_version, NULL),
-	__ATTR_NULL
+static struct attribute *koneplus_attrs[] = {
+	&dev_attr_actual_profile.attr,
+	&dev_attr_startup_profile.attr,
+	&dev_attr_firmware_version.attr,
+	NULL,
 };
 
-static struct bin_attribute koneplus_bin_attributes[] = {
-	KONEPLUS_BIN_ATTRIBUTE_W(control, CONTROL),
-	KONEPLUS_BIN_ATTRIBUTE_RW(info, INFO),
-	KONEPLUS_BIN_ATTRIBUTE_W(talk, TALK),
-	KONEPLUS_BIN_ATTRIBUTE_W(macro, MACRO),
-	KONEPLUS_BIN_ATTRIBUTE_RW(sensor, SENSOR),
-	KONEPLUS_BIN_ATTRIBUTE_RW(tcu, TCU),
-	KONEPLUS_BIN_ATTRIBUTE_R(tcu_image, TCU_IMAGE),
-	KONEPLUS_BIN_ATTRIBUTE_RW(profile_settings, PROFILE_SETTINGS),
-	KONEPLUS_BIN_ATTRIBUTE_RW(profile_buttons, PROFILE_BUTTONS),
-	{
-		.attr = { .name = "profile1_settings", .mode = 0440 },
-		.size = KONEPLUS_SIZE_PROFILE_SETTINGS,
-		.read = koneplus_sysfs_read_profilex_settings,
-		.private = &profile_numbers[0]
-	},
-	{
-		.attr = { .name = "profile2_settings", .mode = 0440 },
-		.size = KONEPLUS_SIZE_PROFILE_SETTINGS,
-		.read = koneplus_sysfs_read_profilex_settings,
-		.private = &profile_numbers[1]
-	},
-	{
-		.attr = { .name = "profile3_settings", .mode = 0440 },
-		.size = KONEPLUS_SIZE_PROFILE_SETTINGS,
-		.read = koneplus_sysfs_read_profilex_settings,
-		.private = &profile_numbers[2]
-	},
-	{
-		.attr = { .name = "profile4_settings", .mode = 0440 },
-		.size = KONEPLUS_SIZE_PROFILE_SETTINGS,
-		.read = koneplus_sysfs_read_profilex_settings,
-		.private = &profile_numbers[3]
-	},
-	{
-		.attr = { .name = "profile5_settings", .mode = 0440 },
-		.size = KONEPLUS_SIZE_PROFILE_SETTINGS,
-		.read = koneplus_sysfs_read_profilex_settings,
-		.private = &profile_numbers[4]
-	},
-	{
-		.attr = { .name = "profile1_buttons", .mode = 0440 },
-		.size = KONEPLUS_SIZE_PROFILE_BUTTONS,
-		.read = koneplus_sysfs_read_profilex_buttons,
-		.private = &profile_numbers[0]
-	},
-	{
-		.attr = { .name = "profile2_buttons", .mode = 0440 },
-		.size = KONEPLUS_SIZE_PROFILE_BUTTONS,
-		.read = koneplus_sysfs_read_profilex_buttons,
-		.private = &profile_numbers[1]
-	},
-	{
-		.attr = { .name = "profile3_buttons", .mode = 0440 },
-		.size = KONEPLUS_SIZE_PROFILE_BUTTONS,
-		.read = koneplus_sysfs_read_profilex_buttons,
-		.private = &profile_numbers[2]
-	},
-	{
-		.attr = { .name = "profile4_buttons", .mode = 0440 },
-		.size = KONEPLUS_SIZE_PROFILE_BUTTONS,
-		.read = koneplus_sysfs_read_profilex_buttons,
-		.private = &profile_numbers[3]
-	},
-	{
-		.attr = { .name = "profile5_buttons", .mode = 0440 },
-		.size = KONEPLUS_SIZE_PROFILE_BUTTONS,
-		.read = koneplus_sysfs_read_profilex_buttons,
-		.private = &profile_numbers[4]
-	},
-	__ATTR_NULL
+static const struct bin_attribute *const koneplus_bin_attributes[] = {
+	&bin_attr_control,
+	&bin_attr_talk,
+	&bin_attr_macro,
+	&bin_attr_tcu_image,
+	&bin_attr_info,
+	&bin_attr_sensor,
+	&bin_attr_tcu,
+	&bin_attr_profile_settings,
+	&bin_attr_profile_buttons,
+	&bin_attr_profile1_settings,
+	&bin_attr_profile2_settings,
+	&bin_attr_profile3_settings,
+	&bin_attr_profile4_settings,
+	&bin_attr_profile5_settings,
+	&bin_attr_profile1_buttons,
+	&bin_attr_profile2_buttons,
+	&bin_attr_profile3_buttons,
+	&bin_attr_profile4_buttons,
+	&bin_attr_profile5_buttons,
+	NULL,
+};
+
+static const struct attribute_group koneplus_group = {
+	.attrs = koneplus_attrs,
+	.bin_attrs = koneplus_bin_attributes,
+};
+
+static const struct attribute_group *koneplus_groups[] = {
+	&koneplus_group,
+	NULL,
+};
+
+static const struct class koneplus_class = {
+	.name = "koneplus",
+	.dev_groups = koneplus_groups,
 };
 
 static int koneplus_init_koneplus_device_struct(struct usb_device *usb_dev,
@@ -404,7 +384,7 @@ static int koneplus_init_specials(struct hid_device *hdev)
 	if (intf->cur_altsetting->desc.bInterfaceProtocol
 			== USB_INTERFACE_PROTOCOL_MOUSE) {
 
-		koneplus = kzalloc(sizeof(*koneplus), GFP_KERNEL);
+		koneplus = kzalloc_obj(*koneplus);
 		if (!koneplus) {
 			hid_err(hdev, "can't alloc device descriptor\n");
 			return -ENOMEM;
@@ -417,8 +397,8 @@ static int koneplus_init_specials(struct hid_device *hdev)
 			goto exit_free;
 		}
 
-		retval = roccat_connect(koneplus_class, hdev,
-				sizeof(struct koneplus_roccat_report));
+		retval = roccat_connect(&koneplus_class, hdev,
+					sizeof(struct koneplus_roccat_report));
 		if (retval < 0) {
 			hid_err(hdev, "couldn't init char dev\n");
 		} else {
@@ -453,6 +433,9 @@ static int koneplus_probe(struct hid_device *hdev,
 		const struct hid_device_id *id)
 {
 	int retval;
+
+	if (!hid_is_usb(hdev))
+		return -EINVAL;
 
 	retval = hid_parse(hdev);
 	if (retval) {
@@ -540,6 +523,9 @@ static int koneplus_raw_event(struct hid_device *hdev,
 	if (koneplus == NULL)
 		return 0;
 
+	if (size < sizeof(struct koneplus_mouse_report_button))
+		return 0;
+
 	koneplus_keep_values_up_to_date(koneplus, data);
 
 	if (koneplus->roccat_claimed)
@@ -569,22 +555,20 @@ static int __init koneplus_init(void)
 	int retval;
 
 	/* class name has to be same as driver name */
-	koneplus_class = class_create(THIS_MODULE, "koneplus");
-	if (IS_ERR(koneplus_class))
-		return PTR_ERR(koneplus_class);
-	koneplus_class->dev_attrs = koneplus_attributes;
-	koneplus_class->dev_bin_attrs = koneplus_bin_attributes;
+	retval = class_register(&koneplus_class);
+	if (retval)
+		return retval;
 
 	retval = hid_register_driver(&koneplus_driver);
 	if (retval)
-		class_destroy(koneplus_class);
+		class_unregister(&koneplus_class);
 	return retval;
 }
 
 static void __exit koneplus_exit(void)
 {
 	hid_unregister_driver(&koneplus_driver);
-	class_destroy(koneplus_class);
+	class_unregister(&koneplus_class);
 }
 
 module_init(koneplus_init);

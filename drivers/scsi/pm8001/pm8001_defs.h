@@ -41,18 +41,123 @@
 #ifndef _PM8001_DEFS_H_
 #define _PM8001_DEFS_H_
 
+#include <scsi/sas.h>
+
+#ifdef __LITTLE_ENDIAN_BITFIELD
+struct sas_identify_frame_local {
+	/* Byte 0 */
+	u8  frame_type:4;
+	u8  dev_type:3;
+	u8  _un0:1;
+
+	/* Byte 1 */
+	u8  _un1;
+
+	/* Byte 2 */
+	union {
+		struct {
+			u8  _un20:1;
+			u8  smp_iport:1;
+			u8  stp_iport:1;
+			u8  ssp_iport:1;
+			u8  _un247:4;
+		};
+		u8 initiator_bits;
+	};
+
+	/* Byte 3 */
+	union {
+		struct {
+			u8  _un30:1;
+			u8 smp_tport:1;
+			u8 stp_tport:1;
+			u8 ssp_tport:1;
+			u8 _un347:4;
+		};
+		u8 target_bits;
+	};
+
+	/* Byte 4 - 11 */
+	u8 _un4_11[8];
+
+	/* Byte 12 - 19 */
+	u8 sas_addr[SAS_ADDR_SIZE];
+
+	/* Byte 20 */
+	u8 phy_id;
+
+	u8 _un21_27[7];
+
+} __packed;
+
+#elif defined(__BIG_ENDIAN_BITFIELD)
+struct sas_identify_frame_local {
+	/* Byte 0 */
+	u8  _un0:1;
+	u8  dev_type:3;
+	u8  frame_type:4;
+
+	/* Byte 1 */
+	u8  _un1;
+
+	/* Byte 2 */
+	union {
+		struct {
+			u8  _un247:4;
+			u8  ssp_iport:1;
+			u8  stp_iport:1;
+			u8  smp_iport:1;
+			u8  _un20:1;
+		};
+		u8 initiator_bits;
+	};
+
+	/* Byte 3 */
+	union {
+		struct {
+			u8 _un347:4;
+			u8 ssp_tport:1;
+			u8 stp_tport:1;
+			u8 smp_tport:1;
+			u8 _un30:1;
+		};
+		u8 target_bits;
+	};
+
+	/* Byte 4 - 11 */
+	u8 _un4_11[8];
+
+	/* Byte 12 - 19 */
+	u8 sas_addr[SAS_ADDR_SIZE];
+
+	/* Byte 20 */
+	u8 phy_id;
+
+	u8 _un21_27[7];
+} __packed;
+#else
+#error "Bitfield order not defined!"
+#endif
+
 enum chip_flavors {
 	chip_8001,
 	chip_8008,
 	chip_8009,
 	chip_8018,
-	chip_8019
+	chip_8019,
+	chip_8074,
+	chip_8076,
+	chip_8077,
+	chip_8006,
+	chip_8070,
+	chip_8072
 };
 
 enum phy_speed {
 	PHY_SPEED_15 = 0x01,
 	PHY_SPEED_30 = 0x02,
 	PHY_SPEED_60 = 0x04,
+	PHY_SPEED_120 = 0x08,
 };
 
 enum data_direction {
@@ -68,12 +173,10 @@ enum port_type {
 };
 
 /* driver compile-time configuration */
-#define	PM8001_MAX_CCB		 512	/* max ccbs supported */
+#define	PM8001_MAX_CCB		 1024	/* max ccbs supported */
 #define PM8001_MPI_QUEUE         1024   /* maximum mpi queue entries */
-#define	PM8001_MAX_INB_NUM	 1
-#define	PM8001_MAX_OUTB_NUM	 1
-#define	PM8001_MAX_SPCV_INB_NUM		1
-#define	PM8001_MAX_SPCV_OUTB_NUM	4
+#define	PM8001_MAX_INB_NUM	 64
+#define	PM8001_MAX_OUTB_NUM	 64
 #define	PM8001_CAN_QUEUE	 508	/* SCSI Queue depth */
 
 /* Inbound/Outbound queue size */
@@ -85,24 +188,30 @@ enum port_type {
 #define	PM8001_MAX_PORTS	 16	/* max. possible ports */
 #define	PM8001_MAX_DEVICES	 2048	/* max supported device */
 #define	PM8001_MAX_MSIX_VEC	 64	/* max msi-x int for spcv/ve */
+#define	PM8001_RESERVE_SLOT	 128
 
-#define USI_MAX_MEMCNT_BASE	5
-#define IB			(USI_MAX_MEMCNT_BASE + 1)
-#define CI			(IB + PM8001_MAX_SPCV_INB_NUM)
-#define OB			(CI + PM8001_MAX_SPCV_INB_NUM)
-#define PI			(OB + PM8001_MAX_SPCV_OUTB_NUM)
-#define USI_MAX_MEMCNT		(PI + PM8001_MAX_SPCV_OUTB_NUM)
-#define PM8001_MAX_DMA_SG	SG_ALL
+#define PM8001_SECTOR_SIZE	512
+#define PM8001_PAGE_SIZE_4K	4096
+#define PM8001_MAX_IO_SIZE	(4 * 1024 * 1024)
+#define PM8001_MAX_DMA_SG	(PM8001_MAX_IO_SIZE / PM8001_PAGE_SIZE_4K)
+#define PM8001_MAX_SECTORS	(PM8001_MAX_IO_SIZE / PM8001_SECTOR_SIZE)
+
 enum memory_region_num {
 	AAP1 = 0x0, /* application acceleration processor */
 	IOP,	    /* IO processor */
 	NVMD,	    /* NVM device */
-	DEV_MEM,    /* memory for devices */
-	CCB_MEM,    /* memory for command control block */
-	FW_FLASH    /* memory for fw flash update */
+	FW_FLASH,    /* memory for fw flash update */
+	FORENSIC_MEM,  /* memory for fw forensic data */
+	USI_MAX_MEMCNT_BASE
 };
 #define	PM8001_EVENT_LOG_SIZE	 (128 * 1024)
 
+/**
+ * maximum DMA memory regions(number of IBQ + number of IBQ CI
+ * + number of  OBQ + number of OBQ PI)
+ */
+#define USI_MAX_MEMCNT	(USI_MAX_MEMCNT_BASE + ((2 * PM8001_MAX_INB_NUM) \
+			+ (2 * PM8001_MAX_OUTB_NUM)))
 /*error code*/
 enum mpi_err {
 	MPI_IO_STATUS_SUCCESS = 0x0,
@@ -123,5 +232,13 @@ enum pm8001_hba_info_flags {
 	PM8001F_INIT_TIME	= (1U << 0),
 	PM8001F_RUN_TIME	= (1U << 1),
 };
+
+/**
+ * Phy Status
+ */
+#define PHY_LINK_DISABLE	0x00
+#define PHY_LINK_DOWN		0x01
+#define PHY_STATE_LINK_UP_SPCV	0x2
+#define PHY_STATE_LINK_UP_SPC	0x1
 
 #endif

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #ifndef __LINUX_USB_STORAGE_H
 #define __LINUX_USB_STORAGE_H
 
@@ -8,8 +9,6 @@
  *
  * This file contains definitions taken from the
  * USB Mass Storage Class Specification Overview
- *
- * Distributed under the terms of the GNU GPL, version two.
  */
 
 /* Storage subclass codes */
@@ -45,29 +44,29 @@
 
 #define USB_PR_DEVICE	0xff		/* Use device's value */
 
- /*
-  * Bulk only data structures
-  */
+/*
+ * Bulk only data structures
+ */
 
 /* command block wrapper */
 struct bulk_cb_wrap {
 	__le32	Signature;		/* contains 'USBC' */
 	__u32	Tag;			/* unique per command id */
 	__le32	DataTransferLength;	/* size of data */
-	__u8	Flags;			/* direction in bit 0 */
+	__u8	Flags;			/* direction in bit 7 */
 	__u8	Lun;			/* LUN normally 0 */
-	__u8	Length;			/* of of the CDB */
+	__u8	Length;			/* length of the CDB */
 	__u8	CDB[16];		/* max command */
 };
 
 #define US_BULK_CB_WRAP_LEN	31
-#define US_BULK_CB_SIGN		0x43425355	/*spells out USBC */
+#define US_BULK_CB_SIGN		0x43425355	/* spells out 'USBC' */
 #define US_BULK_FLAG_IN		(1 << 7)
 #define US_BULK_FLAG_OUT	0
 
 /* command status wrapper */
 struct bulk_cs_wrap {
-	__le32	Signature;	/* should = 'USBS' */
+	__le32	Signature;	/* contains 'USBS' */
 	__u32	Tag;		/* same as original command */
 	__le32	Residue;	/* amount not transferred */
 	__u8	Status;		/* see below */
@@ -82,5 +81,13 @@ struct bulk_cs_wrap {
 /* bulk-only class specific requests */
 #define US_BULK_RESET_REQUEST   0xff
 #define US_BULK_GET_MAX_LUN     0xfe
+
+/*
+ * If 4 LUNs are supported then the LUNs would be
+ * numbered from 0 to 3, and the return value for
+ * US_BULK_GET_MAX_LUN request would be 3. The valid
+ * LUN field is 4 bits wide, the upper limit is 0x0f.
+ */
+#define US_BULK_MAX_LUN_LIMIT   0x0f
 
 #endif

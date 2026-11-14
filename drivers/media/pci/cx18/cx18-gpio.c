@@ -1,32 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  cx18 gpio functions
  *
  *  Derived from ivtv-gpio.c
  *
- *  Copyright (C) 2007  Hans Verkuil <hverkuil@xs4all.nl>
+ *  Copyright (C) 2007  Hans Verkuil <hverkuil@kernel.org>
  *  Copyright (C) 2008  Andy Walls <awalls@md.metrocast.net>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
- *  02111-1307  USA
  */
 
 #include "cx18-driver.h"
 #include "cx18-io.h"
 #include "cx18-cards.h"
 #include "cx18-gpio.h"
-#include "tuner-xc2028.h"
+#include "xc2028.h"
 
 /********************* GPIO stuffs *********************/
 
@@ -180,7 +166,6 @@ static int gpiomux_s_audio_routing(struct v4l2_subdev *sd,
 
 static const struct v4l2_subdev_core_ops gpiomux_core_ops = {
 	.log_status = gpiomux_log_status,
-	.s_std = gpiomux_s_std,
 };
 
 static const struct v4l2_subdev_tuner_ops gpiomux_tuner_ops = {
@@ -191,10 +176,15 @@ static const struct v4l2_subdev_audio_ops gpiomux_audio_ops = {
 	.s_routing = gpiomux_s_audio_routing,
 };
 
+static const struct v4l2_subdev_video_ops gpiomux_video_ops = {
+	.s_std = gpiomux_s_std,
+};
+
 static const struct v4l2_subdev_ops gpiomux_ops = {
 	.core = &gpiomux_core_ops,
 	.tuner = &gpiomux_tuner_ops,
 	.audio = &gpiomux_audio_ops,
+	.video = &gpiomux_video_ops,
 };
 
 /*
@@ -314,21 +304,6 @@ int cx18_gpio_register(struct cx18 *cx, u32 hw)
 	sd->grp_id = hw;
 	return v4l2_device_register_subdev(&cx->v4l2_dev, sd);
 }
-
-void cx18_reset_ir_gpio(void *data)
-{
-	struct cx18 *cx = to_cx18((struct v4l2_device *)data);
-
-	if (cx->card->gpio_i2c_slave_reset.ir_reset_mask == 0)
-		return;
-
-	CX18_DEBUG_INFO("Resetting IR microcontroller\n");
-
-	v4l2_subdev_call(&cx->sd_resetctrl,
-			 core, reset, CX18_GPIO_RESET_Z8F0811);
-}
-EXPORT_SYMBOL(cx18_reset_ir_gpio);
-/* This symbol is exported for use by lirc_pvr150 for the IR-blaster */
 
 /* Xceive tuner reset function */
 int cx18_reset_tuner_gpio(void *dev, int component, int cmd, int value)

@@ -1,993 +1,2333 @@
-/* Copyright (C) 2007-2013 B.A.T.M.A.N. contributors:
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Copyright (C) B.A.T.M.A.N. contributors:
  *
  * Marek Lindner, Simon Wunderlich
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA
  */
 
 #ifndef _NET_BATMAN_ADV_TYPES_H_
 #define _NET_BATMAN_ADV_TYPES_H_
 
-#include "packet.h"
-#include "bitarray.h"
-#include <linux/kernel.h>
+#ifndef _NET_BATMAN_ADV_MAIN_H_
+#error only "main.h" can be included directly
+#endif
 
-/**
- * Maximum overhead for the encapsulation for a payload packet
- */
-#define BATADV_HEADER_LEN \
-	(ETH_HLEN + max(sizeof(struct batadv_unicast_packet), \
-			sizeof(struct batadv_bcast_packet)))
+#include <linux/average.h>
+#include <linux/bitops.h>
+#include <linux/compiler.h>
+#include <linux/completion.h>
+#include <linux/if.h>
+#include <linux/if_ether.h>
+#include <linux/kref.h>
+#include <linux/mutex.h>
+#include <linux/netdevice.h>
+#include <linux/netlink.h>
+#include <linux/rhashtable-types.h>
+#include <linux/sched.h> /* for linux/wait.h */
+#include <linux/skbuff.h>
+#include <linux/spinlock.h>
+#include <linux/timer.h>
+#include <linux/types.h>
+#include <linux/wait.h>
+#include <linux/workqueue.h>
+#include <uapi/linux/batadv_packet.h>
+#include <uapi/linux/batman_adv.h>
 
 #ifdef CONFIG_BATMAN_ADV_DAT
 
-/* batadv_dat_addr_t is the type used for all DHT addresses. If it is changed,
- * BATADV_DAT_ADDR_MAX is changed as well.
+/**
+ * typedef batadv_dat_addr_t - type used for all DHT addresses
+ *
+ * If it is changed, BATADV_DAT_ADDR_MAX is changed as well.
  *
  * *Please be careful: batadv_dat_addr_t must be UNSIGNED*
  */
-#define batadv_dat_addr_t uint16_t
+typedef u16 batadv_dat_addr_t;
 
 #endif /* CONFIG_BATMAN_ADV_DAT */
 
 /**
- * struct batadv_hard_iface_bat_iv - per hard interface B.A.T.M.A.N. IV data
- * @ogm_buff: buffer holding the OGM packet
- * @ogm_buff_len: length of the OGM packet buffer
- * @ogm_seqno: OGM sequence number - used to identify each OGM
+ * enum batadv_dhcp_recipient - dhcp destination
+ */
+enum batadv_dhcp_recipient {
+	/** @BATADV_DHCP_NO: packet is not a dhcp message */
+	BATADV_DHCP_NO = 0,
+
+	/** @BATADV_DHCP_TO_SERVER: dhcp message is directed to a server */
+	BATADV_DHCP_TO_SERVER,
+
+	/** @BATADV_DHCP_TO_CLIENT: dhcp message is directed to a client */
+	BATADV_DHCP_TO_CLIENT,
+};
+
+/**
+ * BATADV_TT_REMOTE_MASK - bitmask selecting the flags that are sent over the
+ *  wire only
+ */
+#define BATADV_TT_REMOTE_MASK	0x00FF
+
+/**
+ * BATADV_TT_SYNC_MASK - bitmask of the flags that need to be kept in sync
+ *  among the nodes. These flags are used to compute the global/local CRC
+ */
+#define BATADV_TT_SYNC_MASK	0x00F0
+
+/**
+ * struct batadv_ogm_buf - Buffer to construct an OGM with TVLV
+ */
+struct batadv_ogm_buf {
+	/** @buf: buffer holding the OGM packet */
+	void *buf;
+
+	/** @len: length of the OGM packet buffer data */
+	size_t len;
+
+	/** @capacity: size of allocated buf */
+	size_t capacity;
+
+	/** @header_length: fixed size header length (must be <= len) */
+	size_t header_length;
+};
+
+/**
+ * struct batadv_hard_iface_bat_iv - per hard-interface B.A.T.M.A.N. IV data
  */
 struct batadv_hard_iface_bat_iv {
-	unsigned char *ogm_buff;
-	int ogm_buff_len;
+	/** @ogm_buff: buffer holding the OGM packet */
+	struct batadv_ogm_buf ogm_buff;
+
+	/** @ogm_seqno: OGM sequence number - used to identify each OGM */
 	atomic_t ogm_seqno;
+
+	/** @reschedule_work: recover OGM schedule after schedule error */
+	struct delayed_work reschedule_work;
+
+	/** @ogm_buff_mutex: lock protecting ogm_buff */
+	struct mutex ogm_buff_mutex;
+};
+
+/**
+ * enum batadv_v_hard_iface_flags - interface flags useful to B.A.T.M.A.N. V
+ */
+enum batadv_v_hard_iface_flags {
+	/**
+	 * @BATADV_FULL_DUPLEX: tells if the connection over this link is
+	 *  full-duplex
+	 */
+	BATADV_FULL_DUPLEX	= BIT(0),
+
+	/**
+	 * @BATADV_WARNING_DEFAULT: tells whether we have warned the user that
+	 *  no throughput data is available for this interface and that default
+	 *  values are assumed.
+	 */
+	BATADV_WARNING_DEFAULT	= BIT(1),
+};
+
+/**
+ * struct batadv_hard_iface_bat_v - per hard-interface B.A.T.M.A.N. V data
+ */
+struct batadv_hard_iface_bat_v {
+	/** @elp_interval: time interval between two ELP transmissions */
+	u32 elp_interval;
+
+	/** @elp_seqno: current ELP sequence number */
+	atomic_t elp_seqno;
+
+	/** @elp_skb: base skb containing the ELP message to send */
+	struct sk_buff *elp_skb;
+
+	/** @elp_wq: workqueue used to schedule ELP transmissions */
+	struct delayed_work elp_wq;
+
+	/** @aggr_wq: workqueue used to transmit queued OGM packets */
+	struct delayed_work aggr_wq;
+
+	/** @aggr_list: queue for to be aggregated OGM packets */
+	struct sk_buff_head aggr_list;
+
+	/**
+	 * @aggr_list_enabled: aggr_list is active and new skbs can be
+	 * enqueued. Protected by aggr_list.lock after initialization
+	 */
+	bool aggr_list_enabled:1;
+
+	/** @aggr_len: size of the OGM aggregate (excluding ethernet header) */
+	unsigned int aggr_len;
+
+	/**
+	 * @throughput_override: throughput override to disable link
+	 *  auto-detection
+	 */
+	u32 throughput_override;
+
+	/** @flags: interface specific flags */
+	u8 flags;
+};
+
+/**
+ * enum batadv_hard_iface_wifi_flags - Flags describing the wifi configuration
+ *  of a batadv_hard_iface
+ */
+enum batadv_hard_iface_wifi_flags {
+	/** @BATADV_HARDIF_WIFI_WEXT_DIRECT: it is a wext wifi device */
+	BATADV_HARDIF_WIFI_WEXT_DIRECT = BIT(0),
+
+	/** @BATADV_HARDIF_WIFI_CFG80211_DIRECT: it is a cfg80211 wifi device */
+	BATADV_HARDIF_WIFI_CFG80211_DIRECT = BIT(1),
+
+	/**
+	 * @BATADV_HARDIF_WIFI_WEXT_INDIRECT: link device is a wext wifi device
+	 */
+	BATADV_HARDIF_WIFI_WEXT_INDIRECT = BIT(2),
+
+	/**
+	 * @BATADV_HARDIF_WIFI_CFG80211_INDIRECT: link device is a cfg80211 wifi
+	 * device
+	 */
+	BATADV_HARDIF_WIFI_CFG80211_INDIRECT = BIT(3),
+};
+
+/**
+ * struct batadv_wifi_net_device_state - cache of wifi information of net_devices
+ */
+struct batadv_wifi_net_device_state {
+	/** @l: anchor in rhashtable */
+	struct rhash_head l;
+
+	/** @netdev: pointer to the net_device */
+	struct net_device *netdev;
+
+	/** @dev_tracker: device tracker for @netdev */
+	netdevice_tracker dev_tracker;
+
+	/**
+	 * @wifi_flags: flags whether this is (directly or indirectly) a wifi
+	 *  interface
+	 */
+	u32 wifi_flags;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
+	struct rcu_head rcu;
 };
 
 /**
  * struct batadv_hard_iface - network device known to batman-adv
- * @list: list node for batadv_hardif_list
- * @if_num: identificator of the interface
- * @if_status: status of the interface for batman-adv
- * @net_dev: pointer to the net_device
- * @frag_seqno: last fragment sequence number sent by this interface
- * @hardif_obj: kobject of the per interface sysfs "mesh" directory
- * @refcount: number of contexts the object is used
- * @batman_adv_ptype: packet type describing packets that should be processed by
- *  batman-adv for this interface
- * @soft_iface: the batman-adv interface which uses this network interface
- * @rcu: struct used for freeing in an RCU-safe manner
- * @bat_iv: BATMAN IV specific per hard interface data
- * @cleanup_work: work queue callback item for hard interface deinit
  */
 struct batadv_hard_iface {
-	struct list_head list;
-	int16_t if_num;
+	/** @if_status: status of the interface for batman-adv */
 	char if_status;
+
+	/**
+	 * @num_bcasts: number of payload re-broadcasts on this interface (ARQ)
+	 */
+	u8 num_bcasts;
+
+	/** @net_dev: pointer to the net_device */
 	struct net_device *net_dev;
-	atomic_t frag_seqno;
-	struct kobject *hardif_obj;
-	atomic_t refcount;
+
+	/** @dev_tracker: device tracker for @net_dev */
+	netdevice_tracker dev_tracker;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/**
+	 * @batman_adv_ptype: packet type describing packets that should be
+	 * processed by batman-adv for this interface
+	 */
 	struct packet_type batman_adv_ptype;
-	struct net_device *soft_iface;
+
+	/**
+	 * @mesh_iface: the batman-adv interface which uses this network
+	 *  interface
+	 */
+	struct net_device *mesh_iface;
+
+	/** @meshif_dev_tracker: device tracker for @mesh_iface */
+	netdevice_tracker meshif_dev_tracker;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
 	struct rcu_head rcu;
+
+	/**
+	 * @hop_penalty: penalty which will be applied to the tq-field
+	 * of an OGM received via this interface
+	 */
+	u8 hop_penalty;
+
+	/** @bat_iv: per hard-interface B.A.T.M.A.N. IV data */
 	struct batadv_hard_iface_bat_iv bat_iv;
-	struct work_struct cleanup_work;
+
+#ifdef CONFIG_BATMAN_ADV_BATMAN_V
+	/** @bat_v: per hard-interface B.A.T.M.A.N. V data */
+	struct batadv_hard_iface_bat_v bat_v;
+#endif
+
+	/**
+	 * @neigh_list: list of unique single hop neighbors via this interface
+	 */
+	struct hlist_head neigh_list;
+
+	/** @neigh_list_lock: lock protecting neigh_list */
+	spinlock_t neigh_list_lock;
+};
+
+/**
+ * struct batadv_orig_ifinfo_bat_iv - B.A.T.M.A.N. IV private orig_ifinfo
+ *  members
+ */
+struct batadv_orig_ifinfo_bat_iv {
+	/**
+	 * @bcast_own: bitfield which counts the number of our OGMs this
+	 * orig_node rebroadcasted "back" to us  (relative to last_real_seqno)
+	 */
+	DECLARE_BITMAP(bcast_own, BATADV_TQ_LOCAL_WINDOW_SIZE);
+
+	/** @bcast_own_sum: sum of bcast_own */
+	u8 bcast_own_sum;
+};
+
+/**
+ * struct batadv_orig_ifinfo - originator info per outgoing interface
+ */
+struct batadv_orig_ifinfo {
+	/** @list: list node for &batadv_orig_node.ifinfo_list */
+	struct hlist_node list;
+
+	/** @if_outgoing: pointer to outgoing hard-interface */
+	struct batadv_hard_iface *if_outgoing;
+
+	/** @router: router that should be used to reach this originator */
+	struct batadv_neigh_node __rcu *router;
+
+	/** @last_real_seqno: last and best known sequence number */
+	u32 last_real_seqno;
+
+	/** @last_ttl: ttl of last received packet */
+	u8 last_ttl;
+
+	/** @last_seqno_forwarded: seqno of the OGM which was forwarded last */
+	u32 last_seqno_forwarded;
+
+	/** @batman_seqno_reset: time when the batman seqno window was reset */
+	unsigned long batman_seqno_reset;
+
+	/** @bat_iv: B.A.T.M.A.N. IV private structure */
+	struct batadv_orig_ifinfo_bat_iv bat_iv;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
+	struct rcu_head rcu;
+};
+
+/**
+ * struct batadv_frag_table_entry - head in the fragment buffer table
+ */
+struct batadv_frag_table_entry {
+	/** @fragment_list: head of list with fragments */
+	struct hlist_head fragment_list;
+
+	/** @lock: lock to protect the list of fragments */
+	spinlock_t lock;
+
+	/** @timestamp: time (jiffy) of last received fragment */
+	unsigned long timestamp;
+
+	/** @seqno: sequence number of the fragments in the list */
+	u16 seqno;
+
+	/** @size: accumulated size of packets in list */
+	size_t size;
+
+	/** @total_size: expected size of the assembled packet */
+	u16 total_size;
+};
+
+/**
+ * struct batadv_frag_list_entry - entry in a list of fragments
+ */
+struct batadv_frag_list_entry {
+	/** @list: list node information */
+	struct hlist_node list;
+
+	/** @skb: fragment */
+	struct sk_buff *skb;
+
+	/** @no: fragment number in the set */
+	u8 no;
+};
+
+/**
+ * struct batadv_vlan_tt - VLAN specific TT attributes
+ */
+struct batadv_vlan_tt {
+	/** @crc: CRC32 checksum of the entries belonging to this vlan */
+	u32 crc;
+
+	/** @num_entries: number of TT entries for this VLAN */
+	atomic_t num_entries;
+};
+
+/**
+ * struct batadv_orig_node_vlan - VLAN specific data per orig_node
+ */
+struct batadv_orig_node_vlan {
+	/** @vid: the VLAN identifier */
+	unsigned short vid;
+
+	/** @tt: VLAN specific TT attributes */
+	struct batadv_vlan_tt tt;
+
+	/** @list: list node for &batadv_orig_node.vlan_list */
+	struct hlist_node list;
+
+	/**
+	 * @refcount: number of context where this object is currently in use
+	 */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in a RCU-safe manner */
+	struct rcu_head rcu;
+};
+
+/**
+ * struct batadv_orig_bat_iv - B.A.T.M.A.N. IV private orig_node members
+ */
+struct batadv_orig_bat_iv {
+	/**
+	 * @ogm_cnt_lock: lock protecting &batadv_orig_ifinfo_bat_iv.bcast_own,
+	 * &batadv_orig_ifinfo_bat_iv.bcast_own_sum,
+	 * &batadv_neigh_ifinfo_bat_iv.bat_iv.real_bits and
+	 * &batadv_neigh_ifinfo_bat_iv.real_packet_count
+	 */
+	spinlock_t ogm_cnt_lock;
 };
 
 /**
  * struct batadv_orig_node - structure for orig_list maintaining nodes of mesh
- * @orig: originator ethernet address
- * @primary_addr: hosts primary interface address
- * @router: router that should be used to reach this originator
- * @batadv_dat_addr_t:  address of the orig node in the distributed hash
- * @bcast_own: bitfield containing the number of our OGMs this orig_node
- *  rebroadcasted "back" to us (relative to last_real_seqno)
- * @bcast_own_sum: counted result of bcast_own
- * @last_seen: time when last packet from this node was received
- * @bcast_seqno_reset: time when the broadcast seqno window was reset
- * @batman_seqno_reset: time when the batman seqno window was reset
- * @gw_flags: flags related to gateway class
- * @flags: for now only VIS_SERVER flag
- * @last_ttvn: last seen translation table version number
- * @tt_crc: CRC of the translation table
- * @tt_buff: last tt changeset this node received from the orig node
- * @tt_buff_len: length of the last tt changeset this node received from the
- *  orig node
- * @tt_buff_lock: lock that protects tt_buff and tt_buff_len
- * @tt_size: number of global TT entries announced by the orig node
- * @tt_initialised: bool keeping track of whether or not this node have received
- *  any translation table information from the orig node yet
- * @last_real_seqno: last and best known sequence number
- * @last_ttl: ttl of last received packet
- * @bcast_bits: bitfield containing the info which payload broadcast originated
- *  from this orig node this host already has seen (relative to
- *  last_bcast_seqno)
- * @last_bcast_seqno: last broadcast sequence number received by this host
- * @neigh_list: list of potential next hop neighbor towards this orig node
- * @frag_list: fragmentation buffer list for fragment re-assembly
- * @last_frag_packet: time when last fragmented packet from this node was
- *  received
- * @neigh_list_lock: lock protecting neigh_list, router and bonding_list
- * @hash_entry: hlist node for batadv_priv::orig_hash
- * @bat_priv: pointer to soft_iface this orig node belongs to
- * @ogm_cnt_lock: lock protecting bcast_own, bcast_own_sum,
- *  neigh_node->real_bits & neigh_node->real_packet_count
- * @bcast_seqno_lock: lock protecting bcast_bits & last_bcast_seqno
- * @bond_candidates: how many candidates are available
- * @bond_list: list of bonding candidates
- * @refcount: number of contexts the object is used
- * @rcu: struct used for freeing in an RCU-safe manner
- * @in_coding_list: list of nodes this orig can hear
- * @out_coding_list: list of nodes that can hear this orig
- * @in_coding_list_lock: protects in_coding_list
- * @out_coding_list_lock: protects out_coding_list
  */
 struct batadv_orig_node {
-	uint8_t orig[ETH_ALEN];
-	uint8_t primary_addr[ETH_ALEN];
-	struct batadv_neigh_node __rcu *router; /* rcu protected pointer */
+	/** @orig: originator ethernet address */
+	u8 orig[ETH_ALEN] __aligned(2);
+
+	/** @ifinfo_list: list for routers per outgoing interface */
+	struct hlist_head ifinfo_list;
+
+	/**
+	 * @last_bonding_candidate: pointer to last ifinfo of last used router
+	 */
+	struct batadv_orig_ifinfo *last_bonding_candidate;
+
 #ifdef CONFIG_BATMAN_ADV_DAT
+	/** @dat_addr: address of the orig node in the distributed hash */
 	batadv_dat_addr_t dat_addr;
 #endif
-	unsigned long *bcast_own;
-	uint8_t *bcast_own_sum;
+
+	/** @last_seen: time when last packet from this node was received */
 	unsigned long last_seen;
-	unsigned long bcast_seqno_reset;
-	unsigned long batman_seqno_reset;
-	uint8_t gw_flags;
-	uint8_t flags;
-	atomic_t last_ttvn;
-	uint16_t tt_crc;
-	unsigned char *tt_buff;
-	int16_t tt_buff_len;
-	spinlock_t tt_buff_lock; /* protects tt_buff & tt_buff_len */
-	atomic_t tt_size;
-	bool tt_initialised;
-	uint32_t last_real_seqno;
-	uint8_t last_ttl;
-	DECLARE_BITMAP(bcast_bits, BATADV_TQ_LOCAL_WINDOW_SIZE);
-	uint32_t last_bcast_seqno;
-	struct hlist_head neigh_list;
-	struct list_head frag_list;
-	unsigned long last_frag_packet;
-	/* neigh_list_lock protects: neigh_list, router & bonding_list */
-	spinlock_t neigh_list_lock;
-	struct hlist_node hash_entry;
-	struct batadv_priv *bat_priv;
-	/* ogm_cnt_lock protects: bcast_own, bcast_own_sum,
-	 * neigh_node->real_bits & neigh_node->real_packet_count
+
+	/**
+	 * @bcast_seqno_reset: time when the broadcast seqno window was reset
 	 */
-	spinlock_t ogm_cnt_lock;
-	/* bcast_seqno_lock protects: bcast_bits & last_bcast_seqno */
-	spinlock_t bcast_seqno_lock;
-	atomic_t bond_candidates;
-	struct list_head bond_list;
-	atomic_t refcount;
-	struct rcu_head rcu;
-#ifdef CONFIG_BATMAN_ADV_NC
-	struct list_head in_coding_list;
-	struct list_head out_coding_list;
-	spinlock_t in_coding_list_lock; /* Protects in_coding_list */
-	spinlock_t out_coding_list_lock; /* Protects out_coding_list */
+	unsigned long bcast_seqno_reset;
+
+#ifdef CONFIG_BATMAN_ADV_MCAST
+	/**
+	 * @mcast_handler_lock: synchronizes mcast-capability and -flag changes
+	 */
+	spinlock_t mcast_handler_lock;
+
+	/** @mcast_flags: multicast flags announced by the orig node */
+	u8 mcast_flags;
+
+	/**
+	 * @mcast_want_all_unsnoopables_node: a list node for the
+	 *  mcast.want_all_unsnoopables list
+	 */
+	struct hlist_node mcast_want_all_unsnoopables_node;
+
+	/**
+	 * @mcast_want_all_ipv4_node: a list node for the mcast.want_all_ipv4
+	 *  list
+	 */
+	struct hlist_node mcast_want_all_ipv4_node;
+	/**
+	 * @mcast_want_all_ipv6_node: a list node for the mcast.want_all_ipv6
+	 *  list
+	 */
+	struct hlist_node mcast_want_all_ipv6_node;
+
+	/**
+	 * @mcast_want_all_rtr4_node: a list node for the mcast.want_all_rtr4
+	 *  list
+	 */
+	struct hlist_node mcast_want_all_rtr4_node;
+	/**
+	 * @mcast_want_all_rtr6_node: a list node for the mcast.want_all_rtr6
+	 *  list
+	 */
+	struct hlist_node mcast_want_all_rtr6_node;
 #endif
+
+	/** @capabilities: announced capabilities of this originator */
+	unsigned long capabilities;
+
+	/**
+	 * @capa_initialized: bitfield to remember whether a capability was
+	 *  initialized
+	 */
+	unsigned long capa_initialized;
+
+	/** @last_ttvn: last seen translation table version number */
+	u8 last_ttvn;
+
+	/** @tt_buff: last tt changeset this node received from the orig node */
+	unsigned char *tt_buff;
+
+	/**
+	 * @tt_buff_len: length of the last tt changeset this node received
+	 *  from the orig node
+	 */
+	u16 tt_buff_len;
+
+	/** @tt_buff_lock: lock that protects tt_buff and tt_buff_len */
+	spinlock_t tt_buff_lock;
+
+	/**
+	 * @tt_lock: avoids concurrent read from and write to the table. Table
+	 *  update is made up of two operations (data structure update and
+	 *  metadata -CRC/TTVN-recalculation) and they have to be executed
+	 *  atomically in order to avoid another thread to read the
+	 *  table/metadata between those.
+	 */
+	spinlock_t tt_lock;
+
+	/**
+	 * @bcast_bits: bitfield containing the info which payload broadcast
+	 *  originated from this orig node this host already has seen (relative
+	 *  to last_bcast_seqno)
+	 */
+	DECLARE_BITMAP(bcast_bits, BATADV_TQ_LOCAL_WINDOW_SIZE);
+
+	/**
+	 * @last_bcast_seqno: last broadcast sequence number received by this
+	 *  host
+	 */
+	u32 last_bcast_seqno;
+
+	/**
+	 * @neigh_list: list of potential next hop neighbor towards this orig
+	 *  node
+	 */
+	struct hlist_head neigh_list;
+
+	/**
+	 * @neigh_list_lock: lock protecting neigh_list, ifinfo_list,
+	 *  last_bonding_candidate and router
+	 */
+	spinlock_t neigh_list_lock;
+
+	/** @hash_entry: hlist node for &batadv_priv.orig_hash */
+	struct hlist_node hash_entry;
+
+	/** @bat_priv: pointer to mesh_iface this orig node belongs to */
+	struct batadv_priv *bat_priv;
+
+	/** @bcast_seqno_lock: lock protecting bcast_bits & last_bcast_seqno */
+	spinlock_t bcast_seqno_lock;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
+	struct rcu_head rcu;
+
+	/** @fragments: array with heads for fragment chains */
+	struct batadv_frag_table_entry fragments[BATADV_FRAG_BUFFER_COUNT];
+
+	/**
+	 * @vlan_list: a list of orig_node_vlan structs, one per VLAN served by
+	 *  the originator represented by this object
+	 */
+	struct hlist_head vlan_list;
+
+	/** @vlan_list_lock: lock protecting vlan_list */
+	spinlock_t vlan_list_lock;
+
+	/** @bat_iv: B.A.T.M.A.N. IV private structure */
+	struct batadv_orig_bat_iv bat_iv;
+};
+
+/**
+ * enum batadv_orig_capabilities - orig node capabilities
+ */
+enum batadv_orig_capabilities {
+	/**
+	 * @BATADV_ORIG_CAPA_HAS_DAT: orig node has distributed arp table
+	 *  enabled
+	 */
+	BATADV_ORIG_CAPA_HAS_DAT,
+
+	/** @BATADV_ORIG_CAPA_HAS_TT: orig node has tt capability */
+	BATADV_ORIG_CAPA_HAS_TT,
+
+	/**
+	 * @BATADV_ORIG_CAPA_HAS_MCAST: orig node has some multicast capability
+	 *  (= orig node announces a tvlv of type BATADV_TVLV_MCAST)
+	 */
+	BATADV_ORIG_CAPA_HAS_MCAST,
 };
 
 /**
  * struct batadv_gw_node - structure for orig nodes announcing gw capabilities
- * @list: list node for batadv_priv_gw::list
- * @orig_node: pointer to corresponding orig node
- * @deleted: this struct is scheduled for deletion
- * @refcount: number of contexts the object is used
- * @rcu: struct used for freeing in an RCU-safe manner
  */
 struct batadv_gw_node {
+	/** @list: list node for &batadv_priv_gw.list */
 	struct hlist_node list;
+
+	/** @orig_node: pointer to corresponding orig node */
 	struct batadv_orig_node *orig_node;
-	unsigned long deleted;
-	atomic_t refcount;
+
+	/** @bandwidth_down: advertised uplink download bandwidth */
+	u32 bandwidth_down;
+
+	/** @bandwidth_up: advertised uplink upload bandwidth */
+	u32 bandwidth_up;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
+	struct rcu_head rcu;
+};
+
+DECLARE_EWMA(throughput, 10, 8)
+
+/**
+ * struct batadv_hardif_neigh_node_bat_v - B.A.T.M.A.N. V private neighbor
+ *  information
+ */
+struct batadv_hardif_neigh_node_bat_v {
+	/** @throughput: ewma link throughput towards this neighbor */
+	struct ewma_throughput throughput;
+
+	/** @elp_interval: time interval between two ELP transmissions */
+	u32 elp_interval;
+
+	/** @elp_latest_seqno: latest and best known ELP sequence number */
+	u32 elp_latest_seqno;
+
+	/**
+	 * @last_unicast_tx: when the last unicast packet has been sent to this
+	 *  neighbor
+	 */
+	unsigned long last_unicast_tx;
+};
+
+/**
+ * struct batadv_hardif_neigh_node - unique neighbor per hard-interface
+ */
+struct batadv_hardif_neigh_node {
+	/** @list: list node for &batadv_hard_iface.neigh_list */
+	struct hlist_node list;
+
+	/** @addr: the MAC address of the neighboring interface */
+	u8 addr[ETH_ALEN] __aligned(2);
+
+	/**
+	 * @orig: the address of the originator this neighbor node belongs to
+	 */
+	u8 orig[ETH_ALEN] __aligned(2);
+
+	/** @if_incoming: pointer to incoming hard-interface */
+	struct batadv_hard_iface *if_incoming;
+
+	/** @last_seen: when last packet via this neighbor was received */
+	unsigned long last_seen;
+
+#ifdef CONFIG_BATMAN_ADV_BATMAN_V
+	/** @bat_v: B.A.T.M.A.N. V private data */
+	struct batadv_hardif_neigh_node_bat_v bat_v;
+#endif
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in a RCU-safe manner */
 	struct rcu_head rcu;
 };
 
 /**
- * struct batadv_neigh_node - structure for single hop neighbors
- * @list: list node for batadv_orig_node::neigh_list
- * @addr: mac address of neigh node
- * @tq_recv: ring buffer of received TQ values from this neigh node
- * @tq_index: ring buffer index
- * @tq_avg: averaged tq of all tq values in the ring buffer (tq_recv)
- * @last_ttl: last received ttl from this neigh node
- * @bonding_list: list node for batadv_orig_node::bond_list
- * @last_seen: when last packet via this neighbor was received
- * @real_bits: bitfield containing the number of OGMs received from this neigh
- *  node (relative to orig_node->last_real_seqno)
- * @real_packet_count: counted result of real_bits
- * @orig_node: pointer to corresponding orig_node
- * @if_incoming: pointer to incoming hard interface
- * @lq_update_lock: lock protecting tq_recv & tq_index
- * @refcount: number of contexts the object is used
- * @rcu: struct used for freeing in an RCU-safe manner
+ * struct batadv_neigh_node - structure for single hops neighbors
  */
 struct batadv_neigh_node {
+	/** @list: list node for &batadv_orig_node.neigh_list */
 	struct hlist_node list;
-	uint8_t addr[ETH_ALEN];
-	uint8_t tq_recv[BATADV_TQ_GLOBAL_WINDOW_SIZE];
-	uint8_t tq_index;
-	uint8_t tq_avg;
-	uint8_t last_ttl;
-	struct list_head bonding_list;
-	unsigned long last_seen;
-	DECLARE_BITMAP(real_bits, BATADV_TQ_LOCAL_WINDOW_SIZE);
-	uint8_t real_packet_count;
-	struct batadv_orig_node *orig_node;
+
+#ifdef CONFIG_BATMAN_ADV_BATMAN_V
+	/**
+	 * @orig_node_id: pointer to corresponding orig_node. It must only be used
+	 * to identify the node but must NEVER be dereferenced. The reference counter
+	 * was not increased when this was assigned because it would otherwise create
+	 * a reference cycle.
+	 */
+	struct batadv_orig_node *__private orig_node_id;
+#endif
+
+	/** @addr: the MAC address of the neighboring interface */
+	u8 addr[ETH_ALEN] __aligned(2);
+
+	/** @ifinfo_list: list for routing metrics per outgoing interface */
+	struct hlist_head ifinfo_list;
+
+	/** @ifinfo_lock: lock protecting ifinfo_list and its members */
+	spinlock_t ifinfo_lock;
+
+	/** @if_incoming: pointer to incoming hard-interface */
 	struct batadv_hard_iface *if_incoming;
-	spinlock_t lq_update_lock; /* protects tq_recv & tq_index */
-	atomic_t refcount;
+
+	/** @last_seen: when last packet via this neighbor was received */
+	unsigned long last_seen;
+
+	/** @hardif_neigh: hardif_neigh of this neighbor */
+	struct batadv_hardif_neigh_node *hardif_neigh;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
 	struct rcu_head rcu;
 };
+
+/**
+ * struct batadv_neigh_ifinfo_bat_iv - neighbor information per outgoing
+ *  interface for B.A.T.M.A.N. IV
+ */
+struct batadv_neigh_ifinfo_bat_iv {
+	/** @tq_recv: ring buffer of received TQ values from this neigh node */
+	u8 tq_recv[BATADV_TQ_GLOBAL_WINDOW_SIZE];
+
+	/** @tq_index: ring buffer index */
+	u8 tq_index;
+
+	/**
+	 * @tq_avg: averaged tq of all tq values in the ring buffer (tq_recv)
+	 */
+	u8 tq_avg;
+
+	/**
+	 * @real_bits: bitfield containing the number of OGMs received from this
+	 *  neigh node (relative to orig_node->last_real_seqno)
+	 */
+	DECLARE_BITMAP(real_bits, BATADV_TQ_LOCAL_WINDOW_SIZE);
+
+	/** @real_packet_count: counted result of real_bits */
+	u8 real_packet_count;
+};
+
+/**
+ * struct batadv_neigh_ifinfo_bat_v - neighbor information per outgoing
+ *  interface for B.A.T.M.A.N. V
+ */
+struct batadv_neigh_ifinfo_bat_v {
+	/**
+	 * @throughput: last throughput metric received from originator via this
+	 *  neigh
+	 */
+	u32 throughput;
+
+	/** @last_seqno: last sequence number known for this neighbor */
+	u32 last_seqno;
+};
+
+/**
+ * struct batadv_neigh_ifinfo - neighbor information per outgoing interface
+ */
+struct batadv_neigh_ifinfo {
+	/** @list: list node for &batadv_neigh_node.ifinfo_list */
+	struct hlist_node list;
+
+	/** @if_outgoing: pointer to outgoing hard-interface */
+	struct batadv_hard_iface *if_outgoing;
+
+	/** @bat_iv: B.A.T.M.A.N. IV private structure */
+	struct batadv_neigh_ifinfo_bat_iv bat_iv;
+
+#ifdef CONFIG_BATMAN_ADV_BATMAN_V
+	/** @bat_v: B.A.T.M.A.N. V private data */
+	struct batadv_neigh_ifinfo_bat_v bat_v;
+#endif
+
+	/** @last_ttl: last received ttl from this neigh node */
+	u8 last_ttl;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in a RCU-safe manner */
+	struct rcu_head rcu;
+};
+
+#ifdef CONFIG_BATMAN_ADV_BLA
 
 /**
  * struct batadv_bcast_duplist_entry - structure for LAN broadcast suppression
- * @orig[ETH_ALEN]: mac address of orig node orginating the broadcast
- * @crc: crc32 checksum of broadcast payload
- * @entrytime: time when the broadcast packet was received
  */
-#ifdef CONFIG_BATMAN_ADV_BLA
 struct batadv_bcast_duplist_entry {
-	uint8_t orig[ETH_ALEN];
-	__be32 crc;
+	/** @orig: mac address of orig node originating the broadcast */
+	u8 orig[ETH_ALEN] __aligned(2);
+
+	/** @crc: crc32 checksum of broadcast payload */
+	u32 crc;
+
+	/** @entrytime: time when the broadcast packet was received */
 	unsigned long entrytime;
 };
 #endif
 
 /**
  * enum batadv_counters - indices for traffic counters
- * @BATADV_CNT_TX: transmitted payload traffic packet counter
- * @BATADV_CNT_TX_BYTES: transmitted payload traffic bytes counter
- * @BATADV_CNT_TX_DROPPED: dropped transmission payload traffic packet counter
- * @BATADV_CNT_RX: received payload traffic packet counter
- * @BATADV_CNT_RX_BYTES: received payload traffic bytes counter
- * @BATADV_CNT_FORWARD: forwarded payload traffic packet counter
- * @BATADV_CNT_FORWARD_BYTES: forwarded payload traffic bytes counter
- * @BATADV_CNT_MGMT_TX: transmitted routing protocol traffic packet counter
- * @BATADV_CNT_MGMT_TX_BYTES: transmitted routing protocol traffic bytes counter
- * @BATADV_CNT_MGMT_RX: received routing protocol traffic packet counter
- * @BATADV_CNT_MGMT_RX_BYTES: received routing protocol traffic bytes counter
- * @BATADV_CNT_TT_REQUEST_TX: transmitted tt req traffic packet counter
- * @BATADV_CNT_TT_REQUEST_RX: received tt req traffic packet counter
- * @BATADV_CNT_TT_RESPONSE_TX: transmitted tt resp traffic packet counter
- * @BATADV_CNT_TT_RESPONSE_RX: received tt resp traffic packet counter
- * @BATADV_CNT_TT_ROAM_ADV_TX: transmitted tt roam traffic packet counter
- * @BATADV_CNT_TT_ROAM_ADV_RX: received tt roam traffic packet counter
- * @BATADV_CNT_DAT_GET_TX: transmitted dht GET traffic packet counter
- * @BATADV_CNT_DAT_GET_RX: received dht GET traffic packet counter
- * @BATADV_CNT_DAT_PUT_TX: transmitted dht PUT traffic packet counter
- * @BATADV_CNT_DAT_PUT_RX: received dht PUT traffic packet counter
- * @BATADV_CNT_DAT_CACHED_REPLY_TX: transmitted dat cache reply traffic packet
- *  counter
- * @BATADV_CNT_NC_CODE: transmitted nc-combined traffic packet counter
- * @BATADV_CNT_NC_CODE_BYTES: transmitted nc-combined traffic bytes counter
- * @BATADV_CNT_NC_RECODE: transmitted nc-recombined traffic packet counter
- * @BATADV_CNT_NC_RECODE_BYTES: transmitted nc-recombined traffic bytes counter
- * @BATADV_CNT_NC_BUFFER: counter for packets buffered for later nc decoding
- * @BATADV_CNT_NC_DECODE: received and nc-decoded traffic packet counter
- * @BATADV_CNT_NC_DECODE_BYTES: received and nc-decoded traffic bytes counter
- * @BATADV_CNT_NC_DECODE_FAILED: received and decode-failed traffic packet
- *  counter
- * @BATADV_CNT_NC_SNIFFED: counter for nc-decoded packets received in promisc
- *  mode.
- * @BATADV_CNT_NUM: number of traffic counters
  */
 enum batadv_counters {
+	/** @BATADV_CNT_TX: transmitted payload traffic packet counter */
 	BATADV_CNT_TX,
+
+	/** @BATADV_CNT_TX_BYTES: transmitted payload traffic bytes counter */
 	BATADV_CNT_TX_BYTES,
+
+	/**
+	 * @BATADV_CNT_TX_DROPPED: dropped transmission payload traffic packet
+	 *  counter
+	 */
 	BATADV_CNT_TX_DROPPED,
+
+	/** @BATADV_CNT_RX: received payload traffic packet counter */
 	BATADV_CNT_RX,
+
+	/** @BATADV_CNT_RX_BYTES: received payload traffic bytes counter */
 	BATADV_CNT_RX_BYTES,
+
+	/** @BATADV_CNT_FORWARD: forwarded payload traffic packet counter */
 	BATADV_CNT_FORWARD,
+
+	/**
+	 * @BATADV_CNT_FORWARD_BYTES: forwarded payload traffic bytes counter
+	 */
 	BATADV_CNT_FORWARD_BYTES,
+
+	/**
+	 * @BATADV_CNT_MGMT_TX: transmitted routing protocol traffic packet
+	 *  counter
+	 */
 	BATADV_CNT_MGMT_TX,
+
+	/**
+	 * @BATADV_CNT_MGMT_TX_BYTES: transmitted routing protocol traffic bytes
+	 *  counter
+	 */
 	BATADV_CNT_MGMT_TX_BYTES,
+
+	/**
+	 * @BATADV_CNT_MGMT_RX: received routing protocol traffic packet counter
+	 */
 	BATADV_CNT_MGMT_RX,
+
+	/**
+	 * @BATADV_CNT_MGMT_RX_BYTES: received routing protocol traffic bytes
+	 *  counter
+	 */
 	BATADV_CNT_MGMT_RX_BYTES,
+
+	/** @BATADV_CNT_FRAG_TX: transmitted fragment traffic packet counter */
+	BATADV_CNT_FRAG_TX,
+
+	/**
+	 * @BATADV_CNT_FRAG_TX_BYTES: transmitted fragment traffic bytes counter
+	 */
+	BATADV_CNT_FRAG_TX_BYTES,
+
+	/** @BATADV_CNT_FRAG_RX: received fragment traffic packet counter */
+	BATADV_CNT_FRAG_RX,
+
+	/**
+	 * @BATADV_CNT_FRAG_RX_BYTES: received fragment traffic bytes counter
+	 */
+	BATADV_CNT_FRAG_RX_BYTES,
+
+	/** @BATADV_CNT_FRAG_FWD: forwarded fragment traffic packet counter */
+	BATADV_CNT_FRAG_FWD,
+
+	/**
+	 * @BATADV_CNT_FRAG_FWD_BYTES: forwarded fragment traffic bytes counter
+	 */
+	BATADV_CNT_FRAG_FWD_BYTES,
+
+	/**
+	 * @BATADV_CNT_TT_REQUEST_TX: transmitted tt req traffic packet counter
+	 */
 	BATADV_CNT_TT_REQUEST_TX,
+
+	/** @BATADV_CNT_TT_REQUEST_RX: received tt req traffic packet counter */
 	BATADV_CNT_TT_REQUEST_RX,
+
+	/**
+	 * @BATADV_CNT_TT_RESPONSE_TX: transmitted tt resp traffic packet
+	 *  counter
+	 */
 	BATADV_CNT_TT_RESPONSE_TX,
+
+	/**
+	 * @BATADV_CNT_TT_RESPONSE_RX: received tt resp traffic packet counter
+	 */
 	BATADV_CNT_TT_RESPONSE_RX,
+
+	/**
+	 * @BATADV_CNT_TT_ROAM_ADV_TX: transmitted tt roam traffic packet
+	 *  counter
+	 */
 	BATADV_CNT_TT_ROAM_ADV_TX,
+
+	/**
+	 * @BATADV_CNT_TT_ROAM_ADV_RX: received tt roam traffic packet counter
+	 */
 	BATADV_CNT_TT_ROAM_ADV_RX,
+
+#ifdef CONFIG_BATMAN_ADV_MCAST
+	/**
+	 * @BATADV_CNT_MCAST_TX: transmitted batman-adv multicast packets
+	 *  counter
+	 */
+	BATADV_CNT_MCAST_TX,
+
+	/**
+	 * @BATADV_CNT_MCAST_TX_BYTES: transmitted batman-adv multicast packets
+	 *  bytes counter
+	 */
+	BATADV_CNT_MCAST_TX_BYTES,
+
+	/**
+	 * @BATADV_CNT_MCAST_TX_LOCAL: counter for multicast packets which
+	 *  were locally encapsulated and transmitted as batman-adv multicast
+	 *  packets
+	 */
+	BATADV_CNT_MCAST_TX_LOCAL,
+
+	/**
+	 * @BATADV_CNT_MCAST_TX_LOCAL_BYTES: bytes counter for multicast packets
+	 *  which were locally encapsulated and transmitted as batman-adv
+	 *  multicast packets
+	 */
+	BATADV_CNT_MCAST_TX_LOCAL_BYTES,
+
+	/**
+	 * @BATADV_CNT_MCAST_RX: received batman-adv multicast packet counter
+	 */
+	BATADV_CNT_MCAST_RX,
+
+	/**
+	 * @BATADV_CNT_MCAST_RX_BYTES: received batman-adv multicast packet
+	 *  bytes counter
+	 */
+	BATADV_CNT_MCAST_RX_BYTES,
+
+	/**
+	 * @BATADV_CNT_MCAST_RX_LOCAL: counter for received batman-adv multicast
+	 *  packets which were forwarded to the local mesh interface
+	 */
+	BATADV_CNT_MCAST_RX_LOCAL,
+
+	/**
+	 * @BATADV_CNT_MCAST_RX_LOCAL_BYTES: bytes counter for received
+	 *  batman-adv multicast packets which were forwarded to the local mesh
+	 *  interface
+	 */
+	BATADV_CNT_MCAST_RX_LOCAL_BYTES,
+
+	/**
+	 * @BATADV_CNT_MCAST_FWD: counter for received batman-adv multicast
+	 *  packets which were forwarded to other, neighboring nodes
+	 */
+	BATADV_CNT_MCAST_FWD,
+
+	/**
+	 * @BATADV_CNT_MCAST_FWD_BYTES: bytes counter for received batman-adv
+	 *  multicast packets which were forwarded to other, neighboring nodes
+	 */
+	BATADV_CNT_MCAST_FWD_BYTES,
+#endif
+
 #ifdef CONFIG_BATMAN_ADV_DAT
+	/**
+	 * @BATADV_CNT_DAT_GET_TX: transmitted dht GET traffic packet counter
+	 */
 	BATADV_CNT_DAT_GET_TX,
+
+	/** @BATADV_CNT_DAT_GET_RX: received dht GET traffic packet counter */
 	BATADV_CNT_DAT_GET_RX,
+
+	/**
+	 * @BATADV_CNT_DAT_PUT_TX: transmitted dht PUT traffic packet counter
+	 */
 	BATADV_CNT_DAT_PUT_TX,
+
+	/** @BATADV_CNT_DAT_PUT_RX: received dht PUT traffic packet counter */
 	BATADV_CNT_DAT_PUT_RX,
+
+	/**
+	 * @BATADV_CNT_DAT_CACHED_REPLY_TX: transmitted dat cache reply traffic
+	 *  packet counter
+	 */
 	BATADV_CNT_DAT_CACHED_REPLY_TX,
 #endif
-#ifdef CONFIG_BATMAN_ADV_NC
-	BATADV_CNT_NC_CODE,
-	BATADV_CNT_NC_CODE_BYTES,
-	BATADV_CNT_NC_RECODE,
-	BATADV_CNT_NC_RECODE_BYTES,
-	BATADV_CNT_NC_BUFFER,
-	BATADV_CNT_NC_DECODE,
-	BATADV_CNT_NC_DECODE_BYTES,
-	BATADV_CNT_NC_DECODE_FAILED,
-	BATADV_CNT_NC_SNIFFED,
-#endif
+
+	/** @BATADV_CNT_NUM: number of traffic counters */
 	BATADV_CNT_NUM,
 };
 
 /**
  * struct batadv_priv_tt - per mesh interface translation table data
- * @vn: translation table version number
- * @ogm_append_cnt: counter of number of OGMs containing the local tt diff
- * @local_changes: changes registered in an originator interval
- * @changes_list: tracks tt local changes within an originator interval
- * @local_hash: local translation table hash table
- * @global_hash: global translation table hash table
- * @req_list: list of pending & unanswered tt_requests
- * @roam_list: list of the last roaming events of each client limiting the
- *  number of roaming events to avoid route flapping
- * @changes_list_lock: lock protecting changes_list
- * @req_list_lock: lock protecting req_list
- * @roam_list_lock: lock protecting roam_list
- * @local_entry_num: number of entries in the local hash table
- * @local_crc: Checksum of the local table, recomputed before sending a new OGM
- * @last_changeset: last tt changeset this host has generated
- * @last_changeset_len: length of last tt changeset this host has generated
- * @last_changeset_lock: lock protecting last_changeset & last_changeset_len
- * @work: work queue callback item for translation table purging
  */
 struct batadv_priv_tt {
+	/** @vn: translation table version number */
 	atomic_t vn;
+
+	/**
+	 * @ogm_append_cnt: counter of number of OGMs containing the local tt
+	 *  diff
+	 */
 	atomic_t ogm_append_cnt;
-	atomic_t local_changes;
+
+	/** @local_changes: changes registered in an originator interval */
+	size_t local_changes;
+
+	/**
+	 * @changes_list: tracks tt local changes within an originator interval
+	 */
 	struct list_head changes_list;
+
+	/** @local_hash: local translation table hash table */
 	struct batadv_hashtable *local_hash;
+
+	/** @global_hash: global translation table hash table */
 	struct batadv_hashtable *global_hash;
-	struct list_head req_list;
+
+	/** @req_list: list of pending & unanswered tt_requests */
+	struct hlist_head req_list;
+
+	/**
+	 * @roam_list: list of the last roaming events of each client limiting
+	 *  the number of roaming events to avoid route flapping
+	 */
 	struct list_head roam_list;
-	spinlock_t changes_list_lock; /* protects changes */
-	spinlock_t req_list_lock; /* protects req_list */
-	spinlock_t roam_list_lock; /* protects roam_list */
-	atomic_t local_entry_num;
-	uint16_t local_crc;
+
+	/** @changes_list_lock: lock protecting changes_list & local_changes */
+	spinlock_t changes_list_lock;
+
+	/** @req_list_lock: lock protecting req_list */
+	spinlock_t req_list_lock;
+
+	/** @roam_list_lock: lock protecting roam_list */
+	spinlock_t roam_list_lock;
+
+	/** @last_changeset: last tt changeset this host has generated */
 	unsigned char *last_changeset;
-	int16_t last_changeset_len;
-	/* protects last_changeset & last_changeset_len */
+
+	/**
+	 * @last_changeset_len: length of last tt changeset this host has
+	 *  generated
+	 */
+	u16 last_changeset_len;
+
+	/**
+	 * @last_changeset_lock: lock protecting last_changeset &
+	 *  last_changeset_len
+	 */
 	spinlock_t last_changeset_lock;
+
+	/**
+	 * @commit_lock: prevents from executing a local TT commit while reading
+	 *  the local table. The local TT commit is made up of two operations
+	 *  (data structure update and metadata -CRC/TTVN- recalculation) and
+	 *  they have to be executed atomically in order to avoid another thread
+	 *  to read the table/metadata between those.
+	 */
+	spinlock_t commit_lock;
+
+	/**
+	 * @reserved_entries: number of local TT entries which are currently
+	 *  allocated or about to be allocated. Together with @reserved_vlans it
+	 *  describes the worst case size of a full table response.
+	 */
+	u16 reserved_entries;
+
+	/**
+	 * @reserved_vlans: number of mesh interface VLANs which are currently
+	 *  allocated or about to be allocated. Together with @reserved_entries
+	 *  it describes the worst case size of a full table response.
+	 */
+	u16 reserved_vlans;
+
+	/**
+	 * @reserve_lock: lock protecting @reserved_entries & @reserved_vlans
+	 */
+	spinlock_t reserve_lock;
+
+	/** @work: work queue callback item for translation table purging */
 	struct delayed_work work;
 };
 
-/**
- * struct batadv_priv_bla - per mesh interface bridge loope avoidance data
- * @num_requests; number of bla requests in flight
- * @claim_hash: hash table containing mesh nodes this host has claimed
- * @backbone_hash: hash table containing all detected backbone gateways
- * @bcast_duplist: recently received broadcast packets array (for broadcast
- *  duplicate suppression)
- * @bcast_duplist_curr: index of last broadcast packet added to bcast_duplist
- * @bcast_duplist_lock: lock protecting bcast_duplist & bcast_duplist_curr
- * @claim_dest: local claim data (e.g. claim group)
- * @work: work queue callback item for cleanups & bla announcements
- */
 #ifdef CONFIG_BATMAN_ADV_BLA
-struct batadv_priv_bla {
-	atomic_t num_requests;
-	struct batadv_hashtable *claim_hash;
-	struct batadv_hashtable *backbone_hash;
-	struct batadv_bcast_duplist_entry bcast_duplist[BATADV_DUPLIST_SIZE];
-	int bcast_duplist_curr;
-	/* protects bcast_duplist & bcast_duplist_curr */
-	spinlock_t bcast_duplist_lock;
-	struct batadv_bla_claim_dst claim_dest;
-	struct delayed_work work;
-};
-#endif
 
 /**
- * struct batadv_debug_log - debug logging data
- * @log_buff: buffer holding the logs (ring bufer)
- * @log_start: index of next character to read
- * @log_end: index of next character to write
- * @lock: lock protecting log_buff, log_start & log_end
- * @queue_wait: log reader's wait queue
+ * struct batadv_priv_bla - per mesh interface bridge loop avoidance data
  */
-#ifdef CONFIG_BATMAN_ADV_DEBUG
-struct batadv_priv_debug_log {
-	char log_buff[BATADV_LOG_BUF_LEN];
-	unsigned long log_start;
-	unsigned long log_end;
-	spinlock_t lock; /* protects log_buff, log_start and log_end */
-	wait_queue_head_t queue_wait;
+struct batadv_priv_bla {
+	/** @num_requests: number of bla requests in flight */
+	atomic_t num_requests;
+
+	/**
+	 * @num_requests_lock: locks update num_requests +
+	 * batadv_backbone_gw::state + batadv_backbone_gw::wait_periods update
+	 */
+	spinlock_t num_requests_lock;
+
+	/**
+	 * @claim_hash: hash table containing mesh nodes this host has claimed
+	 */
+	struct batadv_hashtable *claim_hash;
+
+	/**
+	 * @backbone_hash: hash table containing all detected backbone gateways
+	 */
+	struct batadv_hashtable *backbone_hash;
+
+	/** @loopdetect_addr: MAC address used for own loopdetection frames */
+	u8 loopdetect_addr[ETH_ALEN] __aligned(2);
+
+	/**
+	 * @loopdetect_lasttime: time when the loopdetection frames were sent
+	 */
+	unsigned long loopdetect_lasttime;
+
+	/**
+	 * @loopdetect_next: how many periods to wait for the next loopdetect
+	 *  process
+	 */
+	atomic_t loopdetect_next;
+
+	/**
+	 * @bcast_duplist: recently received broadcast packets array (for
+	 *  broadcast duplicate suppression)
+	 */
+	struct batadv_bcast_duplist_entry bcast_duplist[BATADV_DUPLIST_SIZE];
+
+	/**
+	 * @bcast_duplist_curr: index of last broadcast packet added to
+	 *  bcast_duplist
+	 */
+	int bcast_duplist_curr;
+
+	/**
+	 * @bcast_duplist_lock: lock protecting bcast_duplist &
+	 *  bcast_duplist_curr
+	 */
+	spinlock_t bcast_duplist_lock;
+
+	/** @claim_dest: local claim data (e.g. claim group) */
+	struct batadv_bla_claim_dst claim_dest;
+
+	/** @work: work queue callback item for cleanups & bla announcements */
+	struct delayed_work work;
 };
 #endif
 
 /**
  * struct batadv_priv_gw - per mesh interface gateway data
- * @list: list of available gateway nodes
- * @list_lock: lock protecting gw_list & curr_gw
- * @curr_gw: pointer to currently selected gateway node
- * @reselect: bool indicating a gateway re-selection is in progress
  */
 struct batadv_priv_gw {
-	struct hlist_head list;
-	spinlock_t list_lock; /* protects gw_list & curr_gw */
-	struct batadv_gw_node __rcu *curr_gw;  /* rcu protected pointer */
+	/** @gateway_list: list of available gateway nodes */
+	struct hlist_head gateway_list;
+
+	/** @list_lock: lock protecting gateway_list, curr_gw, generation */
+	spinlock_t list_lock;
+
+	/** @curr_gw: pointer to currently selected gateway node */
+	struct batadv_gw_node __rcu *curr_gw;
+
+	/** @generation: current (generation) sequence number */
+	unsigned int generation;
+
+	/**
+	 * @mode: gateway operation: off, client or server (see batadv_gw_modes)
+	 */
+	enum batadv_gw_modes mode;
+
+	/** @sel_class: gateway selection class (applies if gw_mode client) */
+	u32 sel_class;
+
+	/**
+	 * @bandwidth_down: advertised uplink download bandwidth (if gw_mode
+	 *  server)
+	 */
+	u32 bandwidth_down;
+
+	/**
+	 * @bandwidth_up: advertised uplink upload bandwidth (if gw_mode server)
+	 */
+	u32 bandwidth_up;
+
+	/** @reselect: bool indicating a gateway re-selection is in progress */
 	atomic_t reselect;
 };
 
 /**
- * struct batadv_priv_vis - per mesh interface vis data
- * @send_list: list of batadv_vis_info packets to sent
- * @hash: hash table containing vis data from other nodes in the network
- * @hash_lock: lock protecting the hash table
- * @list_lock: lock protecting my_info::recv_list
- * @work: work queue callback item for vis packet sending
- * @my_info: holds this node's vis data sent on a regular basis
+ * struct batadv_priv_tvlv - per mesh interface tvlv data
  */
-struct batadv_priv_vis {
-	struct list_head send_list;
-	struct batadv_hashtable *hash;
-	spinlock_t hash_lock; /* protects hash */
-	spinlock_t list_lock; /* protects my_info::recv_list */
-	struct delayed_work work;
-	struct batadv_vis_info *my_info;
+struct batadv_priv_tvlv {
+	/**
+	 * @container_list: list of registered tvlv containers to be sent with
+	 *  each OGM
+	 */
+	struct hlist_head container_list;
+
+	/** @handler_list: list of the various tvlv content handlers */
+	struct hlist_head handler_list;
+
+	/** @container_list_lock: protects tvlv container list access */
+	spinlock_t container_list_lock;
+
+	/** @handler_list_lock: protects handler list access */
+	spinlock_t handler_list_lock;
 };
+
+#ifdef CONFIG_BATMAN_ADV_DAT
 
 /**
  * struct batadv_priv_dat - per mesh interface DAT private data
- * @addr: node DAT address
- * @hash: hashtable representing the local ARP cache
- * @work: work queue callback item for cache purging
  */
-#ifdef CONFIG_BATMAN_ADV_DAT
 struct batadv_priv_dat {
+	/** @addr: node DAT address */
 	batadv_dat_addr_t addr;
+
+	/** @hash: hashtable representing the local ARP cache */
 	struct batadv_hashtable *hash;
+
+	/** @work: work queue callback item for cache purging */
+	struct delayed_work work;
+};
+#endif
+
+#ifdef CONFIG_BATMAN_ADV_MCAST
+/**
+ * struct batadv_mcast_querier_state - IGMP/MLD querier state when bridged
+ */
+struct batadv_mcast_querier_state {
+	/** @exists: whether a querier exists in the mesh */
+	unsigned char exists:1;
+
+	/**
+	 * @shadowing: if a querier exists, whether it is potentially shadowing
+	 *  multicast listeners (i.e. querier is behind our own bridge segment)
+	 */
+	unsigned char shadowing:1;
+};
+
+/**
+ * struct batadv_mcast_mla_flags - flags for the querier, bridge and tvlv state
+ */
+struct batadv_mcast_mla_flags {
+	/** @querier_ipv4: the current state of an IGMP querier in the mesh */
+	struct batadv_mcast_querier_state querier_ipv4;
+
+	/** @querier_ipv6: the current state of an MLD querier in the mesh */
+	struct batadv_mcast_querier_state querier_ipv6;
+
+	/** @enabled: whether the multicast tvlv is currently enabled */
+	unsigned char enabled:1;
+
+	/** @bridged: whether the mesh interface has a bridge on top */
+	unsigned char bridged:1;
+
+	/** @tvlv_flags: the flags we have last sent in our mcast tvlv */
+	u8 tvlv_flags;
+};
+
+/**
+ * struct batadv_priv_mcast - per mesh interface mcast data
+ */
+struct batadv_priv_mcast {
+	/**
+	 * @mla_list: list of multicast addresses we are currently announcing
+	 *  via TT
+	 */
+	struct hlist_head mla_list; /* see __batadv_mcast_mla_update() */
+
+	/**
+	 * @want_all_unsnoopables_list: a list of orig_nodes wanting all
+	 *  unsnoopable multicast traffic
+	 */
+	struct hlist_head want_all_unsnoopables_list;
+
+	/**
+	 * @want_all_ipv4_list: a list of orig_nodes wanting all IPv4 multicast
+	 *  traffic
+	 */
+	struct hlist_head want_all_ipv4_list;
+
+	/**
+	 * @want_all_ipv6_list: a list of orig_nodes wanting all IPv6 multicast
+	 *  traffic
+	 */
+	struct hlist_head want_all_ipv6_list;
+
+	/**
+	 * @want_all_rtr4_list: a list of orig_nodes wanting all routable IPv4
+	 *  multicast traffic
+	 */
+	struct hlist_head want_all_rtr4_list;
+
+	/**
+	 * @want_all_rtr6_list: a list of orig_nodes wanting all routable IPv6
+	 *  multicast traffic
+	 */
+	struct hlist_head want_all_rtr6_list;
+
+	/**
+	 * @mla_flags: flags for the querier, bridge and tvlv state
+	 */
+	struct batadv_mcast_mla_flags mla_flags;
+
+	/**
+	 * @mla_lock: a lock protecting mla_list and mla_flags
+	 */
+	spinlock_t mla_lock;
+
+	/**
+	 * @num_want_all_unsnoopables: number of nodes wanting unsnoopable IP
+	 *  traffic
+	 */
+	atomic_t num_want_all_unsnoopables;
+
+	/** @num_want_all_ipv4: counter for items in want_all_ipv4_list */
+	atomic_t num_want_all_ipv4;
+
+	/** @num_want_all_ipv6: counter for items in want_all_ipv6_list */
+	atomic_t num_want_all_ipv6;
+
+	/** @num_want_all_rtr4: counter for items in want_all_rtr4_list */
+	atomic_t num_want_all_rtr4;
+
+	/** @num_want_all_rtr6: counter for items in want_all_rtr6_list */
+	atomic_t num_want_all_rtr6;
+
+	/**
+	 * @num_no_mc_ptype_capa: counter for number of nodes without the
+	 *  BATADV_MCAST_HAVE_MC_PTYPE_CAPA flag
+	 */
+	atomic_t num_no_mc_ptype_capa;
+
+	/**
+	 * @want_lists_lock: lock for protecting modifications to mcasts
+	 *  want_all_{unsnoopables,ipv4,ipv6}_list (traversals are rcu-locked)
+	 */
+	spinlock_t want_lists_lock;
+
+	/** @work: work queue callback item for multicast TT and TVLV updates */
 	struct delayed_work work;
 };
 #endif
 
 /**
- * struct batadv_priv_nc - per mesh interface network coding private data
- * @work: work queue callback item for cleanup
- * @debug_dir: dentry for nc subdir in batman-adv directory in debugfs
- * @min_tq: only consider neighbors for encoding if neigh_tq > min_tq
- * @max_fwd_delay: maximum packet forward delay to allow coding of packets
- * @max_buffer_time: buffer time for sniffed packets used to decoding
- * @timestamp_fwd_flush: timestamp of last forward packet queue flush
- * @timestamp_sniffed_purge: timestamp of last sniffed packet queue purge
- * @coding_hash: Hash table used to buffer skbs while waiting for another
- *  incoming skb to code it with. Skbs are added to the buffer just before being
- *  forwarded in routing.c
- * @decoding_hash: Hash table used to buffer skbs that might be needed to decode
- *  a received coded skb. The buffer is used for 1) skbs arriving on the
- *  soft-interface; 2) skbs overheard on the hard-interface; and 3) skbs
- *  forwarded by batman-adv.
+ * struct batadv_tp_unacked - unacked packet meta-information
+ *
+ * This struct is supposed to represent a buffer unacked packet. However, since
+ * the purpose of the TP meter is to count the traffic only, there is no need to
+ * store the entire sk_buff, the starting offset and the length are enough
  */
-struct batadv_priv_nc {
-	struct delayed_work work;
-	struct dentry *debug_dir;
-	u8 min_tq;
-	u32 max_fwd_delay;
-	u32 max_buffer_time;
-	unsigned long timestamp_fwd_flush;
-	unsigned long timestamp_sniffed_purge;
-	struct batadv_hashtable *coding_hash;
-	struct batadv_hashtable *decoding_hash;
+struct batadv_tp_unacked {
+	/** @seqno: seqno of the unacked packet */
+	u32 seqno;
+
+	/** @len: length of the packet */
+	u32 len;
+
+	/** @list: list node for &batadv_tp_receiver.unacked_list */
+	struct list_head list;
+};
+
+/**
+ * struct batadv_tp_vars_common - common tp meter private variables per session
+ */
+struct batadv_tp_vars_common {
+	/** @list: list node for &bat_priv.tp_sender_list/&bat_priv.tp_receiver_list */
+	struct hlist_node list;
+
+	/** @timer: timer for ack (receiver) and retry (sender) */
+	struct timer_list timer;
+
+	/** @bat_priv: pointer to the mesh object */
+	struct batadv_priv *bat_priv;
+
+	/** @other_end: mac address of remote */
+	u8 other_end[ETH_ALEN] __aligned(2);
+
+	/** @session: TP session identifier */
+	u8 session[2];
+
+	/** @refcount: number of context where the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
+	struct rcu_head rcu;
+};
+
+/**
+ * struct batadv_tp_sender_cc - congestion control variables
+ */
+struct batadv_tp_sender_cc {
+	/** @fast_recovery: true if in Fast Recovery mode */
+	bool fast_recovery:1;
+
+	/** @dup_acks: duplicate ACKs counter */
+	u8 dup_acks;
+
+	/** @dec_cwnd: decimal part of the cwnd used during linear growth */
+	u16 dec_cwnd;
+
+	/** @cwnd: current size of the congestion window */
+	u32 cwnd;
+
+	/**
+	 * @ss_threshold: Slow Start threshold. Once cwnd exceeds this value the
+	 *  connection switches to the Congestion Avoidance state
+	 */
+	u32 ss_threshold;
+
+	/** @last_acked: last acked byte */
+	u32 last_acked;
+
+	/** @last_sent: last sent byte, not yet acked */
+	u32 last_sent;
+
+	/** @recover: last sent seqno when entering Fast Recovery */
+	u32 recover;
+
+	/** @rto: sender timeout */
+	u32 rto;
+
+	/** @srtt: smoothed RTT scaled by 2^3 */
+	u32 srtt;
+
+	/** @rttvar: RTT variation scaled by 2^2 */
+	u32 rttvar;
+};
+
+/**
+ * struct batadv_tp_sender - sender tp meter private variables per session
+ */
+struct batadv_tp_sender {
+	/** @common: common batadv_tp_vars_common (must be first member) */
+	struct batadv_tp_vars_common common;
+
+	/** @start_time: start time in jiffies */
+	unsigned long start_time;
+
+	/**
+	 * @send_result: 0 when sending is ongoing and otherwise
+	 * enum batadv_tp_meter_reason
+	 */
+	atomic_t send_result;
+
+	/** @finish_work: work item for the finishing procedure */
+	struct delayed_work finish_work;
+
+	/** @finished: completion signaled when a sender thread exits */
+	struct completion finished;
+
+	/** @test_length: test length in milliseconds */
+	u32 test_length;
+
+	/** @icmp_uid: local ICMP "socket" index */
+	u8 icmp_uid;
+
+	/** @cc: congestion control variables */
+	struct batadv_tp_sender_cc cc;
+
+	/** @cc_lock: lock to protect @cc */
+	spinlock_t cc_lock;
+
+	/** @tot_sent: amount of data sent/ACKed so far */
+	atomic64_t tot_sent;
+
+	/**
+	 * @more_bytes: waiting queue anchor when waiting for more ack/retry
+	 *  timeout
+	 */
+	wait_queue_head_t more_bytes;
+
+	/** @prerandom_offset: offset inside the prerandom buffer */
+	u32 prerandom_offset;
+
+	/** @prerandom_lock: spinlock protecting access to prerandom_offset */
+	spinlock_t prerandom_lock;
+};
+
+/**
+ * struct batadv_tp_receiver - receiver tp meter private variables per session
+ */
+struct batadv_tp_receiver {
+	/** @common: common batadv_tp_vars_common (must be first member) */
+	struct batadv_tp_vars_common common;
+
+	/** @receiving: receiving binary semaphore: 1 if receiving, 0 is not */
+	atomic_t receiving;
+
+	/** @last_recv: last in-order received packet */
+	u32 last_recv;
+
+	/** @last_recv_time: time (jiffies) a msg was received */
+	unsigned long last_recv_time;
+
+	/** @unacked_list: list of unacked packets (meta-info only) */
+	struct list_head unacked_list;
+
+	/** @ack_seqno_lock: protect unacked_list + &batadv_tp_receiver.last_recv */
+	spinlock_t ack_seqno_lock;
+
+	/** @unacked_count: number of unacked entries */
+	size_t unacked_count;
+};
+
+/**
+ * struct batadv_meshif_vlan - per VLAN attributes set
+ */
+struct batadv_meshif_vlan {
+	/** @bat_priv: pointer to the mesh object */
+	struct batadv_priv *bat_priv;
+
+	/** @vid: VLAN identifier */
+	unsigned short vid;
+
+	/** @ap_isolation: AP isolation state */
+	u8 ap_isolation;		/* boolean */
+
+	/** @tt: TT private attributes (VLAN specific) */
+	struct batadv_vlan_tt tt;
+
+	/** @list: list node for &bat_priv.meshif_vlan_list */
+	struct hlist_node list;
+
+	/**
+	 * @refcount: number of context where this object is currently in use
+	 */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in a RCU-safe manner */
+	struct rcu_head rcu;
+};
+
+/**
+ * struct batadv_priv_bat_v - B.A.T.M.A.N. V per mesh-interface private data
+ */
+struct batadv_priv_bat_v {
+	/** @ogm_buff: buffer holding the OGM packet */
+	struct batadv_ogm_buf ogm_buff;
+
+	/** @ogm_seqno: OGM sequence number - used to identify each OGM */
+	atomic_t ogm_seqno;
+
+	/** @ogm_buff_mutex: lock protecting ogm_buff */
+	struct mutex ogm_buff_mutex;
+
+	/** @ogm_wq: workqueue used to schedule OGM transmissions */
+	struct delayed_work ogm_wq;
 };
 
 /**
  * struct batadv_priv - per mesh interface data
- * @mesh_state: current status of the mesh (inactive/active/deactivating)
- * @soft_iface: net device which holds this struct as private data
- * @stats: structure holding the data for the ndo_get_stats() call
- * @bat_counters: mesh internal traffic statistic counters (see batadv_counters)
- * @aggregated_ogms: bool indicating whether OGM aggregation is enabled
- * @bonding: bool indicating whether traffic bonding is enabled
- * @fragmentation: bool indicating whether traffic fragmentation is enabled
- * @ap_isolation: bool indicating whether ap isolation is enabled
- * @bridge_loop_avoidance: bool indicating whether bridge loop avoidance is
- *  enabled
- * @distributed_arp_table: bool indicating whether distributed ARP table is
- *  enabled
- * @vis_mode: vis operation: client or server (see batadv_vis_packettype)
- * @gw_mode: gateway operation: off, client or server (see batadv_gw_modes)
- * @gw_sel_class: gateway selection class (applies if gw_mode client)
- * @gw_bandwidth: gateway announced bandwidth (applies if gw_mode server)
- * @orig_interval: OGM broadcast interval in milliseconds
- * @hop_penalty: penalty which will be applied to an OGM's tq-field on every hop
- * @log_level: configured log level (see batadv_dbg_level)
- * @bcast_seqno: last sent broadcast packet sequence number
- * @bcast_queue_left: number of remaining buffered broadcast packet slots
- * @batman_queue_left: number of remaining OGM packet slots
- * @num_ifaces: number of interfaces assigned to this mesh interface
- * @mesh_obj: kobject for sysfs mesh subdirectory
- * @debug_dir: dentry for debugfs batman-adv subdirectory
- * @forw_bat_list: list of aggregated OGMs that will be forwarded
- * @forw_bcast_list: list of broadcast packets that will be rebroadcasted
- * @orig_hash: hash table containing mesh participants (orig nodes)
- * @forw_bat_list_lock: lock protecting forw_bat_list
- * @forw_bcast_list_lock: lock protecting forw_bcast_list
- * @orig_work: work queue callback item for orig node purging
- * @cleanup_work: work queue callback item for soft interface deinit
- * @primary_if: one of the hard interfaces assigned to this mesh interface
- *  becomes the primary interface
- * @bat_algo_ops: routing algorithm used by this mesh interface
- * @bla: bridge loope avoidance data
- * @debug_log: holding debug logging relevant data
- * @gw: gateway data
- * @tt: translation table data
- * @vis: vis data
- * @dat: distributed arp table data
- * @network_coding: bool indicating whether network coding is enabled
- * @batadv_priv_nc: network coding data
  */
 struct batadv_priv {
-	atomic_t mesh_state;
-	struct net_device *soft_iface;
-	struct net_device_stats stats;
-	uint64_t __percpu *bat_counters; /* Per cpu counters */
-	atomic_t aggregated_ogms;
-	atomic_t bonding;
-	atomic_t fragmentation;
-	atomic_t ap_isolation;
+	/**
+	 * @mesh_state: current status of the mesh
+	 *  (inactive/active/deactivating)
+	 */
+	enum batadv_mesh_state mesh_state;
+
+	/** @mesh_iface: net device which holds this struct as private data */
+	struct net_device *mesh_iface;
+
+	/**
+	 * @mtu_set_by_user: MTU was set once by user
+	 * protected by rtnl_lock
+	 */
+	int mtu_set_by_user;
+
+	/**
+	 * @bat_counters: mesh internal traffic statistic counters (see
+	 *  batadv_counters)
+	 */
+	u64 __percpu *bat_counters; /* Per cpu counters */
+
+	/**
+	 * @aggregated_ogms: bool indicating whether OGM aggregation is enabled
+	 */
+	u8 aggregated_ogms;
+
+	/** @bonding: bool indicating whether traffic bonding is enabled */
+	u8 bonding;
+
+	/**
+	 * @fragmentation: bool indicating whether traffic fragmentation is
+	 *  enabled
+	 */
+	u8 fragmentation;
+
 #ifdef CONFIG_BATMAN_ADV_BLA
-	atomic_t bridge_loop_avoidance;
+	/**
+	 * @bridge_loop_avoidance: bool indicating whether bridge loop
+	 *  avoidance is enabled
+	 */
+	u8 bridge_loop_avoidance;
 #endif
+
 #ifdef CONFIG_BATMAN_ADV_DAT
-	atomic_t distributed_arp_table;
+	/**
+	 * @distributed_arp_table: bool indicating whether distributed ARP table
+	 *  is enabled
+	 */
+	u8 distributed_arp_table;
 #endif
-	atomic_t vis_mode;
-	atomic_t gw_mode;
-	atomic_t gw_sel_class;
-	atomic_t gw_bandwidth;
-	atomic_t orig_interval;
-	atomic_t hop_penalty;
+
+#ifdef CONFIG_BATMAN_ADV_MCAST
+	/**
+	 * @multicast_mode: Enable or disable multicast optimizations on this
+	 *  node's sender/originating side
+	 */
+	u8 multicast_mode;
+
+	/**
+	 * @multicast_fanout: Maximum number of packet copies to generate for a
+	 *  multicast-to-unicast conversion
+	 */
+	u32 multicast_fanout;
+#endif
+
+	/**
+	 * @packet_size_max: max packet size that can be transmitted via
+	 *  multiple fragmented skbs or a single frame if fragmentation is
+	 *  disabled
+	 */
+	int packet_size_max;
+
+	/**
+	 * @frag_seqno: incremental counter to identify chains of egress
+	 *  fragments
+	 */
+	atomic_t frag_seqno;
+
+	/** @orig_interval: OGM broadcast interval in milliseconds */
+	u32 orig_interval;
+
+	/**
+	 * @hop_penalty: penalty which will be applied to an OGM's tq-field on
+	 *  every hop
+	 */
+	u8 hop_penalty;
+
 #ifdef CONFIG_BATMAN_ADV_DEBUG
-	atomic_t log_level;
+	/** @log_level: configured log level (see batadv_dbg_level) */
+	u32 log_level;
 #endif
+
+	/**
+	 * @isolation_mark: the skb->mark value used to match packets for AP
+	 *  isolation
+	 */
+	u32 isolation_mark;
+
+	/**
+	 * @isolation_mark_mask: bitmask identifying the bits in skb->mark to be
+	 *  used for the isolation mark
+	 */
+	u32 isolation_mark_mask;
+
+	/** @bcast_seqno: last sent broadcast packet sequence number */
 	atomic_t bcast_seqno;
+
+	/**
+	 * @bcast_queue_left: number of remaining buffered broadcast packet
+	 *  slots
+	 */
 	atomic_t bcast_queue_left;
+
+	/** @batman_queue_left: number of remaining OGM packet slots */
 	atomic_t batman_queue_left;
-	char num_ifaces;
-	struct kobject *mesh_obj;
-	struct dentry *debug_dir;
+
+	/** @forw_bat_list: list of aggregated OGMs that will be forwarded */
 	struct hlist_head forw_bat_list;
+
+	/**
+	 * @forw_bcast_list: list of broadcast packets that will be
+	 *  rebroadcasted
+	 */
 	struct hlist_head forw_bcast_list;
+
+	/** @tp_sender_list: list of tp sender sessions */
+	struct hlist_head tp_sender_list;
+
+	/** @tp_receiver_list: list of tp receiver sessions */
+	struct hlist_head tp_receiver_list;
+
+	/** @orig_hash: hash table containing mesh participants (orig nodes) */
 	struct batadv_hashtable *orig_hash;
-	spinlock_t forw_bat_list_lock; /* protects forw_bat_list */
-	spinlock_t forw_bcast_list_lock; /* protects forw_bcast_list */
+
+	/** @forw_bat_list_lock: lock protecting forw_bat_list */
+	spinlock_t forw_bat_list_lock;
+
+	/** @forw_bcast_list_lock: lock protecting forw_bcast_list */
+	spinlock_t forw_bcast_list_lock;
+
+	/** @tp_list_lock: spinlock protecting @tp_sender_list + @tp_receiver_list */
+	spinlock_t tp_list_lock;
+
+	/** @tp_num: number of currently active tp sessions */
+	atomic_t tp_num;
+
+	/** @hardif_generation: generation counter added to netlink hardif dumps */
+	unsigned int hardif_generation;
+
+	/** @orig_work: work queue callback item for orig node purging */
 	struct delayed_work orig_work;
-	struct work_struct cleanup_work;
+
+	/**
+	 * @primary_if: one of the hard-interfaces assigned to this mesh
+	 *  interface becomes the primary interface
+	 */
 	struct batadv_hard_iface __rcu *primary_if;  /* rcu protected pointer */
-	struct batadv_algo_ops *bat_algo_ops;
+
+	/** @algo_ops: routing algorithm used by this mesh interface */
+	struct batadv_algo_ops *algo_ops;
+
+	/**
+	 * @meshif_vlan_list: a list of meshif_vlan structs, one per VLAN
+	 *  created on top of the mesh interface represented by this object
+	 */
+	struct hlist_head meshif_vlan_list;
+
+	/** @meshif_vlan_list_lock: lock protecting meshif_vlan_list */
+	spinlock_t meshif_vlan_list_lock;
+
 #ifdef CONFIG_BATMAN_ADV_BLA
+	/** @bla: bridge loop avoidance data */
 	struct batadv_priv_bla bla;
 #endif
-#ifdef CONFIG_BATMAN_ADV_DEBUG
-	struct batadv_priv_debug_log *debug_log;
-#endif
+
+	/** @gw: gateway data */
 	struct batadv_priv_gw gw;
+
+	/** @tt: translation table data */
 	struct batadv_priv_tt tt;
-	struct batadv_priv_vis vis;
+
+	/** @tvlv: type-version-length-value data */
+	struct batadv_priv_tvlv tvlv;
+
 #ifdef CONFIG_BATMAN_ADV_DAT
+	/** @dat: distributed arp table data */
 	struct batadv_priv_dat dat;
 #endif
-#ifdef CONFIG_BATMAN_ADV_NC
-	atomic_t network_coding;
-	struct batadv_priv_nc nc;
-#endif /* CONFIG_BATMAN_ADV_NC */
+
+#ifdef CONFIG_BATMAN_ADV_MCAST
+	/** @mcast: multicast data */
+	struct batadv_priv_mcast mcast;
+#endif
+
+#ifdef CONFIG_BATMAN_ADV_BATMAN_V
+	/** @bat_v: B.A.T.M.A.N. V per mesh-interface private data */
+	struct batadv_priv_bat_v bat_v;
+#endif
 };
 
-/**
- * struct batadv_socket_client - layer2 icmp socket client data
- * @queue_list: packet queue for packets destined for this socket client
- * @queue_len: number of packets in the packet queue (queue_list)
- * @index: socket client's index in the batadv_socket_client_hash
- * @lock: lock protecting queue_list, queue_len & index
- * @queue_wait: socket client's wait queue
- * @bat_priv: pointer to soft_iface this client belongs to
- */
-struct batadv_socket_client {
-	struct list_head queue_list;
-	unsigned int queue_len;
-	unsigned char index;
-	spinlock_t lock; /* protects queue_list, queue_len & index */
-	wait_queue_head_t queue_wait;
-	struct batadv_priv *bat_priv;
-};
+#ifdef CONFIG_BATMAN_ADV_BLA
 
 /**
- * struct batadv_socket_packet - layer2 icmp packet for socket client
- * @list: list node for batadv_socket_client::queue_list
- * @icmp_len: size of the layer2 icmp packet
- * @icmp_packet: layer2 icmp packet
+ * enum batadv_bla_backbone_gw_state - state of a bridge loop avoidance
+ *  backbone gateway
  */
-struct batadv_socket_packet {
-	struct list_head list;
-	size_t icmp_len;
-	struct batadv_icmp_packet_rr icmp_packet;
+enum batadv_bla_backbone_gw_state {
+	/**
+	 * @BATADV_BLA_BACKBONE_GW_STOPPED: backbone gw is being removed
+	 * and it must no longer work on requests
+	 */
+	BATADV_BLA_BACKBONE_GW_STOPPED,
+
+	/**
+	 * @BATADV_BLA_BACKBONE_GW_UNSYNCED: backbone was detected out
+	 * of sync and a request was sent. No traffic is forwarded until the
+	 * situation is resolved
+	 */
+	BATADV_BLA_BACKBONE_GW_UNSYNCED,
+
+	/**
+	 * @BATADV_BLA_BACKBONE_GW_SYNCED: backbone is considered to be in
+	 * sync. traffic can be forwarded
+	 */
+	BATADV_BLA_BACKBONE_GW_SYNCED,
 };
 
 /**
  * struct batadv_bla_backbone_gw - batman-adv gateway bridged into the LAN
- * @orig: originator address of backbone node (mac address of primary iface)
- * @vid: vlan id this gateway was detected on
- * @hash_entry: hlist node for batadv_priv_bla::backbone_hash
- * @bat_priv: pointer to soft_iface this backbone gateway belongs to
- * @lasttime: last time we heard of this backbone gw
- * @wait_periods: grace time for bridge forward delays and bla group forming at
- *  bootup phase - no bcast traffic is formwared until it has elapsed
- * @request_sent: if this bool is set to true we are out of sync with this
- *  backbone gateway - no bcast traffic is formwared until the situation was
- *  resolved
- * @crc: crc16 checksum over all claims
- * @refcount: number of contexts the object is used
- * @rcu: struct used for freeing in an RCU-safe manner
  */
-#ifdef CONFIG_BATMAN_ADV_BLA
 struct batadv_bla_backbone_gw {
-	uint8_t orig[ETH_ALEN];
-	short vid;
+	/**
+	 * @orig: originator address of backbone node (mac address of primary
+	 *  iface)
+	 */
+	u8 orig[ETH_ALEN] __aligned(2);
+
+	/** @vid: vlan id this gateway was detected on */
+	unsigned short vid;
+
+	/** @hash_entry: hlist node for &batadv_priv_bla.backbone_hash */
 	struct hlist_node hash_entry;
+
+	/** @bat_priv: pointer to mesh_iface this backbone gateway belongs to */
 	struct batadv_priv *bat_priv;
+
+	/** @lasttime: last time we heard of this backbone gw */
 	unsigned long lasttime;
-	atomic_t wait_periods;
-	atomic_t request_sent;
-	uint16_t crc;
-	atomic_t refcount;
+
+	/**
+	 * @wait_periods: grace time for bridge forward delays and bla group
+	 *  forming at bootup phase - no bcast traffic is formwared until it has
+	 *  elapsed. Must only be access with num_requests_lock.
+	 */
+	u8 wait_periods;
+
+	/** @state: sync state. Must only be access with num_requests_lock. */
+	enum batadv_bla_backbone_gw_state state;
+
+	/** @crc: crc16 checksum over all claims */
+	u16 crc;
+
+	/** @crc_lock: lock protecting crc */
+	spinlock_t crc_lock;
+
+	/** @report_work: work struct for reporting detected loops */
+	struct work_struct report_work;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
 	struct rcu_head rcu;
 };
 
 /**
  * struct batadv_bla_claim - claimed non-mesh client structure
- * @addr: mac address of claimed non-mesh client
- * @vid: vlan id this client was detected on
- * @batadv_bla_backbone_gw: pointer to backbone gw claiming this client
- * @lasttime: last time we heard of claim (locals only)
- * @hash_entry: hlist node for batadv_priv_bla::claim_hash
- * @refcount: number of contexts the object is used
- * @rcu: struct used for freeing in an RCU-safe manner
  */
 struct batadv_bla_claim {
-	uint8_t addr[ETH_ALEN];
-	short vid;
+	/** @addr: mac address of claimed non-mesh client */
+	u8 addr[ETH_ALEN] __aligned(2);
+
+	/** @vid: vlan id this client was detected on */
+	unsigned short vid;
+
+	/** @backbone_gw: pointer to backbone gw claiming this client */
 	struct batadv_bla_backbone_gw *backbone_gw;
+
+	/** @backbone_lock: lock protecting backbone_gw pointer */
+	spinlock_t backbone_lock;
+
+	/** @lasttime: last time we heard of claim (locals only) */
 	unsigned long lasttime;
+
+	/** @hash_entry: hlist node for &batadv_priv_bla.claim_hash */
 	struct hlist_node hash_entry;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
 	struct rcu_head rcu;
-	atomic_t refcount;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
 };
 #endif
 
 /**
  * struct batadv_tt_common_entry - tt local & tt global common data
- * @addr: mac address of non-mesh client
- * @hash_entry: hlist node for batadv_priv_tt::local_hash or for
- *  batadv_priv_tt::global_hash
- * @flags: various state handling flags (see batadv_tt_client_flags)
- * @added_at: timestamp used for purging stale tt common entries
- * @refcount: number of contexts the object is used
- * @rcu: struct used for freeing in an RCU-safe manner
  */
 struct batadv_tt_common_entry {
-	uint8_t addr[ETH_ALEN];
+	/** @addr: mac address of non-mesh client */
+	u8 addr[ETH_ALEN] __aligned(2);
+
+	/** @vid: VLAN identifier */
+	unsigned short vid;
+
+	/**
+	 * @hash_entry: hlist node for &batadv_priv_tt.local_hash or for
+	 *  &batadv_priv_tt.global_hash
+	 */
 	struct hlist_node hash_entry;
-	uint16_t flags;
+
+	/**
+	 * @flags: various state handling flags (see batadv_tt_client_flags),
+	 * protected by @flags_lock
+	 */
+	u16 flags;
+
+	/** @added_at: timestamp used for purging stale tt common entries */
 	unsigned long added_at;
-	atomic_t refcount;
+
+	/**
+	 * @flags_lock: protect modifications of @flags and
+	 *  @batadv_tt_global_entry.roam_at
+	 */
+	spinlock_t flags_lock;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
 	struct rcu_head rcu;
 };
 
 /**
  * struct batadv_tt_local_entry - translation table local entry data
- * @common: general translation table data
- * @last_seen: timestamp used for purging stale tt local entries
  */
 struct batadv_tt_local_entry {
+	/** @common: general translation table data */
 	struct batadv_tt_common_entry common;
+
+	/** @last_seen: timestamp used for purging stale tt local entries */
 	unsigned long last_seen;
+
+	/** @vlan: mesh-interface vlan of the entry */
+	struct batadv_meshif_vlan *vlan;
 };
 
 /**
  * struct batadv_tt_global_entry - translation table global entry data
- * @common: general translation table data
- * @orig_list: list of orig nodes announcing this non-mesh client
- * @list_lock: lock protecting orig_list
- * @roam_at: time at which TT_GLOBAL_ROAM was set
  */
 struct batadv_tt_global_entry {
+	/** @common: general translation table data */
 	struct batadv_tt_common_entry common;
+
+	/** @orig_list: list of orig nodes announcing this non-mesh client */
 	struct hlist_head orig_list;
-	spinlock_t list_lock;	/* protects orig_list */
+
+	/** @orig_list_count: number of items in the orig_list */
+	atomic_t orig_list_count;
+
+	/** @list_lock: lock protecting orig_list */
+	spinlock_t list_lock;
+
+	/** @roam_at: time at which TT_GLOBAL_ROAM was set */
 	unsigned long roam_at;
 };
 
 /**
  * struct batadv_tt_orig_list_entry - orig node announcing a non-mesh client
- * @orig_node: pointer to orig node announcing this non-mesh client
- * @ttvn: translation table version number which added the non-mesh client
- * @list: list node for batadv_tt_global_entry::orig_list
- * @refcount: number of contexts the object is used
- * @rcu: struct used for freeing in an RCU-safe manner
  */
 struct batadv_tt_orig_list_entry {
+	/** @orig_node: pointer to orig node announcing this non-mesh client */
 	struct batadv_orig_node *orig_node;
-	uint8_t ttvn;
+
+	/**
+	 * @ttvn: translation table version number which added the non-mesh
+	 *  client
+	 */
+	u8 ttvn;
+
+	/** @flags: per orig entry TT sync flags */
+	u8 flags;
+
+	/** @list: list node for &batadv_tt_global_entry.orig_list */
 	struct hlist_node list;
-	atomic_t refcount;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
 	struct rcu_head rcu;
 };
 
 /**
- * struct batadv_tt_change_node - structure for tt changes occured
- * @list: list node for batadv_priv_tt::changes_list
- * @change: holds the actual translation table diff data
+ * struct batadv_tt_change_node - structure for tt changes occurred
  */
 struct batadv_tt_change_node {
+	/** @list: list node for &batadv_priv_tt.changes_list */
 	struct list_head list;
-	struct batadv_tt_change change;
+
+	/** @change: holds the actual translation table diff data */
+	struct batadv_tvlv_tt_change change;
 };
 
 /**
  * struct batadv_tt_req_node - data to keep track of the tt requests in flight
- * @addr: mac address address of the originator this request was sent to
- * @issued_at: timestamp used for purging stale tt requests
- * @list: list node for batadv_priv_tt::req_list
  */
 struct batadv_tt_req_node {
-	uint8_t addr[ETH_ALEN];
+	/**
+	 * @addr: mac address of the originator this request was sent to
+	 */
+	u8 addr[ETH_ALEN] __aligned(2);
+
+	/** @issued_at: timestamp used for purging stale tt requests */
 	unsigned long issued_at;
-	struct list_head list;
+
+	/** @refcount: number of contexts the object is used by */
+	struct kref refcount;
+
+	/** @list: list node for &batadv_priv_tt.req_list */
+	struct hlist_node list;
 };
 
 /**
  * struct batadv_tt_roam_node - roaming client data
- * @addr: mac address of the client in the roaming phase
- * @counter: number of allowed roaming events per client within a single
- *  OGM interval (changes are committed with each OGM)
- * @first_time: timestamp used for purging stale roaming node entries
- * @list: list node for batadv_priv_tt::roam_list
  */
 struct batadv_tt_roam_node {
-	uint8_t addr[ETH_ALEN];
+	/** @addr: mac address of the client in the roaming phase */
+	u8 addr[ETH_ALEN] __aligned(2);
+
+	/** @vid: VLAN identifier */
+	u16 vid;
+
+	/**
+	 * @counter: number of allowed roaming events per client within a single
+	 * OGM interval (changes are committed with each OGM)
+	 */
 	atomic_t counter;
+
+	/**
+	 * @first_time: timestamp used for purging stale roaming node entries
+	 */
 	unsigned long first_time;
+
+	/** @list: list node for &batadv_priv_tt.roam_list */
 	struct list_head list;
 };
 
 /**
- * struct batadv_nc_node - network coding node
- * @list: next and prev pointer for the list handling
- * @addr: the node's mac address
- * @refcount: number of contexts the object is used by
- * @rcu: struct used for freeing in an RCU-safe manner
- * @orig_node: pointer to corresponding orig node struct
- * @last_seen: timestamp of last ogm received from this node
- */
-struct batadv_nc_node {
-	struct list_head list;
-	uint8_t addr[ETH_ALEN];
-	atomic_t refcount;
-	struct rcu_head rcu;
-	struct batadv_orig_node *orig_node;
-	unsigned long last_seen;
-};
-
-/**
- * struct batadv_nc_path - network coding path
- * @hash_entry: next and prev pointer for the list handling
- * @rcu: struct used for freeing in an RCU-safe manner
- * @refcount: number of contexts the object is used by
- * @packet_list: list of buffered packets for this path
- * @packet_list_lock: access lock for packet list
- * @next_hop: next hop (destination) of path
- * @prev_hop: previous hop (source) of path
- * @last_valid: timestamp for last validation of path
- */
-struct batadv_nc_path {
-	struct hlist_node hash_entry;
-	struct rcu_head rcu;
-	atomic_t refcount;
-	struct list_head packet_list;
-	spinlock_t packet_list_lock; /* Protects packet_list */
-	uint8_t next_hop[ETH_ALEN];
-	uint8_t prev_hop[ETH_ALEN];
-	unsigned long last_valid;
-};
-
-/**
- * struct batadv_nc_packet - network coding packet used when coding and
- *  decoding packets
- * @list: next and prev pointer for the list handling
- * @packet_id: crc32 checksum of skb data
- * @timestamp: field containing the info when the packet was added to path
- * @neigh_node: pointer to original next hop neighbor of skb
- * @skb: skb which can be encoded or used for decoding
- * @nc_path: pointer to path this nc packet is attached to
- */
-struct batadv_nc_packet {
-	struct list_head list;
-	__be32 packet_id;
-	unsigned long timestamp;
-	struct batadv_neigh_node *neigh_node;
-	struct sk_buff *skb;
-	struct batadv_nc_path *nc_path;
-};
-
-/**
- * batadv_skb_cb - control buffer structure used to store private data relevant
- *  to batman-adv in the skb->cb buffer in skbs.
- * @decoded: Marks a skb as decoded, which is checked when searching for coding
- *  opportunities in network-coding.c
+ * struct batadv_skb_cb - control buffer structure used to store private data
+ *  relevant to batman-adv in the skb->cb buffer in skbs.
  */
 struct batadv_skb_cb {
-	bool decoded;
+	/** @num_bcasts: Counter for broadcast packet retransmissions */
+	unsigned char num_bcasts;
 };
 
 /**
  * struct batadv_forw_packet - structure for bcast packets to be sent/forwarded
- * @list: list node for batadv_socket_client::queue_list
- * @send_time: execution time for delayed_work (packet sending)
- * @own: bool for locally generated packets (local OGMs are re-scheduled after
- *  sending)
- * @skb: bcast packet's skb buffer
- * @packet_len: size of aggregated OGM packet inside the skb buffer
- * @direct_link_flags: direct link flags for aggregated OGM packets
- * @num_packets: counter for bcast packet retransmission
- * @delayed_work: work queue callback item for packet sending
- * @if_incoming: pointer incoming hard-iface or primary iface if locally
- *  generated packet
  */
 struct batadv_forw_packet {
+	/**
+	 * @list: list node for &batadv_priv.forw.bcast_list and
+	 *  &batadv_priv.forw.bat_list
+	 */
 	struct hlist_node list;
+
+	/** @cleanup_list: list node for purging functions */
+	struct hlist_node cleanup_list;
+
+	/** @send_time: execution time for delayed_work (packet sending) */
 	unsigned long send_time;
-	uint8_t own;
+
+	/**
+	 * @own: bool for locally generated packets (local OGMs are re-scheduled
+	 * after sending)
+	 */
+	u8 own;
+
+	/** @skb: bcast packet's skb buffer */
 	struct sk_buff *skb;
-	uint16_t packet_len;
-	uint32_t direct_link_flags;
-	uint8_t num_packets;
+
+	/** @packet_len: size of aggregated OGM packet inside the skb buffer */
+	u16 packet_len;
+
+	/** @direct_link_flags: direct link flags for aggregated OGM packets */
+	DECLARE_BITMAP(direct_link_flags, BATADV_MAX_AGGREGATION_PACKETS);
+
+	/**
+	 * @num_packets: counter for aggregated OGMv1 packets. Set to
+	 *  BATADV_MAX_AGGREGATION_PACKETS (independent of the real number of
+	 *  aggregated packets) by the send worker to prevent further
+	 *  aggregation while the packet is emitted. It must therefore not be
+	 *  used to iterate over the aggregated packets
+	 */
+	u8 num_packets;
+
+	/** @delayed_work: work queue callback item for packet sending */
 	struct delayed_work delayed_work;
+
+	/**
+	 * @if_incoming: pointer to incoming hard-iface or primary iface if
+	 *  locally generated packet
+	 */
 	struct batadv_hard_iface *if_incoming;
+
+	/**
+	 * @if_outgoing: packet where the packet should be sent to, or NULL if
+	 *  unspecified
+	 */
+	struct batadv_hard_iface *if_outgoing;
+
+	/** @queue_left: The queue (counter) this packet was applied to */
+	atomic_t *queue_left;
 };
 
 /**
- * struct batadv_frag_packet_list_entry - storage for fragment packet
- * @list: list node for orig_node::frag_list
- * @seqno: sequence number of the fragment
- * @skb: fragment's skb buffer
+ * struct batadv_algo_iface_ops - mesh algorithm callbacks (interface specific)
  */
-struct batadv_frag_packet_list_entry {
-	struct list_head list;
-	uint16_t seqno;
-	struct sk_buff *skb;
+struct batadv_algo_iface_ops {
+	/**
+	 * @activate: start routing mechanisms when hard-interface is brought up
+	 *  (optional)
+	 */
+	void (*activate)(struct batadv_hard_iface *hard_iface);
+
+	/** @enable: init routing info when hard-interface is enabled */
+	int (*enable)(struct batadv_hard_iface *hard_iface);
+
+	/** @enabled: notification when hard-interface was enabled (optional) */
+	void (*enabled)(struct batadv_hard_iface *hard_iface);
+
+	/** @disable: de-init routing info when hard-interface is disabled */
+	void (*disable)(struct batadv_hard_iface *hard_iface);
+
+	/**
+	 * @update_mac: (re-)init mac addresses of the protocol information
+	 *  belonging to this hard-interface
+	 */
+	void (*update_mac)(struct batadv_hard_iface *hard_iface);
+
+	/** @primary_set: called when primary interface is selected / changed */
+	void (*primary_set)(struct batadv_hard_iface *hard_iface);
 };
 
 /**
- * struct batadv_vis_info - local data for vis information
- * @first_seen: timestamp used for purging stale vis info entries
- * @recv_list: List of server-neighbors we have received this packet from. This
- *  packet should not be re-forward to them again. List elements are struct
- *  batadv_vis_recvlist_node
- * @send_list: list of packets to be forwarded
- * @refcount: number of contexts the object is used
- * @hash_entry: hlist node for batadv_priv_vis::hash
- * @bat_priv: pointer to soft_iface this orig node belongs to
- * @skb_packet: contains the vis packet
+ * struct batadv_algo_neigh_ops - mesh algorithm callbacks (neighbour specific)
  */
-struct batadv_vis_info {
-	unsigned long first_seen;
-	struct list_head recv_list;
-	struct list_head send_list;
-	struct kref refcount;
-	struct hlist_node hash_entry;
-	struct batadv_priv *bat_priv;
-	struct sk_buff *skb_packet;
-} __packed;
+struct batadv_algo_neigh_ops {
+	/** @hardif_init: called on creation of single hop entry (optional) */
+	void (*hardif_init)(struct batadv_hardif_neigh_node *neigh);
 
-/**
- * struct batadv_vis_info_entry - contains link information for vis
- * @src: source MAC of the link, all zero for local TT entry
- * @dst: destination MAC of the link, client mac address for local TT entry
- * @quality: transmission quality of the link, or 0 for local TT entry
- */
-struct batadv_vis_info_entry {
-	uint8_t  src[ETH_ALEN];
-	uint8_t  dest[ETH_ALEN];
-	uint8_t  quality;
-} __packed;
+	/**
+	 * @cmp: compare the metrics of two neighbors for their respective
+	 *  outgoing interfaces
+	 */
+	int (*cmp)(struct batadv_neigh_node *neigh1,
+		   struct batadv_hard_iface *if_outgoing1,
+		   struct batadv_neigh_node *neigh2,
+		   struct batadv_hard_iface *if_outgoing2);
 
-/**
- * struct batadv_vis_recvlist_node - list entry for batadv_vis_info::recv_list
- * @list: list node for batadv_vis_info::recv_list
- * @mac: MAC address of the originator from where the vis_info was received
- */
-struct batadv_vis_recvlist_node {
-	struct list_head list;
-	uint8_t mac[ETH_ALEN];
+	/**
+	 * @is_similar_or_better: check if @candidate is equally similar or better
+	 *  than @reference for their respective outgoing interface from the metric
+	 *  prospective
+	 */
+	bool (*is_similar_or_better)(struct batadv_neigh_node *candidate,
+				     struct batadv_hard_iface *if_outgoing_cand,
+				     struct batadv_neigh_node *reference,
+				     struct batadv_hard_iface *if_outgoing_ref);
+
+	/** @dump: dump neighbors to a netlink socket (optional) */
+	void (*dump)(struct sk_buff *msg, struct netlink_callback *cb,
+		     struct batadv_priv *priv,
+		     struct batadv_hard_iface *hard_iface);
 };
 
 /**
- * struct batadv_vis_if_list_entry - auxiliary data for vis data generation
- * @addr: MAC address of the interface
- * @primary: true if this interface is the primary interface
- * @list: list node the interface list
- *
- * While scanning for vis-entries of a particular vis-originator
- * this list collects its interfaces to create a subgraph/cluster
- * out of them later
+ * struct batadv_algo_orig_ops - mesh algorithm callbacks (originator specific)
  */
-struct batadv_vis_if_list_entry {
-	uint8_t addr[ETH_ALEN];
-	bool primary;
-	struct hlist_node list;
+struct batadv_algo_orig_ops {
+	/** @dump: dump originators to a netlink socket (optional) */
+	void (*dump)(struct sk_buff *msg, struct netlink_callback *cb,
+		     struct batadv_priv *priv,
+		     struct batadv_hard_iface *hard_iface);
+};
+
+/**
+ * struct batadv_algo_gw_ops - mesh algorithm callbacks (GW specific)
+ */
+struct batadv_algo_gw_ops {
+	/** @init_sel_class: initialize GW selection class (optional) */
+	void (*init_sel_class)(struct batadv_priv *bat_priv);
+
+	/**
+	 * @sel_class_max: maximum allowed GW selection class
+	 */
+	u32 sel_class_max;
+
+	/**
+	 * @get_best_gw_node: select the best GW from the list of available
+	 *  nodes (optional)
+	 */
+	struct batadv_gw_node *(*get_best_gw_node)
+		(struct batadv_priv *bat_priv);
+
+	/**
+	 * @is_eligible: check if a newly discovered GW is a potential candidate
+	 *  for the election as best GW (optional)
+	 */
+	bool (*is_eligible)(struct batadv_priv *bat_priv,
+			    struct batadv_orig_node *curr_gw_orig,
+			    struct batadv_orig_node *orig_node);
+
+	/** @dump: dump gateways to a netlink socket (optional) */
+	void (*dump)(struct sk_buff *msg, struct netlink_callback *cb,
+		     struct batadv_priv *priv);
 };
 
 /**
  * struct batadv_algo_ops - mesh algorithm callbacks
- * @list: list node for the batadv_algo_list
- * @name: name of the algorithm
- * @bat_iface_enable: init routing info when hard-interface is enabled
- * @bat_iface_disable: de-init routing info when hard-interface is disabled
- * @bat_iface_update_mac: (re-)init mac addresses of the protocol information
- *  belonging to this hard-interface
- * @bat_primary_iface_set: called when primary interface is selected / changed
- * @bat_ogm_schedule: prepare a new outgoing OGM for the send queue
- * @bat_ogm_emit: send scheduled OGM
  */
 struct batadv_algo_ops {
+	/** @list: list node for the batadv_algo_list */
 	struct hlist_node list;
+
+	/** @name: name of the algorithm */
 	char *name;
-	int (*bat_iface_enable)(struct batadv_hard_iface *hard_iface);
-	void (*bat_iface_disable)(struct batadv_hard_iface *hard_iface);
-	void (*bat_iface_update_mac)(struct batadv_hard_iface *hard_iface);
-	void (*bat_primary_iface_set)(struct batadv_hard_iface *hard_iface);
-	void (*bat_ogm_schedule)(struct batadv_hard_iface *hard_iface);
-	void (*bat_ogm_emit)(struct batadv_forw_packet *forw_packet);
+
+	/** @iface: callbacks related to interface handling */
+	struct batadv_algo_iface_ops iface;
+
+	/** @neigh: callbacks related to neighbors handling */
+	struct batadv_algo_neigh_ops neigh;
+
+	/** @orig: callbacks related to originators handling */
+	struct batadv_algo_orig_ops orig;
+
+	/** @gw: callbacks related to GW mode */
+	struct batadv_algo_gw_ops gw;
 };
 
 /**
  * struct batadv_dat_entry - it is a single entry of batman-adv ARP backend. It
  * is used to stored ARP entries needed for the global DAT cache
- * @ip: the IPv4 corresponding to this DAT/ARP entry
- * @mac_addr: the MAC address associated to the stored IPv4
- * @last_update: time in jiffies when this entry was refreshed last time
- * @hash_entry: hlist node for batadv_priv_dat::hash
- * @refcount: number of contexts the object is used
- * @rcu: struct used for freeing in an RCU-safe manner
  */
 struct batadv_dat_entry {
+	/** @ip: the IPv4 corresponding to this DAT/ARP entry */
 	__be32 ip;
-	uint8_t mac_addr[ETH_ALEN];
+
+	/** @mac_addr: the MAC address associated to the stored IPv4 */
+	atomic64_t mac_addr;
+
+	/** @vid: the vlan ID associated to this entry */
+	unsigned short vid;
+
+	/**
+	 * @last_update: time in jiffies when this entry was refreshed last time
+	 */
 	unsigned long last_update;
+
+	/** @hash_entry: hlist node for &batadv_priv_dat.hash */
 	struct hlist_node hash_entry;
-	atomic_t refcount;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
 	struct rcu_head rcu;
 };
 
 /**
+ * struct batadv_hw_addr - a list entry for a MAC address
+ */
+struct batadv_hw_addr {
+	/** @list: list node for the linking of entries */
+	struct hlist_node list;
+
+	/** @addr: the MAC address of this list entry */
+	unsigned char addr[ETH_ALEN] __aligned(2);
+};
+
+/**
  * struct batadv_dat_candidate - candidate destination for DAT operations
- * @type: the type of the selected candidate. It can one of the following:
- *	  - BATADV_DAT_CANDIDATE_NOT_FOUND
- *	  - BATADV_DAT_CANDIDATE_ORIG
- * @orig_node: if type is BATADV_DAT_CANDIDATE_ORIG this field points to the
- *	       corresponding originator node structure
  */
 struct batadv_dat_candidate {
+	/**
+	 * @type: the type of the selected candidate. It can one of the
+	 *  following:
+	 *	  - BATADV_DAT_CANDIDATE_NOT_FOUND
+	 *	  - BATADV_DAT_CANDIDATE_ORIG
+	 */
 	int type;
+
+	/**
+	 * @orig_node: if type is BATADV_DAT_CANDIDATE_ORIG this field points to
+	 * the corresponding originator node structure
+	 */
 	struct batadv_orig_node *orig_node;
+};
+
+/**
+ * struct batadv_tvlv_container - container for tvlv appended to OGMs
+ */
+struct batadv_tvlv_container {
+	/** @list: hlist node for &batadv_priv_tvlv.container_list */
+	struct hlist_node list;
+
+	/** @tvlv_hdr: tvlv header information needed to construct the tvlv */
+	struct batadv_tvlv_hdr tvlv_hdr;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+};
+
+/**
+ * struct batadv_tvlv_handler - handler for specific tvlv type and version
+ */
+struct batadv_tvlv_handler {
+	/** @list: hlist node for &batadv_priv_tvlv.handler_list */
+	struct hlist_node list;
+
+	/**
+	 * @ogm_handler: handler callback which is given the tvlv payload to
+	 *  process on incoming OGM packets
+	 */
+	void (*ogm_handler)(struct batadv_priv *bat_priv,
+			    struct batadv_orig_node *orig,
+			    u8 flags, void *tvlv_value, u16 tvlv_value_len);
+
+	/**
+	 * @unicast_handler: handler callback which is given the tvlv payload to
+	 *  process on incoming unicast tvlv packets
+	 */
+	int (*unicast_handler)(struct batadv_priv *bat_priv,
+			       u8 *src, u8 *dst,
+			       void *tvlv_value, u16 tvlv_value_len);
+
+	/**
+	 * @mcast_handler: handler callback which is given the tvlv payload to
+	 *  process on incoming mcast packet
+	 */
+	int (*mcast_handler)(struct batadv_priv *bat_priv, struct sk_buff *skb);
+
+	/** @type: tvlv type this handler feels responsible for */
+	u8 type;
+
+	/** @version: tvlv version this handler feels responsible for */
+	u8 version;
+
+	/** @flags: tvlv handler flags */
+	u8 flags;
+
+	/** @refcount: number of contexts the object is used */
+	struct kref refcount;
+
+	/** @rcu: struct used for freeing in an RCU-safe manner */
+	struct rcu_head rcu;
+};
+
+/**
+ * enum batadv_tvlv_handler_flags - tvlv handler flags definitions
+ */
+enum batadv_tvlv_handler_flags {
+	/**
+	 * @BATADV_TVLV_HANDLER_OGM_CIFNOTFND: tvlv ogm processing function
+	 *  will call this handler even if its type was not found (with no data)
+	 */
+	BATADV_TVLV_HANDLER_OGM_CIFNOTFND = BIT(1),
 };
 
 #endif /* _NET_BATMAN_ADV_TYPES_H_ */

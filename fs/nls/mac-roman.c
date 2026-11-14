@@ -618,7 +618,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_macroman(void)
@@ -634,4 +633,5 @@ static void __exit exit_nls_macroman(void)
 module_init(init_nls_macroman)
 module_exit(exit_nls_macroman)
 
+MODULE_DESCRIPTION("NLS Codepage macroman");
 MODULE_LICENSE("Dual BSD/GPL");

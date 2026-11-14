@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * init.c:  Initialize internal variables used by the PROM
  *          library functions.
@@ -25,14 +26,11 @@ phandle prom_chosen_node;
  * routines in the prom library.
  * It gets passed the pointer to the PROM vector.
  */
-
-extern void prom_cif_init(void *, void *);
-
-void __init prom_init(void *cif_handler, void *cif_stack)
+void __init prom_init(void *cif_handler)
 {
 	phandle node;
 
-	prom_cif_init(cif_handler, cif_stack);
+	prom_cif_init(cif_handler);
 
 	prom_chosen_node = prom_finddevice(prom_chosen_path);
 	if (!prom_chosen_node || (s32)prom_chosen_node == -1)

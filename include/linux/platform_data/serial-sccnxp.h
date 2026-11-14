@@ -1,14 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *  NXP (Philips) SCC+++(SCN+++) serial driver
  *
  *  Copyright (C) 2012 Alexander Shiyan <shc_work@mail.ru>
  *
  *  Based on sc26xx.c, by Thomas Bogendörfer (tsbogend@alpha.franken.de)
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
  */
 
 #ifndef _PLATFORM_DATA_SERIAL_SCCNXP_H_
@@ -60,7 +56,6 @@
  * };
  *
  * static struct sccnxp_pdata sc2892_info = {
- *	.frequency	= 3686400,
  *	.mctrl_cfg[0]	= MCTRL_SIG(DIR_OP, LINE_OP0),
  *	.mctrl_cfg[1]	= MCTRL_SIG(DIR_OP, LINE_OP1),
  * };
@@ -78,8 +73,6 @@
 
 /* SCCNXP platform data structure */
 struct sccnxp_pdata {
-	/* Frequency (extrenal clock or crystal) */
-	int			frequency;
 	/* Shift for A0 line */
 	const u8		reg_shift;
 	/* Modem control lines configuration */

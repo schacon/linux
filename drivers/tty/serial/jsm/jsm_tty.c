@@ -1,22 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
 /************************************************************************
  * Copyright 2003 Digi International (www.digi.com)
  *
  * Copyright (C) 2004 IBM Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY, EXPRESS OR IMPLIED; without even the
- * implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
- * PURPOSE.  See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 * Temple Place - Suite 330, Boston,
- * MA  02111-1307, USA.
  *
  * Contact Information:
  * Scott H Kilau <Scott_Kilau@digi.com>
@@ -41,7 +27,7 @@ static void jsm_carrier(struct jsm_channel *ch);
 static inline int jsm_get_mstat(struct jsm_channel *ch)
 {
 	unsigned char mstat;
-	unsigned result;
+	int result;
 
 	jsm_dbg(IOCTL, &ch->ch_bd->pci_dev, "start\n");
 
@@ -77,7 +63,8 @@ static unsigned int jsm_tty_tx_empty(struct uart_port *port)
 static unsigned int jsm_tty_get_mctrl(struct uart_port *port)
 {
 	int result;
-	struct jsm_channel *channel = (struct jsm_channel *)port;
+	struct jsm_channel *channel =
+		container_of(port, struct jsm_channel, uart_port);
 
 	jsm_dbg(IOCTL, &channel->ch_bd->pci_dev, "start\n");
 
@@ -98,7 +85,8 @@ static unsigned int jsm_tty_get_mctrl(struct uart_port *port)
  */
 static void jsm_tty_set_mctrl(struct uart_port *port, unsigned int mctrl)
 {
-	struct jsm_channel *channel = (struct jsm_channel *)port;
+	struct jsm_channel *channel =
+		container_of(port, struct jsm_channel, uart_port);
 
 	jsm_dbg(IOCTL, &channel->ch_bd->pci_dev, "start\n");
 
@@ -127,13 +115,15 @@ static void jsm_tty_set_mctrl(struct uart_port *port, unsigned int mctrl)
 static void jsm_tty_write(struct uart_port *port)
 {
 	struct jsm_channel *channel;
+
 	channel = container_of(port, struct jsm_channel, uart_port);
 	channel->ch_bd->bd_ops->copy_data_from_queue_to_uart(channel);
 }
 
 static void jsm_tty_start_tx(struct uart_port *port)
 {
-	struct jsm_channel *channel = (struct jsm_channel *)port;
+	struct jsm_channel *channel =
+		container_of(port, struct jsm_channel, uart_port);
 
 	jsm_dbg(IOCTL, &channel->ch_bd->pci_dev, "start\n");
 
@@ -145,7 +135,8 @@ static void jsm_tty_start_tx(struct uart_port *port)
 
 static void jsm_tty_stop_tx(struct uart_port *port)
 {
-	struct jsm_channel *channel = (struct jsm_channel *)port;
+	struct jsm_channel *channel =
+		container_of(port, struct jsm_channel, uart_port);
 
 	jsm_dbg(IOCTL, &channel->ch_bd->pci_dev, "start\n");
 
@@ -157,49 +148,49 @@ static void jsm_tty_stop_tx(struct uart_port *port)
 static void jsm_tty_send_xchar(struct uart_port *port, char ch)
 {
 	unsigned long lock_flags;
-	struct jsm_channel *channel = (struct jsm_channel *)port;
+	struct jsm_channel *channel =
+		container_of(port, struct jsm_channel, uart_port);
 	struct ktermios *termios;
 
-	spin_lock_irqsave(&port->lock, lock_flags);
+	uart_port_lock_irqsave(port, &lock_flags);
 	termios = &port->state->port.tty->termios;
 	if (ch == termios->c_cc[VSTART])
 		channel->ch_bd->bd_ops->send_start_character(channel);
 
 	if (ch == termios->c_cc[VSTOP])
 		channel->ch_bd->bd_ops->send_stop_character(channel);
-	spin_unlock_irqrestore(&port->lock, lock_flags);
+	uart_port_unlock_irqrestore(port, lock_flags);
 }
 
 static void jsm_tty_stop_rx(struct uart_port *port)
 {
-	struct jsm_channel *channel = (struct jsm_channel *)port;
+	struct jsm_channel *channel =
+		container_of(port, struct jsm_channel, uart_port);
 
 	channel->ch_bd->bd_ops->disable_receiver(channel);
-}
-
-static void jsm_tty_enable_ms(struct uart_port *port)
-{
-	/* Nothing needed */
 }
 
 static void jsm_tty_break(struct uart_port *port, int break_state)
 {
 	unsigned long lock_flags;
-	struct jsm_channel *channel = (struct jsm_channel *)port;
+	struct jsm_channel *channel =
+		container_of(port, struct jsm_channel, uart_port);
 
-	spin_lock_irqsave(&port->lock, lock_flags);
+	uart_port_lock_irqsave(port, &lock_flags);
 	if (break_state == -1)
 		channel->ch_bd->bd_ops->send_break(channel);
 	else
-		channel->ch_bd->bd_ops->clear_break(channel, 0);
+		channel->ch_bd->bd_ops->clear_break(channel);
 
-	spin_unlock_irqrestore(&port->lock, lock_flags);
+	uart_port_unlock_irqrestore(port, lock_flags);
 }
 
 static int jsm_tty_open(struct uart_port *port)
 {
+	unsigned long lock_flags;
 	struct jsm_board *brd;
-	struct jsm_channel *channel = (struct jsm_channel *)port;
+	struct jsm_channel *channel =
+		container_of(port, struct jsm_channel, uart_port);
 	struct ktermios *termios;
 
 	/* Get board pointer from our array of majors we have allocated */
@@ -250,6 +241,7 @@ static int jsm_tty_open(struct uart_port *port)
 	channel->ch_cached_lsr = 0;
 	channel->ch_stops_sent = 0;
 
+	uart_port_lock_irqsave(port, &lock_flags);
 	termios = &port->state->port.tty->termios;
 	channel->ch_c_cflag	= termios->c_cflag;
 	channel->ch_c_iflag	= termios->c_iflag;
@@ -269,6 +261,7 @@ static int jsm_tty_open(struct uart_port *port)
 	jsm_carrier(channel);
 
 	channel->ch_open_count++;
+	uart_port_unlock_irqrestore(port, lock_flags);
 
 	jsm_dbg(OPEN, &channel->ch_bd->pci_dev, "finish\n");
 	return 0;
@@ -277,13 +270,12 @@ static int jsm_tty_open(struct uart_port *port)
 static void jsm_tty_close(struct uart_port *port)
 {
 	struct jsm_board *bd;
-	struct ktermios *ts;
-	struct jsm_channel *channel = (struct jsm_channel *)port;
+	struct jsm_channel *channel =
+		container_of(port, struct jsm_channel, uart_port);
 
 	jsm_dbg(CLOSE, &channel->ch_bd->pci_dev, "start\n");
 
 	bd = channel->ch_bd;
-	ts = &port->state->port.tty->termios;
 
 	channel->ch_flags &= ~(CH_STOPI);
 
@@ -308,13 +300,14 @@ static void jsm_tty_close(struct uart_port *port)
 }
 
 static void jsm_tty_set_termios(struct uart_port *port,
-				 struct ktermios *termios,
-				 struct ktermios *old_termios)
+				struct ktermios *termios,
+				const struct ktermios *old_termios)
 {
 	unsigned long lock_flags;
-	struct jsm_channel *channel = (struct jsm_channel *)port;
+	struct jsm_channel *channel =
+		container_of(port, struct jsm_channel, uart_port);
 
-	spin_lock_irqsave(&port->lock, lock_flags);
+	uart_port_lock_irqsave(port, &lock_flags);
 	channel->ch_c_cflag	= termios->c_cflag;
 	channel->ch_c_iflag	= termios->c_iflag;
 	channel->ch_c_oflag	= termios->c_oflag;
@@ -324,7 +317,7 @@ static void jsm_tty_set_termios(struct uart_port *port,
 
 	channel->ch_bd->bd_ops->param(channel);
 	jsm_carrier(channel);
-	spin_unlock_irqrestore(&port->lock, lock_flags);
+	uart_port_unlock_irqrestore(port, lock_flags);
 }
 
 static const char *jsm_tty_type(struct uart_port *port)
@@ -346,7 +339,7 @@ static void jsm_config_port(struct uart_port *port, int flags)
 	port->type = PORT_JSM;
 }
 
-static struct uart_ops jsm_ops = {
+static const struct uart_ops jsm_ops = {
 	.tx_empty	= jsm_tty_tx_empty,
 	.set_mctrl	= jsm_tty_set_mctrl,
 	.get_mctrl	= jsm_tty_get_mctrl,
@@ -354,7 +347,6 @@ static struct uart_ops jsm_ops = {
 	.start_tx	= jsm_tty_start_tx,
 	.send_xchar	= jsm_tty_send_xchar,
 	.stop_rx	= jsm_tty_stop_rx,
-	.enable_ms	= jsm_tty_enable_ms,
 	.break_ctl	= jsm_tty_break,
 	.startup	= jsm_tty_open,
 	.shutdown	= jsm_tty_close,
@@ -399,7 +391,7 @@ int jsm_tty_init(struct jsm_board *brd)
 			 * Okay to malloc with GFP_KERNEL, we are not at
 			 * interrupt context, and there are no locks held.
 			 */
-			brd->channels[i] = kzalloc(sizeof(struct jsm_channel), GFP_KERNEL);
+			brd->channels[i] = kzalloc_obj(struct jsm_channel);
 			if (!brd->channels[i]) {
 				jsm_dbg(CORE, &brd->pci_dev,
 					"%s:%d Unable to allocate memory for channel struct\n",
@@ -421,6 +413,8 @@ int jsm_tty_init(struct jsm_board *brd)
 
 		if (brd->bd_uart_offset == 0x200)
 			ch->ch_neo_uart =  vaddr + (brd->bd_uart_offset * i);
+		else
+			ch->ch_cls_uart =  vaddr + (brd->bd_uart_offset * i);
 
 		ch->ch_bd = brd;
 		ch->ch_portnum = i;
@@ -439,7 +433,6 @@ int jsm_uart_port_init(struct jsm_board *brd)
 {
 	int i, rc;
 	unsigned int line;
-	struct jsm_channel *ch;
 
 	if (!brd)
 		return -ENXIO;
@@ -453,11 +446,12 @@ int jsm_uart_port_init(struct jsm_board *brd)
 	brd->nasync = brd->maxports;
 
 	/* Set up channel variables */
-	for (i = 0; i < brd->nasync; i++, ch = brd->channels[i]) {
+	for (i = 0; i < brd->nasync; i++) {
 
 		if (!brd->channels[i])
 			continue;
 
+		brd->channels[i]->uart_port.dev = &brd->pci_dev->dev;
 		brd->channels[i]->uart_port.irq = brd->irq;
 		brd->channels[i]->uart_port.uartclk = 14745600;
 		brd->channels[i]->uart_port.type = PORT_JSM;
@@ -472,12 +466,11 @@ int jsm_uart_port_init(struct jsm_board *brd)
 		} else
 			set_bit(line, linemap);
 		brd->channels[i]->uart_port.line = line;
-		rc = uart_add_one_port (&jsm_uart_driver, &brd->channels[i]->uart_port);
-		if (rc){
+		rc = uart_add_one_port(&jsm_uart_driver, &brd->channels[i]->uart_port);
+		if (rc) {
 			printk(KERN_INFO "jsm: Port %d failed. Aborting...\n", i);
 			return rc;
-		}
-		else
+		} else
 			printk(KERN_INFO "jsm: Port %d added\n", i);
 	}
 
@@ -528,20 +521,16 @@ void jsm_input(struct jsm_channel *ch)
 	int data_len;
 	unsigned long lock_flags;
 	int len = 0;
-	int n = 0;
 	int s = 0;
 	int i = 0;
 
 	jsm_dbg(READ, &ch->ch_bd->pci_dev, "start\n");
 
-	if (!ch)
-		return;
-
 	port = &ch->uart_port.state->port;
 	tp = port->tty;
 
 	bd = ch->ch_bd;
-	if(!bd)
+	if (!bd)
 		return;
 
 	spin_lock_irqsave(&ch->ch_lock, lock_flags);
@@ -568,8 +557,7 @@ void jsm_input(struct jsm_channel *ch)
 	 *If the device is not open, or CREAD is off, flush
 	 *input data and return immediately.
 	 */
-	if (!tp ||
-		!(tp->termios.c_cflag & CREAD) ) {
+	if (!tp || !C_CREAD(tp)) {
 
 		jsm_dbg(READ, &ch->ch_bd->pci_dev,
 			"input. dropping %d bytes on port %d...\n",
@@ -597,16 +585,15 @@ void jsm_input(struct jsm_channel *ch)
 	jsm_dbg(READ, &ch->ch_bd->pci_dev, "start 2\n");
 
 	len = tty_buffer_request_room(port, data_len);
-	n = len;
 
 	/*
-	 * n now contains the most amount of data we can copy,
+	 * len now contains the most amount of data we can copy,
 	 * bounded either by the flip buffer size or the amount
 	 * of data the card actually has pending...
 	 */
-	while (n) {
+	while (len) {
 		s = ((head >= tail) ? head : RQUEUESIZE) - tail;
-		s = min(s, n);
+		s = min(s, len);
 
 		if (s <= 0)
 			break;
@@ -620,24 +607,28 @@ void jsm_input(struct jsm_channel *ch)
 
 		if (I_PARMRK(tp) || I_BRKINT(tp) || I_INPCK(tp)) {
 			for (i = 0; i < s; i++) {
+				u8 chr   = ch->ch_rqueue[tail + i];
+				u8 error = ch->ch_equeue[tail + i];
+				char flag = TTY_NORMAL;
+
 				/*
-				 * Give the Linux ld the flags in the
-				 * format it likes.
+				 * Give the Linux ld the flags in the format it
+				 * likes.
 				 */
-				if (*(ch->ch_equeue +tail +i) & UART_LSR_BI)
-					tty_insert_flip_char(port, *(ch->ch_rqueue +tail +i),  TTY_BREAK);
-				else if (*(ch->ch_equeue +tail +i) & UART_LSR_PE)
-					tty_insert_flip_char(port, *(ch->ch_rqueue +tail +i), TTY_PARITY);
-				else if (*(ch->ch_equeue +tail +i) & UART_LSR_FE)
-					tty_insert_flip_char(port, *(ch->ch_rqueue +tail +i), TTY_FRAME);
-				else
-					tty_insert_flip_char(port, *(ch->ch_rqueue +tail +i), TTY_NORMAL);
+				if (error & UART_LSR_BI)
+					flag = TTY_BREAK;
+				else if (error & UART_LSR_PE)
+					flag = TTY_PARITY;
+				else if (error & UART_LSR_FE)
+					flag = TTY_FRAME;
+
+				tty_insert_flip_char(port, chr, flag);
 			}
 		} else {
 			tty_insert_flip_string(port, ch->ch_rqueue + tail, s);
 		}
 		tail += s;
-		n -= s;
+		len -= s;
 		/* Flip queue if needed */
 		tail &= rmask;
 	}
@@ -661,11 +652,8 @@ static void jsm_carrier(struct jsm_channel *ch)
 	int phys_carrier = 0;
 
 	jsm_dbg(CARR, &ch->ch_bd->pci_dev, "start\n");
-	if (!ch)
-		return;
 
 	bd = ch->ch_bd;
-
 	if (!bd)
 		return;
 
@@ -762,7 +750,8 @@ void jsm_check_queue_flow_control(struct jsm_channel *ch)
 	int qleft;
 
 	/* Store how much space we have left in the queue */
-	if ((qleft = ch->ch_r_tail - ch->ch_r_head - 1) < 0)
+	qleft = ch->ch_r_tail - ch->ch_r_head - 1;
+	if (qleft < 0)
 		qleft += RQUEUEMASK + 1;
 
 	/*
@@ -783,7 +772,7 @@ void jsm_check_queue_flow_control(struct jsm_channel *ch)
 	if (qleft < 256) {
 		/* HWFLOW */
 		if (ch->ch_c_cflag & CRTSCTS) {
-			if(!(ch->ch_flags & CH_RECEIVER_OFF)) {
+			if (!(ch->ch_flags & CH_RECEIVER_OFF)) {
 				bd_ops->disable_receiver(ch);
 				ch->ch_flags |= (CH_RECEIVER_OFF);
 				jsm_dbg(READ, &ch->ch_bd->pci_dev,

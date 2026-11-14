@@ -1,28 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SPI driver for Nvidia's Tegra20 Serial Flash Controller.
  *
  * Copyright (c) 2012, NVIDIA CORPORATION.  All rights reserved.
  *
  * Author: Laxman Dewangan <ldewangan@nvidia.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/err.h>
-#include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
@@ -32,8 +20,8 @@
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/reset.h>
 #include <linux/spi/spi.h>
-#include <linux/clk/tegra.h>
 
 #define SPI_COMMAND				0x000
 #define SPI_GO					BIT(30)
@@ -100,7 +88,7 @@
 #define SPI_TX_TRIG_MASK		(0x3 << 16)
 #define SPI_TX_TRIG_1W			(0x0 << 16)
 #define SPI_TX_TRIG_4W			(0x1 << 16)
-#define SPI_DMA_BLK_COUNT(count)	(((count) - 1) & 0xFFFF);
+#define SPI_DMA_BLK_COUNT(count)	(((count) - 1) & 0xFFFF)
 
 #define SPI_TX_FIFO			0x10
 #define SPI_RX_FIFO			0x20
@@ -114,13 +102,13 @@
 
 struct tegra_sflash_data {
 	struct device				*dev;
-	struct spi_master			*master;
+	struct spi_controller			*host;
 	spinlock_t				lock;
 
 	struct clk				*clk;
+	struct reset_control			*rst;
 	void __iomem				*base;
 	unsigned				irq;
-	u32					spi_max_frequency;
 	u32					cur_speed;
 
 	struct spi_device			*cur_spi;
@@ -148,14 +136,14 @@ struct tegra_sflash_data {
 static int tegra_sflash_runtime_suspend(struct device *dev);
 static int tegra_sflash_runtime_resume(struct device *dev);
 
-static inline unsigned long tegra_sflash_readl(struct tegra_sflash_data *tsd,
+static inline u32 tegra_sflash_readl(struct tegra_sflash_data *tsd,
 		unsigned long reg)
 {
 	return readl(tsd->base + reg);
 }
 
 static inline void tegra_sflash_writel(struct tegra_sflash_data *tsd,
-		unsigned long val, unsigned long reg)
+		u32 val, unsigned long reg)
 {
 	writel(val, tsd->base + reg);
 }
@@ -173,7 +161,7 @@ static unsigned tegra_sflash_calculate_curr_xfer_param(
 	unsigned remain_len = t->len - tsd->cur_pos;
 	unsigned max_word;
 
-	tsd->bytes_per_word = (t->bits_per_word - 1) / 8 + 1;
+	tsd->bytes_per_word = DIV_ROUND_UP(t->bits_per_word, 8);
 	max_word = remain_len / tsd->bytes_per_word;
 	if (max_word > SPI_FIFO_DEPTH)
 		max_word = SPI_FIFO_DEPTH;
@@ -185,7 +173,7 @@ static unsigned tegra_sflash_fill_tx_fifo_from_client_txbuf(
 	struct tegra_sflash_data *tsd, struct spi_transfer *t)
 {
 	unsigned nbytes;
-	unsigned long status;
+	u32 status;
 	unsigned max_n_32bit = tsd->curr_xfer_words;
 	u8 *tx_buf = (u8 *)t->tx_buf + tsd->cur_tx_pos;
 
@@ -196,11 +184,11 @@ static unsigned tegra_sflash_fill_tx_fifo_from_client_txbuf(
 	status = tegra_sflash_readl(tsd, SPI_STATUS);
 	while (!(status & SPI_TXF_FULL)) {
 		int i;
-		unsigned int x = 0;
+		u32 x = 0;
 
 		for (i = 0; nbytes && (i < tsd->bytes_per_word);
 							i++, nbytes--)
-				x |= ((*tx_buf++) << i*8);
+			x |= (u32)(*tx_buf++) << (i * 8);
 		tegra_sflash_writel(tsd, x, SPI_TX_FIFO);
 		if (!nbytes)
 			break;
@@ -214,16 +202,15 @@ static unsigned tegra_sflash_fill_tx_fifo_from_client_txbuf(
 static int tegra_sflash_read_rx_fifo_to_client_rxbuf(
 		struct tegra_sflash_data *tsd, struct spi_transfer *t)
 {
-	unsigned long status;
+	u32 status;
 	unsigned int read_words = 0;
 	u8 *rx_buf = (u8 *)t->rx_buf + tsd->cur_rx_pos;
 
 	status = tegra_sflash_readl(tsd, SPI_STATUS);
 	while (!(status & SPI_RXF_EMPTY)) {
 		int i;
-		unsigned long x;
+		u32 x = tegra_sflash_readl(tsd, SPI_RX_FIFO);
 
-		x = tegra_sflash_readl(tsd, SPI_RX_FIFO);
 		for (i = 0; (i < tsd->bytes_per_word); i++)
 			*rx_buf++ = (x >> (i*8)) & 0xFF;
 		read_words++;
@@ -236,7 +223,7 @@ static int tegra_sflash_read_rx_fifo_to_client_rxbuf(
 static int tegra_sflash_start_cpu_based_transfer(
 		struct tegra_sflash_data *tsd, struct spi_transfer *t)
 {
-	unsigned long val = 0;
+	u32 val = 0;
 	unsigned cur_words;
 
 	if (tsd->cur_direction & DATA_DIR_TX)
@@ -264,9 +251,9 @@ static int tegra_sflash_start_transfer_one(struct spi_device *spi,
 		struct spi_transfer *t, bool is_first_of_msg,
 		bool is_single_xfer)
 {
-	struct tegra_sflash_data *tsd = spi_master_get_devdata(spi->master);
+	struct tegra_sflash_data *tsd = spi_controller_get_devdata(spi->controller);
 	u32 speed;
-	unsigned long command;
+	u32 command;
 
 	speed = t->speed_hz;
 	if (speed != tsd->cur_speed) {
@@ -293,7 +280,7 @@ static int tegra_sflash_start_transfer_one(struct spi_device *spi,
 			command |= SPI_ACTIVE_SCLK_DRIVE_HIGH;
 		else
 			command |= SPI_ACTIVE_SCLK_DRIVE_LOW;
-		command |= SPI_CS0_EN << spi->chip_select;
+		command |= SPI_CS0_EN << spi_get_chipselect(spi, 0);
 	} else {
 		command = tsd->command_reg;
 		command &= ~SPI_BIT_LENGTH(~0);
@@ -313,39 +300,24 @@ static int tegra_sflash_start_transfer_one(struct spi_device *spi,
 	tegra_sflash_writel(tsd, command, SPI_COMMAND);
 	tsd->command_reg = command;
 
-	return  tegra_sflash_start_cpu_based_transfer(tsd, t);
+	return tegra_sflash_start_cpu_based_transfer(tsd, t);
 }
 
-static int tegra_sflash_setup(struct spi_device *spi)
-{
-	struct tegra_sflash_data *tsd = spi_master_get_devdata(spi->master);
-
-	/* Set speed to the spi max fequency if spi device has not set */
-	spi->max_speed_hz = spi->max_speed_hz ? : tsd->spi_max_frequency;
-	return 0;
-}
-
-static int tegra_sflash_transfer_one_message(struct spi_master *master,
+static int tegra_sflash_transfer_one_message(struct spi_controller *host,
 			struct spi_message *msg)
 {
 	bool is_first_msg = true;
 	int single_xfer;
-	struct tegra_sflash_data *tsd = spi_master_get_devdata(master);
+	struct tegra_sflash_data *tsd = spi_controller_get_devdata(host);
 	struct spi_transfer *xfer;
 	struct spi_device *spi = msg->spi;
 	int ret;
-
-	ret = pm_runtime_get_sync(tsd->dev);
-	if (ret < 0) {
-		dev_err(tsd->dev, "pm_runtime_get() failed, err = %d\n", ret);
-		return ret;
-	}
 
 	msg->status = 0;
 	msg->actual_length = 0;
 	single_xfer = list_is_singular(&msg->transfers);
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		INIT_COMPLETION(tsd->xfer_completion);
+		reinit_completion(&tsd->xfer_completion);
 		ret = tegra_sflash_start_transfer_one(spi, xfer,
 					is_first_msg, single_xfer);
 		if (ret < 0) {
@@ -358,7 +330,7 @@ static int tegra_sflash_transfer_one_message(struct spi_master *master,
 						SPI_DMA_TIMEOUT);
 		if (WARN_ON(ret == 0)) {
 			dev_err(tsd->dev,
-				"spi trasfer timeout, err %d\n", ret);
+				"spi transfer timeout, err %d\n", ret);
 			ret = -EIO;
 			goto exit;
 		}
@@ -369,36 +341,34 @@ static int tegra_sflash_transfer_one_message(struct spi_master *master,
 			goto exit;
 		}
 		msg->actual_length += xfer->len;
-		if (xfer->cs_change && xfer->delay_usecs) {
+		if (xfer->cs_change && xfer->delay.value) {
 			tegra_sflash_writel(tsd, tsd->def_command_reg,
 					SPI_COMMAND);
-			udelay(xfer->delay_usecs);
+			spi_transfer_delay_exec(xfer);
 		}
 	}
 	ret = 0;
 exit:
 	tegra_sflash_writel(tsd, tsd->def_command_reg, SPI_COMMAND);
 	msg->status = ret;
-	spi_finalize_current_message(master);
-	pm_runtime_put(tsd->dev);
+	spi_finalize_current_message(host);
 	return ret;
 }
 
 static irqreturn_t handle_cpu_based_xfer(struct tegra_sflash_data *tsd)
 {
 	struct spi_transfer *t = tsd->curr_xfer;
-	unsigned long flags;
 
-	spin_lock_irqsave(&tsd->lock, flags);
+	spin_lock(&tsd->lock);
 	if (tsd->tx_status || tsd->rx_status || (tsd->status_reg & SPI_BSY)) {
 		dev_err(tsd->dev,
 			"CpuXfer ERROR bit set 0x%x\n", tsd->status_reg);
 		dev_err(tsd->dev,
 			"CpuXfer 0x%08x:0x%08x\n", tsd->command_reg,
 				tsd->dma_control_reg);
-		tegra_periph_reset_assert(tsd->clk);
+		reset_control_assert(tsd->rst);
 		udelay(2);
-		tegra_periph_reset_deassert(tsd->clk);
+		reset_control_deassert(tsd->rst);
 		complete(&tsd->xfer_completion);
 		goto exit;
 	}
@@ -419,7 +389,7 @@ static irqreturn_t handle_cpu_based_xfer(struct tegra_sflash_data *tsd)
 	tegra_sflash_calculate_curr_xfer_param(tsd->cur_spi, tsd, t);
 	tegra_sflash_start_cpu_based_transfer(tsd, t);
 exit:
-	spin_unlock_irqrestore(&tsd->lock, flags);
+	spin_unlock(&tsd->lock);
 	return IRQ_HANDLED;
 }
 
@@ -438,16 +408,7 @@ static irqreturn_t tegra_sflash_isr(int irq, void *context_data)
 	return handle_cpu_based_xfer(tsd);
 }
 
-static void tegra_sflash_parse_dt(struct tegra_sflash_data *tsd)
-{
-	struct device_node *np = tsd->dev->of_node;
-
-	if (of_property_read_u32(np, "spi-max-frequency",
-					&tsd->spi_max_frequency))
-		tsd->spi_max_frequency = 25000000; /* 25MHz */
-}
-
-static struct of_device_id tegra_sflash_of_match[] = {
+static const struct of_device_id tegra_sflash_of_match[] = {
 	{ .compatible = "nvidia,tegra20-sflash", },
 	{}
 };
@@ -455,9 +416,8 @@ MODULE_DEVICE_TABLE(of, tegra_sflash_of_match);
 
 static int tegra_sflash_probe(struct platform_device *pdev)
 {
-	struct spi_master	*master;
+	struct spi_controller	*host;
 	struct tegra_sflash_data	*tsd;
-	struct resource		*r;
 	int ret;
 	const struct of_device_id *match;
 
@@ -467,47 +427,55 @@ static int tegra_sflash_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	master = spi_alloc_master(&pdev->dev, sizeof(*tsd));
-	if (!master) {
-		dev_err(&pdev->dev, "master allocation failed\n");
+	host = devm_spi_alloc_host(&pdev->dev, sizeof(*tsd));
+	if (!host)
 		return -ENOMEM;
-	}
 
 	/* the spi->mode bits understood by this driver: */
-	master->mode_bits = SPI_CPOL | SPI_CPHA;
-	master->setup = tegra_sflash_setup;
-	master->transfer_one_message = tegra_sflash_transfer_one_message;
-	master->num_chipselect = MAX_CHIP_SELECT;
-	master->bus_num = -1;
+	host->mode_bits = SPI_CPOL | SPI_CPHA;
+	host->transfer_one_message = tegra_sflash_transfer_one_message;
+	host->auto_runtime_pm = true;
+	host->num_chipselect = MAX_CHIP_SELECT;
 
-	dev_set_drvdata(&pdev->dev, master);
-	tsd = spi_master_get_devdata(master);
-	tsd->master = master;
+	platform_set_drvdata(pdev, host);
+	tsd = spi_controller_get_devdata(host);
+	tsd->host = host;
 	tsd->dev = &pdev->dev;
 	spin_lock_init(&tsd->lock);
 
-	tegra_sflash_parse_dt(tsd);
+	if (of_property_read_u32(tsd->dev->of_node, "spi-max-frequency",
+				 &host->max_speed_hz))
+		host->max_speed_hz = 25000000; /* 25MHz */
 
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	tsd->base = devm_ioremap_resource(&pdev->dev, r);
-	if (IS_ERR(tsd->base)) {
-		ret = PTR_ERR(tsd->base);
-		goto exit_free_master;
-	}
+	tsd->base = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(tsd->base))
+		return PTR_ERR(tsd->base);
 
-	tsd->irq = platform_get_irq(pdev, 0);
+	ret = platform_get_irq(pdev, 0);
+	if (ret < 0)
+		return ret;
+
+	tsd->irq = ret;
+
 	ret = request_irq(tsd->irq, tegra_sflash_isr, 0,
 			dev_name(&pdev->dev), tsd);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to register ISR for IRQ %d\n",
 					tsd->irq);
-		goto exit_free_master;
+		return ret;
 	}
 
 	tsd->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(tsd->clk)) {
 		dev_err(&pdev->dev, "can not get clock\n");
 		ret = PTR_ERR(tsd->clk);
+		goto exit_free_irq;
+	}
+
+	tsd->rst = devm_reset_control_get_exclusive(&pdev->dev, "spi");
+	if (IS_ERR(tsd->rst)) {
+		dev_err(&pdev->dev, "can not get reset\n");
+		ret = PTR_ERR(tsd->rst);
 		goto exit_free_irq;
 	}
 
@@ -519,25 +487,24 @@ static int tegra_sflash_probe(struct platform_device *pdev)
 			goto exit_pm_disable;
 	}
 
-	ret = pm_runtime_get_sync(&pdev->dev);
+	ret = pm_runtime_resume_and_get(&pdev->dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "pm runtime get failed, e = %d\n", ret);
 		goto exit_pm_disable;
 	}
 
 	/* Reset controller */
-	tegra_periph_reset_assert(tsd->clk);
+	reset_control_assert(tsd->rst);
 	udelay(2);
-	tegra_periph_reset_deassert(tsd->clk);
+	reset_control_deassert(tsd->rst);
 
 	tsd->def_command_reg  = SPI_M_S | SPI_CS_SW;
 	tegra_sflash_writel(tsd, tsd->def_command_reg, SPI_COMMAND);
 	pm_runtime_put(&pdev->dev);
 
-	master->dev.of_node = pdev->dev.of_node;
-	ret = spi_register_master(master);
+	ret = spi_register_controller(host);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "can not register to master err %d\n", ret);
+		dev_err(&pdev->dev, "can not register to host err %d\n", ret);
 		goto exit_pm_disable;
 	}
 	return ret;
@@ -548,41 +515,38 @@ exit_pm_disable:
 		tegra_sflash_runtime_suspend(&pdev->dev);
 exit_free_irq:
 	free_irq(tsd->irq, tsd);
-exit_free_master:
-	spi_master_put(master);
+
 	return ret;
 }
 
-static int tegra_sflash_remove(struct platform_device *pdev)
+static void tegra_sflash_remove(struct platform_device *pdev)
 {
-	struct spi_master *master = dev_get_drvdata(&pdev->dev);
-	struct tegra_sflash_data	*tsd = spi_master_get_devdata(master);
+	struct spi_controller *host = platform_get_drvdata(pdev);
+	struct tegra_sflash_data	*tsd = spi_controller_get_devdata(host);
+
+	spi_unregister_controller(host);
 
 	free_irq(tsd->irq, tsd);
-	spi_unregister_master(master);
 
 	pm_runtime_disable(&pdev->dev);
 	if (!pm_runtime_status_suspended(&pdev->dev))
 		tegra_sflash_runtime_suspend(&pdev->dev);
-
-	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int tegra_sflash_suspend(struct device *dev)
 {
-	struct spi_master *master = dev_get_drvdata(dev);
+	struct spi_controller *host = dev_get_drvdata(dev);
 
-	return spi_master_suspend(master);
+	return spi_controller_suspend(host);
 }
 
 static int tegra_sflash_resume(struct device *dev)
 {
-	struct spi_master *master = dev_get_drvdata(dev);
-	struct tegra_sflash_data *tsd = spi_master_get_devdata(master);
+	struct spi_controller *host = dev_get_drvdata(dev);
+	struct tegra_sflash_data *tsd = spi_controller_get_devdata(host);
 	int ret;
 
-	ret = pm_runtime_get_sync(dev);
+	ret = pm_runtime_resume_and_get(dev);
 	if (ret < 0) {
 		dev_err(dev, "pm runtime failed, e = %d\n", ret);
 		return ret;
@@ -590,14 +554,13 @@ static int tegra_sflash_resume(struct device *dev)
 	tegra_sflash_writel(tsd, tsd->command_reg, SPI_COMMAND);
 	pm_runtime_put(dev);
 
-	return spi_master_resume(master);
+	return spi_controller_resume(host);
 }
-#endif
 
 static int tegra_sflash_runtime_suspend(struct device *dev)
 {
-	struct spi_master *master = dev_get_drvdata(dev);
-	struct tegra_sflash_data *tsd = spi_master_get_devdata(master);
+	struct spi_controller *host = dev_get_drvdata(dev);
+	struct tegra_sflash_data *tsd = spi_controller_get_devdata(host);
 
 	/* Flush all write which are in PPSB queue by reading back */
 	tegra_sflash_readl(tsd, SPI_COMMAND);
@@ -608,8 +571,8 @@ static int tegra_sflash_runtime_suspend(struct device *dev)
 
 static int tegra_sflash_runtime_resume(struct device *dev)
 {
-	struct spi_master *master = dev_get_drvdata(dev);
-	struct tegra_sflash_data *tsd = spi_master_get_devdata(master);
+	struct spi_controller *host = dev_get_drvdata(dev);
+	struct tegra_sflash_data *tsd = spi_controller_get_devdata(host);
 	int ret;
 
 	ret = clk_prepare_enable(tsd->clk);
@@ -621,15 +584,14 @@ static int tegra_sflash_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops slink_pm_ops = {
-	SET_RUNTIME_PM_OPS(tegra_sflash_runtime_suspend,
-		tegra_sflash_runtime_resume, NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(tegra_sflash_suspend, tegra_sflash_resume)
+	RUNTIME_PM_OPS(tegra_sflash_runtime_suspend,
+		       tegra_sflash_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(tegra_sflash_suspend, tegra_sflash_resume)
 };
 static struct platform_driver tegra_sflash_driver = {
 	.driver = {
 		.name		= "spi-tegra-sflash",
-		.owner		= THIS_MODULE,
-		.pm		= &slink_pm_ops,
+		.pm		= pm_ptr(&slink_pm_ops),
 		.of_match_table	= tegra_sflash_of_match,
 	},
 	.probe =	tegra_sflash_probe,

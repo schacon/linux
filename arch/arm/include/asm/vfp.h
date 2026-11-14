@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * arch/arm/include/asm/vfp.h
  *
@@ -5,13 +6,8 @@
  * First, the standard VFP set.
  */
 
-#define FPSID			cr0
-#define FPSCR			cr1
-#define MVFR1			cr6
-#define MVFR0			cr7
-#define FPEXC			cr8
-#define FPINST			cr9
-#define FPINST2			cr10
+#ifndef __ASM_VFP_H
+#define __ASM_VFP_H
 
 /* FPSID bits */
 #define FPSID_IMPLEMENTER_BIT	(24)
@@ -22,6 +18,7 @@
 #define FPSID_NODOUBLE		(1<<20)
 #define FPSID_ARCH_BIT		(16)
 #define FPSID_ARCH_MASK		(0xF  << FPSID_ARCH_BIT)
+#define FPSID_CPUID_ARCH_MASK	(0x7F  << FPSID_ARCH_BIT)
 #define FPSID_PART_BIT		(8)
 #define FPSID_PART_MASK		(0xFF << FPSID_PART_BIT)
 #define FPSID_VARIANT_BIT	(4)
@@ -75,6 +72,16 @@
 /* MVFR0 bits */
 #define MVFR0_A_SIMD_BIT	(0)
 #define MVFR0_A_SIMD_MASK	(0xf << MVFR0_A_SIMD_BIT)
+#define MVFR0_SP_BIT		(4)
+#define MVFR0_SP_MASK		(0xf << MVFR0_SP_BIT)
+#define MVFR0_DP_BIT		(8)
+#define MVFR0_DP_MASK		(0xf << MVFR0_DP_BIT)
+
+/* MVFR1 bits */
+#define MVFR1_ASIMDHP_BIT	(20)
+#define MVFR1_ASIMDHP_MASK	(0xf << MVFR1_ASIMDHP_BIT)
+#define MVFR1_FPHP_BIT		(24)
+#define MVFR1_FPHP_MASK		(0xf << MVFR1_FPHP_BIT)
 
 /* Bit patterns for decoding the packaged operation descriptors */
 #define VFPOPDESC_LENGTH_BIT	(9)
@@ -82,3 +89,9 @@
 #define VFPOPDESC_UNUSED_BIT	(24)
 #define VFPOPDESC_UNUSED_MASK	(0xFF << VFPOPDESC_UNUSED_BIT)
 #define VFPOPDESC_OPDESC_MASK	(~(VFPOPDESC_LENGTH_MASK | VFPOPDESC_UNUSED_MASK))
+
+#ifndef __ASSEMBLY__
+void vfp_disable(void);
+#endif
+
+#endif /* __ASM_VFP_H */

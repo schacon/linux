@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Serial port routines for use during early boot reporting. This code is
+ * included from both the compressed kernel and the regular kernel.
+ */
 #include "boot.h"
 
 #define DEFAULT_SERIAL_PORT 0x3f8 /* ttyS0 */
-
-#define XMTRDY          0x20
 
 #define DLAB		0x80
 
@@ -19,6 +22,7 @@
 #define DLH             1       /*  Divisor latch High        */
 
 #define DEFAULT_BAUD 9600
+#define BASE_BAUD (1843200 / 16)
 
 static void early_serial_init(int port, int baud)
 {
@@ -30,7 +34,7 @@ static void early_serial_init(int port, int baud)
 	outb(0, port + FCR);	/* no fifo */
 	outb(0x3, port + MCR);	/* DTR + RTS */
 
-	divisor	= 115200 / baud;
+	divisor	= BASE_BAUD / baud;
 	c = inb(port + LCR);
 	outb(c | DLAB, port + LCR);
 	outb(divisor & 0xff, port + DLL);
@@ -47,7 +51,7 @@ static void parse_earlyprintk(void)
 	int pos = 0;
 	int port = 0;
 
-	if (cmdline_find_option("earlyprintk", arg, sizeof arg) > 0) {
+	if (cmdline_find_option("earlyprintk", arg, sizeof(arg)) > 0) {
 		char *e;
 
 		if (!strncmp(arg, "serial", 6)) {
@@ -71,16 +75,13 @@ static void parse_earlyprintk(void)
 			else
 				pos = e - arg;
 		} else if (!strncmp(arg + pos, "ttyS", 4)) {
-			static const int bases[] = { 0x3f8, 0x2f8 };
-			int idx = 0;
-
-			if (!strncmp(arg + pos, "ttyS", 4))
-				pos += 4;
+			/* += strlen("ttyS"); */
+			pos += 4;
 
 			if (arg[pos++] == '1')
-				idx = 1;
-
-			port = bases[idx];
+				port = 0x2f8; /* ttyS1 */
+			else
+				port = DEFAULT_SERIAL_PORT;
 		}
 
 		if (arg[pos] == ',')
@@ -95,7 +96,6 @@ static void parse_earlyprintk(void)
 		early_serial_init(port, baud);
 }
 
-#define BASE_BAUD (1843200/16)
 static unsigned int probe_baud(int port)
 {
 	unsigned char lcr, dll, dlh;
@@ -114,14 +114,14 @@ static unsigned int probe_baud(int port)
 static void parse_console_uart8250(void)
 {
 	char optstr[64], *options;
-	int baud = DEFAULT_BAUD;
+	int baud;
 	int port = 0;
 
 	/*
 	 * console=uart8250,io,0x3f8,115200n8
 	 * need to make sure it is last one console !
 	 */
-	if (cmdline_find_option("console", optstr, sizeof optstr) <= 0)
+	if (cmdline_find_option("console", optstr, sizeof(optstr)) <= 0)
 		return;
 
 	options = optstr;
@@ -133,10 +133,13 @@ static void parse_console_uart8250(void)
 	else
 		return;
 
-	if (options && (options[0] == ','))
-		baud = simple_strtoull(options + 1, &options, 0);
-	else
+	if (options && (options[0] == ',')) {
+		baud = simple_strtoull(options + 1, NULL, 0);
+		if (!baud)
+			baud = DEFAULT_BAUD;
+	} else {
 		baud = probe_baud(port);
+	}
 
 	if (port)
 		early_serial_init(port, baud);

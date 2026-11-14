@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Input device TTY line discipline
  *
@@ -7,13 +8,8 @@
  * 'serial io port' abstraction that the input device drivers use.
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- */
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -21,6 +17,7 @@
 #include <linux/init.h>
 #include <linux/serio.h>
 #include <linux/tty.h>
+#include <linux/compat.h>
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
 MODULE_DESCRIPTION("Input device TTY line discipline");
@@ -53,11 +50,9 @@ static int serport_serio_write(struct serio *serio, unsigned char data)
 static int serport_serio_open(struct serio *serio)
 {
 	struct serport *serport = serio->port_data;
-	unsigned long flags;
 
-	spin_lock_irqsave(&serport->lock, flags);
+	guard(spinlock_irqsave)(&serport->lock);
 	set_bit(SERPORT_ACTIVE, &serport->flags);
-	spin_unlock_irqrestore(&serport->lock, flags);
 
 	return 0;
 }
@@ -66,14 +61,9 @@ static int serport_serio_open(struct serio *serio)
 static void serport_serio_close(struct serio *serio)
 {
 	struct serport *serport = serio->port_data;
-	unsigned long flags;
 
-	spin_lock_irqsave(&serport->lock, flags);
+	guard(spinlock_irqsave)(&serport->lock);
 	clear_bit(SERPORT_ACTIVE, &serport->flags);
-	set_bit(SERPORT_DEAD, &serport->flags);
-	spin_unlock_irqrestore(&serport->lock, flags);
-
-	wake_up_interruptible(&serport->wait);
 }
 
 /*
@@ -88,7 +78,7 @@ static int serport_ldisc_open(struct tty_struct *tty)
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	serport = kzalloc(sizeof(struct serport), GFP_KERNEL);
+	serport = kzalloc_obj(*serport);
 	if (!serport)
 		return -ENOMEM;
 
@@ -109,7 +99,7 @@ static int serport_ldisc_open(struct tty_struct *tty)
 
 static void serport_ldisc_close(struct tty_struct *tty)
 {
-	struct serport *serport = (struct serport *) tty->disc_data;
+	struct serport *serport = tty->disc_data;
 
 	kfree(serport);
 }
@@ -120,38 +110,37 @@ static void serport_ldisc_close(struct tty_struct *tty)
  * 'interrupt' routine.
  */
 
-static void serport_ldisc_receive(struct tty_struct *tty, const unsigned char *cp, char *fp, int count)
+static void serport_ldisc_receive(struct tty_struct *tty, const u8 *cp,
+				  const u8 *fp, size_t count)
 {
-	struct serport *serport = (struct serport*) tty->disc_data;
-	unsigned long flags;
-	unsigned int ch_flags;
+	struct serport *serport = tty->disc_data;
+	unsigned int ch_flags = 0;
 	int i;
 
-	spin_lock_irqsave(&serport->lock, flags);
+	guard(spinlock_irqsave)(&serport->lock);
 
 	if (!test_bit(SERPORT_ACTIVE, &serport->flags))
-		goto out;
+		return;
 
 	for (i = 0; i < count; i++) {
-		switch (fp[i]) {
-		case TTY_FRAME:
-			ch_flags = SERIO_FRAME;
-			break;
+		if (fp) {
+			switch (fp[i]) {
+			case TTY_FRAME:
+				ch_flags = SERIO_FRAME;
+				break;
 
-		case TTY_PARITY:
-			ch_flags = SERIO_PARITY;
-			break;
+			case TTY_PARITY:
+				ch_flags = SERIO_PARITY;
+				break;
 
-		default:
-			ch_flags = 0;
-			break;
+			default:
+				ch_flags = 0;
+				break;
+			}
 		}
 
 		serio_interrupt(serport->serio, cp[i], ch_flags);
 	}
-
-out:
-	spin_unlock_irqrestore(&serport->lock, flags);
 }
 
 /*
@@ -160,21 +149,22 @@ out:
  * returning 0 characters.
  */
 
-static ssize_t serport_ldisc_read(struct tty_struct * tty, struct file * file, unsigned char __user * buf, size_t nr)
+static ssize_t serport_ldisc_read(struct tty_struct * tty, struct file * file,
+				  u8 *kbuf, size_t nr, void **cookie,
+				  unsigned long offset)
 {
-	struct serport *serport = (struct serport*) tty->disc_data;
+	struct serport *serport = tty->disc_data;
 	struct serio *serio;
-	char name[64];
 
 	if (test_and_set_bit(SERPORT_BUSY, &serport->flags))
 		return -EBUSY;
 
-	serport->serio = serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
+	serport->serio = serio = kzalloc_obj(*serio);
 	if (!serio)
 		return -ENOMEM;
 
-	strlcpy(serio->name, "Serial port", sizeof(serio->name));
-	snprintf(serio->phys, sizeof(serio->phys), "%s/serio0", tty_name(tty, name));
+	strscpy(serio->name, "Serial port", sizeof(serio->name));
+	snprintf(serio->phys, sizeof(serio->phys), "%s/serio0", tty_name(tty));
 	serio->id = serport->id;
 	serio->id.type = SERIO_RS232;
 	serio->write = serport_serio_write;
@@ -184,7 +174,7 @@ static ssize_t serport_ldisc_read(struct tty_struct * tty, struct file * file, u
 	serio->dev.parent = tty->dev;
 
 	serio_register_port(serport->serio);
-	printk(KERN_INFO "serio: Serial port %s\n", tty_name(tty, name));
+	printk(KERN_INFO "serio: Serial port %s\n", tty_name(tty));
 
 	wait_event_interruptible(serport->wait, test_bit(SERPORT_DEAD, &serport->flags));
 	serio_unregister_port(serport->serio);
@@ -196,38 +186,73 @@ static ssize_t serport_ldisc_read(struct tty_struct * tty, struct file * file, u
 	return 0;
 }
 
+static void serport_set_type(struct tty_struct *tty, unsigned long type)
+{
+	struct serport *serport = tty->disc_data;
+
+	serport->id.proto = type & 0x000000ff;
+	serport->id.id    = (type & 0x0000ff00) >> 8;
+	serport->id.extra = (type & 0x00ff0000) >> 16;
+}
+
 /*
  * serport_ldisc_ioctl() allows to set the port protocol, and device ID
  */
 
-static int serport_ldisc_ioctl(struct tty_struct * tty, struct file * file, unsigned int cmd, unsigned long arg)
+static int serport_ldisc_ioctl(struct tty_struct *tty, unsigned int cmd,
+			       unsigned long arg)
 {
-	struct serport *serport = (struct serport*) tty->disc_data;
-	unsigned long type;
-
 	if (cmd == SPIOCSTYPE) {
+		unsigned long type;
+
 		if (get_user(type, (unsigned long __user *) arg))
 			return -EFAULT;
 
-		serport->id.proto = type & 0x000000ff;
-		serport->id.id	  = (type & 0x0000ff00) >> 8;
-		serport->id.extra = (type & 0x00ff0000) >> 16;
-
+		serport_set_type(tty, type);
 		return 0;
 	}
 
 	return -EINVAL;
 }
 
+#ifdef CONFIG_COMPAT
+#define COMPAT_SPIOCSTYPE	_IOW('q', 0x01, compat_ulong_t)
+static int serport_ldisc_compat_ioctl(struct tty_struct *tty,
+				       unsigned int cmd, unsigned long arg)
+{
+	if (cmd == COMPAT_SPIOCSTYPE) {
+		void __user *uarg = compat_ptr(arg);
+		compat_ulong_t compat_type;
+
+		if (get_user(compat_type, (compat_ulong_t __user *)uarg))
+			return -EFAULT;
+
+		serport_set_type(tty, compat_type);
+		return 0;
+	}
+
+	return -EINVAL;
+}
+#endif
+
+static void serport_ldisc_hangup(struct tty_struct *tty)
+{
+	struct serport *serport = tty->disc_data;
+
+	scoped_guard(spinlock_irqsave, &serport->lock)
+		set_bit(SERPORT_DEAD, &serport->flags);
+
+	wake_up_interruptible(&serport->wait);
+}
+
 static void serport_ldisc_write_wakeup(struct tty_struct * tty)
 {
-	struct serport *serport = (struct serport *) tty->disc_data;
-	unsigned long flags;
+	struct serport *serport = tty->disc_data;
 
-	spin_lock_irqsave(&serport->lock, flags);
+	guard(spinlock_irqsave)(&serport->lock);
+
 	if (test_bit(SERPORT_ACTIVE, &serport->flags))
 		serio_drv_write_wakeup(serport->serio);
-	spin_unlock_irqrestore(&serport->lock, flags);
 }
 
 /*
@@ -236,12 +261,17 @@ static void serport_ldisc_write_wakeup(struct tty_struct * tty)
 
 static struct tty_ldisc_ops serport_ldisc = {
 	.owner =	THIS_MODULE,
+	.num =		N_MOUSE,
 	.name =		"input",
 	.open =		serport_ldisc_open,
 	.close =	serport_ldisc_close,
 	.read =		serport_ldisc_read,
 	.ioctl =	serport_ldisc_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl =	serport_ldisc_compat_ioctl,
+#endif
 	.receive_buf =	serport_ldisc_receive,
+	.hangup =	serport_ldisc_hangup,
 	.write_wakeup =	serport_ldisc_write_wakeup
 };
 
@@ -252,7 +282,7 @@ static struct tty_ldisc_ops serport_ldisc = {
 static int __init serport_init(void)
 {
 	int retval;
-	retval = tty_register_ldisc(N_MOUSE, &serport_ldisc);
+	retval = tty_register_ldisc(&serport_ldisc);
 	if (retval)
 		printk(KERN_ERR "serport.c: Error registering line discipline.\n");
 
@@ -261,7 +291,7 @@ static int __init serport_init(void)
 
 static void __exit serport_exit(void)
 {
-	tty_unregister_ldisc(N_MOUSE);
+	tty_unregister_ldisc(&serport_ldisc);
 }
 
 module_init(serport_init);

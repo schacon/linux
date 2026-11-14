@@ -1,12 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Controller of read/write threads for virtio-trace
  *
  * Copyright (C) 2012 Hitachi, Ltd.
  * Created by Yoshihiro Yunomae <yoshihiro.yunomae.ez@hitachi.com>
  *            Masami Hiramatsu <masami.hiramatsu.pt@hitachi.com>
- *
- * Licensed under GPL version 2 only.
- *
  */
 
 #define _GNU_SOURCE
@@ -77,7 +75,7 @@ static int wait_order(int ctl_fd)
 
 		if (ret)
 			break;
-	};
+	}
 
 	return ret;
 
@@ -86,7 +84,7 @@ error:
 }
 
 /*
- * contol read/write threads by handling global_run_operation
+ * control read/write threads by handling global_run_operation
  */
 void *rw_ctl_loop(int ctl_fd)
 {

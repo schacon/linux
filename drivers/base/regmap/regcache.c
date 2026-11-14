@@ -1,109 +1,185 @@
-/*
- * Register cache access API
- *
- * Copyright 2011 Wolfson Microelectronics plc
- *
- * Author: Dimitris Papastamos <dp@opensource.wolfsonmicro.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
+// SPDX-License-Identifier: GPL-2.0
+//
+// Register cache access API
+//
+// Copyright 2011 Wolfson Microelectronics plc
+//
+// Author: Dimitris Papastamos <dp@opensource.wolfsonmicro.com>
 
-#include <linux/slab.h>
-#include <linux/export.h>
-#include <linux/device.h>
-#include <trace/events/regmap.h>
 #include <linux/bsearch.h>
+#include <linux/device.h>
+#include <linux/export.h>
+#include <linux/slab.h>
 #include <linux/sort.h>
 
+#include "trace.h"
 #include "internal.h"
 
 static const struct regcache_ops *cache_types[] = {
+	&regcache_flat_sparse_ops,
 	&regcache_rbtree_ops,
-	&regcache_lzo_ops,
+	&regcache_maple_ops,
 	&regcache_flat_ops,
 };
 
-static int regcache_hw_init(struct regmap *map)
+static int regcache_default_sync(struct regmap *map, unsigned int min, unsigned int max);
+
+static int regcache_defaults_cmp(const void *a, const void *b)
 {
-	int i, j;
-	int ret;
-	int count;
-	unsigned int val;
-	void *tmp_buf;
+	const struct reg_default *x = a;
+	const struct reg_default *y = b;
 
-	if (!map->num_reg_defaults_raw)
-		return -EINVAL;
+	if (x->reg > y->reg)
+		return 1;
+	else if (x->reg < y->reg)
+		return -1;
+	else
+		return 0;
+}
 
-	if (!map->reg_defaults_raw) {
-		u32 cache_bypass = map->cache_bypass;
-		dev_warn(map->dev, "No cache defaults, reading back from HW\n");
+void regcache_sort_defaults(struct reg_default *defaults, unsigned int ndefaults)
+{
+	sort(defaults, ndefaults, sizeof(*defaults),
+	     regcache_defaults_cmp, NULL);
+}
+EXPORT_SYMBOL_GPL(regcache_sort_defaults);
 
-		/* Bypass the cache access till data read from HW*/
-		map->cache_bypass = 1;
-		tmp_buf = kmalloc(map->cache_size_raw, GFP_KERNEL);
-		if (!tmp_buf)
-			return -EINVAL;
-		ret = regmap_raw_read(map, 0, tmp_buf,
-				      map->num_reg_defaults_raw);
-		map->cache_bypass = cache_bypass;
-		if (ret < 0) {
-			kfree(tmp_buf);
-			return ret;
-		}
-		map->reg_defaults_raw = tmp_buf;
-		map->cache_free = 1;
-	}
+static int regcache_count_cacheable_registers(struct regmap *map)
+{
+	unsigned int count;
 
 	/* calculate the size of reg_defaults */
-	for (count = 0, i = 0; i < map->num_reg_defaults_raw; i++) {
-		val = regcache_get_val(map, map->reg_defaults_raw, i);
-		if (regmap_volatile(map, i * map->reg_stride))
-			continue;
-		count++;
-	}
+	count = 0;
+	for (unsigned int i = 0; i < map->num_reg_defaults_raw; i++)
+		if (regmap_readable(map, i * map->reg_stride) &&
+		    !regmap_volatile(map, i * map->reg_stride))
+			count++;
 
-	map->reg_defaults = kmalloc(count * sizeof(struct reg_default),
-				      GFP_KERNEL);
-	if (!map->reg_defaults) {
-		ret = -ENOMEM;
-		goto err_free;
+	return count;
+}
+
+static int regcache_hw_init(struct regmap *map, int count)
+{
+	int ret;
+	unsigned int reg, val;
+	void *tmp_buf;
+
+	if (!count)
+		return 0;
+
+	if (!map->reg_defaults_raw) {
+		bool cache_bypass = map->cache_bypass;
+		dev_dbg(map->dev, "No cache defaults, reading back from HW\n");
+
+		/* Bypass the cache access till data read from HW */
+		map->cache_bypass = true;
+		tmp_buf = kmalloc(map->cache_size_raw, GFP_KERNEL);
+		if (!tmp_buf)
+			return -ENOMEM;
+		ret = regmap_raw_read(map, 0, tmp_buf,
+				      map->cache_size_raw);
+		map->cache_bypass = cache_bypass;
+		if (ret == 0) {
+			map->reg_defaults_raw = tmp_buf;
+			map->cache_free = true;
+		} else {
+			kfree(tmp_buf);
+		}
 	}
 
 	/* fill the reg_defaults */
-	map->num_reg_defaults = count;
-	for (i = 0, j = 0; i < map->num_reg_defaults_raw; i++) {
-		val = regcache_get_val(map, map->reg_defaults_raw, i);
-		if (regmap_volatile(map, i * map->reg_stride))
+	for (unsigned int i = 0, j = 0; i < map->num_reg_defaults_raw; i++) {
+		reg = i * map->reg_stride;
+
+		if (!regmap_readable(map, reg))
 			continue;
-		map->reg_defaults[j].reg = i * map->reg_stride;
+
+		if (regmap_volatile(map, reg))
+			continue;
+
+		if (map->reg_defaults_raw) {
+			val = regcache_get_val(map, map->reg_defaults_raw, i);
+		} else {
+			bool cache_bypass = map->cache_bypass;
+
+			map->cache_bypass = true;
+			ret = regmap_read(map, reg, &val);
+			map->cache_bypass = cache_bypass;
+			if (ret != 0) {
+				dev_err(map->dev, "Failed to read %x: %d\n",
+					reg, ret);
+				return ret;
+			}
+		}
+
+		map->reg_defaults[j].reg = reg;
 		map->reg_defaults[j].def = val;
 		j++;
 	}
 
 	return 0;
+}
 
-err_free:
+static void regcache_hw_exit(struct regmap *map)
+{
 	if (map->cache_free)
 		kfree(map->reg_defaults_raw);
+}
 
-	return ret;
+static int regcache_locked_op(struct regmap *map,
+			      int (*op)(struct regmap *map),
+			      const char *action)
+{
+	if (!op)
+		return 0;
+
+	dev_dbg(map->dev, "%s %s cache\n", action, map->cache_ops->name);
+	guard(regmap)(map);
+	return op(map);
+}
+
+static int __regcache_sync(struct regmap *map, unsigned int min, unsigned int max)
+{
+	if (!map->cache_dirty)
+		return 0;
+
+	if (map->cache_ops->sync)
+		return map->cache_ops->sync(map, min, max);
+
+	return regcache_default_sync(map, min, max);
 }
 
 int regcache_init(struct regmap *map, const struct regmap_config *config)
 {
+	bool sort_defaults = false;
+	unsigned int reg_prev = 0;
+	int count = 0;
 	int ret;
 	int i;
 	void *tmp_buf;
 
-	for (i = 0; i < config->num_reg_defaults; i++)
+	if (map->cache_type == REGCACHE_NONE) {
+		if (config->reg_defaults || config->num_reg_defaults_raw)
+			dev_warn(map->dev,
+				 "No cache used with register defaults set!\n");
+
+		map->cache_bypass = true;
+		return 0;
+	}
+
+	if (!!config->reg_defaults != !!config->num_reg_defaults) {
+		dev_err(map->dev, "reg_defaults and num_reg_defaults must both be specified\n");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < config->num_reg_defaults; i++) {
 		if (config->reg_defaults[i].reg % map->reg_stride)
 			return -EINVAL;
 
-	if (map->cache_type == REGCACHE_NONE) {
-		map->cache_bypass = true;
-		return 0;
+		if (reg_prev > config->reg_defaults[i].reg)
+			sort_defaults = true;
+
+		reg_prev = config->reg_defaults[i].reg;
 	}
 
 	for (i = 0; i < ARRAY_SIZE(cache_types); i++)
@@ -111,7 +187,7 @@ int regcache_init(struct regmap *map, const struct regmap_config *config)
 			break;
 
 	if (i == ARRAY_SIZE(cache_types)) {
-		dev_err(map->dev, "Could not match compress type: %d\n",
+		dev_err(map->dev, "Could not match cache type: %d\n",
 			map->cache_type);
 		return -EINVAL;
 	}
@@ -119,17 +195,13 @@ int regcache_init(struct regmap *map, const struct regmap_config *config)
 	map->num_reg_defaults = config->num_reg_defaults;
 	map->num_reg_defaults_raw = config->num_reg_defaults_raw;
 	map->reg_defaults_raw = config->reg_defaults_raw;
-	map->cache_word_size = DIV_ROUND_UP(config->val_bits, 8);
+	map->cache_word_size = BITS_TO_BYTES(config->val_bits);
 	map->cache_size_raw = map->cache_word_size * config->num_reg_defaults_raw;
-	map->cache_present = NULL;
-	map->cache_present_nbits = 0;
 
 	map->cache = NULL;
 	map->cache_ops = cache_types[i];
 
-	if (!map->cache_ops->read ||
-	    !map->cache_ops->write ||
-	    !map->cache_ops->name)
+	if (!map->cache_ops->read || !map->cache_ops->write || !map->cache_ops->name)
 		return -EINVAL;
 
 	/* We still need to ensure that the reg_defaults
@@ -137,39 +209,73 @@ int regcache_init(struct regmap *map, const struct regmap_config *config)
 	 * a copy of it.
 	 */
 	if (config->reg_defaults) {
-		if (!map->num_reg_defaults)
-			return -EINVAL;
-		tmp_buf = kmemdup(config->reg_defaults, map->num_reg_defaults *
-				  sizeof(struct reg_default), GFP_KERNEL);
+		tmp_buf = kmemdup_array(config->reg_defaults, map->num_reg_defaults,
+					sizeof(*map->reg_defaults), GFP_KERNEL);
 		if (!tmp_buf)
 			return -ENOMEM;
+
+		/* regcache_lookup_reg() bsearch()es this array */
+		if (sort_defaults) {
+			dev_warn(map->dev,
+				 "Driver needs fixing: Unsorted reg_defaults, sorting the copy\n");
+			regcache_sort_defaults(tmp_buf, map->num_reg_defaults);
+		}
 		map->reg_defaults = tmp_buf;
 	} else if (map->num_reg_defaults_raw) {
-		/* Some devices such as PMICs don't have cache defaults,
-		 * we cope with this by reading back the HW registers and
-		 * crafting the cache defaults by hand.
-		 */
-		ret = regcache_hw_init(map);
-		if (ret < 0)
-			return ret;
+		count = regcache_count_cacheable_registers(map);
+		if (!count)
+			map->cache_bypass = true;
+
+		/* All registers are unreadable or volatile, so just bypass */
+		if (map->cache_bypass)
+			return 0;
+
+		map->num_reg_defaults = count;
+		map->reg_defaults = kmalloc_objs(struct reg_default, count);
+		if (!map->reg_defaults)
+			return -ENOMEM;
 	}
 
-	if (!map->max_register)
-		map->max_register = map->num_reg_defaults_raw;
+	if (!map->max_register_is_set && map->num_reg_defaults_raw) {
+		map->max_register = (map->num_reg_defaults_raw  - 1) * map->reg_stride;
+		map->max_register_is_set = true;
+	}
 
 	if (map->cache_ops->init) {
 		dev_dbg(map->dev, "Initializing %s cache\n",
 			map->cache_ops->name);
 		ret = map->cache_ops->init(map);
 		if (ret)
-			goto err_free;
+			goto err_free_reg_defaults;
 	}
+
+	/*
+	 * Some devices such as PMICs don't have cache defaults,
+	 * we cope with this by reading back the HW registers and
+	 * crafting the cache defaults by hand.
+	 */
+	ret = regcache_hw_init(map, count);
+	if (ret)
+		goto err_exit;
+
+	if (!map->num_reg_defaults && !map->reg_default_cb)
+		return 0;
+
+	ret = regcache_locked_op(map, map->cache_ops->populate, "Populating");
+	if (ret)
+		goto err_free;
+
 	return 0;
 
 err_free:
+	regcache_hw_exit(map);
+err_exit:
+	if (map->cache_ops->exit) {
+		dev_dbg(map->dev, "Destroying %s cache\n", map->cache_ops->name);
+		map->cache_ops->exit(map);
+	}
+err_free_reg_defaults:
 	kfree(map->reg_defaults);
-	if (map->cache_free)
-		kfree(map->reg_defaults_raw);
 
 	return ret;
 }
@@ -181,20 +287,19 @@ void regcache_exit(struct regmap *map)
 
 	BUG_ON(!map->cache_ops);
 
-	kfree(map->cache_present);
-	kfree(map->reg_defaults);
-	if (map->cache_free)
-		kfree(map->reg_defaults_raw);
-
+	regcache_hw_exit(map);
 	if (map->cache_ops->exit) {
 		dev_dbg(map->dev, "Destroying %s cache\n",
 			map->cache_ops->name);
 		map->cache_ops->exit(map);
 	}
+
+	kfree(map->reg_defaults);
+	map->reg_defaults = NULL;
 }
 
 /**
- * regcache_read: Fetch the value of a given register from the cache.
+ * regcache_read - Fetch the value of a given register from the cache.
  *
  * @map: map to configure.
  * @reg: The register index.
@@ -208,7 +313,7 @@ int regcache_read(struct regmap *map,
 	int ret;
 
 	if (map->cache_type == REGCACHE_NONE)
-		return -ENOSYS;
+		return -EINVAL;
 
 	BUG_ON(!map->cache_ops);
 
@@ -216,7 +321,7 @@ int regcache_read(struct regmap *map,
 		ret = map->cache_ops->read(map, reg, value);
 
 		if (ret == 0)
-			trace_regmap_reg_read_cache(map->dev, reg, *value);
+			trace_regmap_reg_read_cache(map, reg, *value);
 
 		return ret;
 	}
@@ -225,7 +330,7 @@ int regcache_read(struct regmap *map,
 }
 
 /**
- * regcache_write: Set the value of a given register in the cache.
+ * regcache_write - Set the value of a given register in the cache.
  *
  * @map: map to configure.
  * @reg: The register index.
@@ -241,17 +346,74 @@ int regcache_write(struct regmap *map,
 
 	BUG_ON(!map->cache_ops);
 
-	if (!regmap_writeable(map, reg))
-		return -EIO;
-
 	if (!regmap_volatile(map, reg))
 		return map->cache_ops->write(map, reg, value);
 
 	return 0;
 }
 
+bool regcache_reg_needs_sync(struct regmap *map, unsigned int reg,
+			     unsigned int val)
+{
+	int ret;
+
+	if (!regmap_writeable(map, reg))
+		return false;
+
+	/* If we don't know the chip just got reset, then sync everything. */
+	if (!map->no_sync_defaults)
+		return true;
+
+	/* Is this the hardware default?  If so skip. */
+	ret = regcache_lookup_reg(map, reg);
+	if (ret >= 0 && val == map->reg_defaults[ret].def)
+		return false;
+	return true;
+}
+
+static int regcache_default_sync(struct regmap *map, unsigned int min,
+				 unsigned int max)
+{
+	unsigned int reg;
+
+	for (reg = min; reg <= max; reg += map->reg_stride) {
+		unsigned int val;
+		int ret;
+
+		if (regmap_volatile(map, reg) ||
+		    !regmap_writeable(map, reg))
+			continue;
+
+		ret = regcache_read(map, reg, &val);
+		if (ret == -ENOENT)
+			continue;
+		if (ret)
+			return ret;
+
+		if (!regcache_reg_needs_sync(map, reg, val))
+			continue;
+
+		map->cache_bypass = true;
+		ret = _regmap_write(map, reg, val);
+		map->cache_bypass = false;
+		if (ret) {
+			dev_err(map->dev, "Unable to sync register %#x. %d\n",
+				reg, ret);
+			return ret;
+		}
+		dev_dbg(map->dev, "Synced register %#x, value %#x\n", reg, val);
+	}
+
+	return 0;
+}
+
+static int rbtree_all(const void *key, const struct rb_node *node)
+{
+	return 0;
+}
+
 /**
- * regcache_sync: Sync the register cache with the hardware.
+ * regcache_sync - Sync the register cache with the hardware.
  *
  * @map: map to configure.
  *
@@ -259,61 +421,99 @@ int regcache_write(struct regmap *map,
  * volatile.  In general drivers can choose not to use the provided
  * syncing functionality if they so require.
  *
+ * This pushes cached changes made while cache_only (e.g. suspend) down
+ * to hardware. The caller must disable cache_only before calling this
+ * function.
+ *
  * Return a negative value on failure, 0 on success.
  */
 int regcache_sync(struct regmap *map)
 {
-	int ret = 0;
+	int sync_ret = 0;
+	int selector_ret = 0;
 	unsigned int i;
 	const char *name;
-	unsigned int bypass;
+	bool bypass;
+	struct rb_node *node;
 
-	BUG_ON(!map->cache_ops || !map->cache_ops->sync);
+	if (WARN_ON(map->cache_type == REGCACHE_NONE))
+		return -EINVAL;
 
-	map->lock(map);
+	BUG_ON(!map->cache_ops);
+
+	map->lock(map->lock_arg);
+
+	if (WARN_ON(map->cache_only)) {
+		map->unlock(map->lock_arg);
+		return -EINVAL;
+	}
+
 	/* Remember the initial bypass state */
 	bypass = map->cache_bypass;
 	dev_dbg(map->dev, "Syncing %s cache\n",
 		map->cache_ops->name);
 	name = map->cache_ops->name;
-	trace_regcache_sync(map->dev, name, "start");
+	trace_regcache_sync(map, name, "start");
 
 	if (!map->cache_dirty)
 		goto out;
 
 	/* Apply any patch first */
-	map->cache_bypass = 1;
+	map->cache_bypass = true;
 	for (i = 0; i < map->patch_regs; i++) {
-		if (map->patch[i].reg % map->reg_stride) {
-			ret = -EINVAL;
-			goto out;
-		}
-		ret = _regmap_write(map, map->patch[i].reg, map->patch[i].def);
-		if (ret != 0) {
+		sync_ret = _regmap_write(map, map->patch[i].reg, map->patch[i].def);
+		if (sync_ret != 0) {
 			dev_err(map->dev, "Failed to write %x = %x: %d\n",
-				map->patch[i].reg, map->patch[i].def, ret);
+				map->patch[i].reg, map->patch[i].def, sync_ret);
 			goto out;
 		}
 	}
-	map->cache_bypass = 0;
+	map->cache_bypass = false;
 
-	ret = map->cache_ops->sync(map, 0, map->max_register);
-
-	if (ret == 0)
+	sync_ret = __regcache_sync(map, 0, map->max_register);
+	if (sync_ret == 0)
 		map->cache_dirty = false;
 
 out:
-	trace_regcache_sync(map->dev, name, "stop");
 	/* Restore the bypass state */
 	map->cache_bypass = bypass;
-	map->unlock(map);
+	map->no_sync_defaults = false;
 
-	return ret;
+	/*
+	 * If we did any paging with cache bypassed and a cached
+	 * paging register then the register and cache state might
+	 * have gone out of sync, force writes of all the paging
+	 * registers.
+	 */
+	rb_for_each(node, NULL, &map->range_tree, rbtree_all) {
+		struct regmap_range_node *this =
+			rb_entry(node, struct regmap_range_node, node);
+
+		/* If there's nothing in the cache there's nothing to sync */
+		if (regcache_read(map, this->selector_reg, &i) != 0)
+			continue;
+
+		selector_ret = _regmap_write(map, this->selector_reg, i);
+		if (selector_ret != 0) {
+			map->cache_dirty = true;
+			dev_err(map->dev, "Failed to write %x = %x: %d\n",
+				this->selector_reg, i, selector_ret);
+			break;
+		}
+	}
+
+	map->unlock(map->lock_arg);
+
+	regmap_async_complete(map);
+
+	trace_regcache_sync(map, name, "stop");
+
+	return sync_ret ? sync_ret : selector_ret;
 }
 EXPORT_SYMBOL_GPL(regcache_sync);
 
 /**
- * regcache_sync_region: Sync part  of the register cache with the hardware.
+ * regcache_sync_region - Sync part  of the register cache with the hardware.
  *
  * @map: map to sync.
  * @min: first register to sync
@@ -329,40 +529,75 @@ int regcache_sync_region(struct regmap *map, unsigned int min,
 {
 	int ret = 0;
 	const char *name;
-	unsigned int bypass;
+	bool bypass;
 
-	BUG_ON(!map->cache_ops || !map->cache_ops->sync);
+	if (WARN_ON(map->cache_type == REGCACHE_NONE))
+		return -EINVAL;
 
-	map->lock(map);
+	BUG_ON(!map->cache_ops);
 
+	map->lock(map->lock_arg);
+
+	if (WARN_ON(map->cache_only)) {
+		map->unlock(map->lock_arg);
+		return -EINVAL;
+	}
 	/* Remember the initial bypass state */
 	bypass = map->cache_bypass;
 
 	name = map->cache_ops->name;
-	dev_dbg(map->dev, "Syncing %s cache from %d-%d\n", name, min, max);
+	dev_dbg(map->dev, "Syncing %s cache from %#x-%#x\n", name, min, max);
 
-	trace_regcache_sync(map->dev, name, "start region");
+	trace_regcache_sync(map, name, "start region");
 
-	if (!map->cache_dirty)
-		goto out;
+	map->async = true;
 
-	ret = map->cache_ops->sync(map, min, max);
+	ret = __regcache_sync(map, min, max);
 
-out:
-	trace_regcache_sync(map->dev, name, "stop region");
 	/* Restore the bypass state */
 	map->cache_bypass = bypass;
-	map->unlock(map);
+	map->async = false;
+	map->no_sync_defaults = false;
+	map->unlock(map->lock_arg);
+
+	regmap_async_complete(map);
+
+	trace_regcache_sync(map, name, "stop region");
 
 	return ret;
 }
 EXPORT_SYMBOL_GPL(regcache_sync_region);
 
 /**
- * regcache_cache_only: Put a register map into cache only mode
+ * regcache_drop_region - Discard part of the register cache
+ *
+ * @map: map to operate on
+ * @min: first register to discard
+ * @max: last register to discard
+ *
+ * Discard part of the register cache.
+ *
+ * Return a negative value on failure, 0 on success.
+ */
+int regcache_drop_region(struct regmap *map, unsigned int min,
+			 unsigned int max)
+{
+	if (!map->cache_ops || !map->cache_ops->drop)
+		return -EINVAL;
+
+	guard(regmap)(map);
+
+	trace_regcache_drop_region(map, min, max);
+
+	return map->cache_ops->drop(map, min, max);
+}
+EXPORT_SYMBOL_GPL(regcache_drop_region);
+
+/**
+ * regcache_cache_only - Put a register map into cache only mode
  *
  * @map: map to configure
- * @cache_only: flag if changes should be written to the hardware
+ * @enable: flag if changes should be written to the hardware
  *
  * When a register map is marked as cache only writes to the register
  * map API will only update the register cache, they will not cause
@@ -372,121 +607,108 @@ EXPORT_SYMBOL_GPL(regcache_sync_region);
  */
 void regcache_cache_only(struct regmap *map, bool enable)
 {
-	map->lock(map);
-	WARN_ON(map->cache_bypass && enable);
+	guard(regmap)(map);
+	WARN_ON(map->cache_type != REGCACHE_NONE &&
+		map->cache_bypass && enable);
 	map->cache_only = enable;
-	trace_regmap_cache_only(map->dev, enable);
-	map->unlock(map);
+	trace_regmap_cache_only(map, enable);
 }
 EXPORT_SYMBOL_GPL(regcache_cache_only);
 
 /**
- * regcache_mark_dirty: Mark the register cache as dirty
+ * regcache_mark_dirty - Indicate that HW registers were reset to default values
  *
  * @map: map to mark
  *
- * Mark the register cache as dirty, for example due to the device
- * having been powered down for suspend.  If the cache is not marked
- * as dirty then the cache sync will be suppressed.
+ * Inform regcache that the device has been powered down or reset, so that
+ * on resume, regcache_sync() knows to write out all non-default values
+ * stored in the cache.
+ *
+ * If this function is not called, regcache_sync() will assume that
+ * the hardware state still matches the cache state, modulo any writes that
+ * happened when cache_only was true.
  */
 void regcache_mark_dirty(struct regmap *map)
 {
-	map->lock(map);
+	guard(regmap)(map);
 	map->cache_dirty = true;
-	map->unlock(map);
+	map->no_sync_defaults = true;
 }
 EXPORT_SYMBOL_GPL(regcache_mark_dirty);
 
 /**
- * regcache_cache_bypass: Put a register map into cache bypass mode
+ * regcache_cache_bypass - Put a register map into cache bypass mode
  *
  * @map: map to configure
- * @cache_bypass: flag if changes should not be written to the hardware
+ * @enable: flag if changes should not be written to the cache
  *
  * When a register map is marked with the cache bypass option, writes
- * to the register map API will only update the hardware and not the
+ * to the register map API will only update the hardware and not
  * the cache directly.  This is useful when syncing the cache back to
  * the hardware.
  */
 void regcache_cache_bypass(struct regmap *map, bool enable)
 {
-	map->lock(map);
+	guard(regmap)(map);
 	WARN_ON(map->cache_only && enable);
 	map->cache_bypass = enable;
-	trace_regmap_cache_bypass(map->dev, enable);
-	map->unlock(map);
+	trace_regmap_cache_bypass(map, enable);
 }
 EXPORT_SYMBOL_GPL(regcache_cache_bypass);
 
-int regcache_set_reg_present(struct regmap *map, unsigned int reg)
+/**
+ * regcache_reg_cached - Check if a register is cached
+ *
+ * @map: map to check
+ * @reg: register to check
+ *
+ * Reports if a register is cached.
+ */
+bool regcache_reg_cached(struct regmap *map, unsigned int reg)
 {
-	unsigned long *cache_present;
-	unsigned int cache_present_size;
-	unsigned int nregs;
-	int i;
+	unsigned int val;
+	int ret;
 
-	nregs = reg + 1;
-	cache_present_size = BITS_TO_LONGS(nregs);
-	cache_present_size *= sizeof(long);
+	guard(regmap)(map);
 
-	if (!map->cache_present) {
-		cache_present = kmalloc(cache_present_size, GFP_KERNEL);
-		if (!cache_present)
-			return -ENOMEM;
-		bitmap_zero(cache_present, nregs);
-		map->cache_present = cache_present;
-		map->cache_present_nbits = nregs;
-	}
+	ret = regcache_read(map, reg, &val);
 
-	if (nregs > map->cache_present_nbits) {
-		cache_present = krealloc(map->cache_present,
-					 cache_present_size, GFP_KERNEL);
-		if (!cache_present)
-			return -ENOMEM;
-		for (i = 0; i < nregs; i++)
-			if (i >= map->cache_present_nbits)
-				clear_bit(i, cache_present);
-		map->cache_present = cache_present;
-		map->cache_present_nbits = nregs;
-	}
-
-	set_bit(reg, map->cache_present);
-	return 0;
+	return ret == 0;
 }
+EXPORT_SYMBOL_GPL(regcache_reg_cached);
 
-bool regcache_set_val(struct regmap *map, void *base, unsigned int idx,
+void regcache_set_val(struct regmap *map, void *base, unsigned int idx,
 		      unsigned int val)
 {
-	if (regcache_get_val(map, base, idx) == val)
-		return true;
-
 	/* Use device native format if possible */
 	if (map->format.format_val) {
 		map->format.format_val(base + (map->cache_word_size * idx),
 				       val, 0);
-		return false;
+		return;
 	}
 
 	switch (map->cache_word_size) {
 	case 1: {
 		u8 *cache = base;
+
 		cache[idx] = val;
 		break;
 	}
 	case 2: {
 		u16 *cache = base;
+
 		cache[idx] = val;
 		break;
 	}
 	case 4: {
 		u32 *cache = base;
+
 		cache[idx] = val;
 		break;
 	}
 	default:
 		BUG();
 	}
-	return false;
 }
 
 unsigned int regcache_get_val(struct regmap *map, const void *base,
@@ -503,14 +725,17 @@ unsigned int regcache_get_val(struct regmap *map, const void *base,
 	switch (map->cache_word_size) {
 	case 1: {
 		const u8 *cache = base;
+
 		return cache[idx];
 	}
 	case 2: {
 		const u16 *cache = base;
+
 		return cache[idx];
 	}
 	case 4: {
 		const u32 *cache = base;
+
 		return cache[idx];
 	}
 	default:
@@ -518,14 +743,6 @@ unsigned int regcache_get_val(struct regmap *map, const void *base,
 	}
 	/* unreachable */
 	return -1;
-}
-
-static int regcache_default_cmp(const void *a, const void *b)
-{
-	const struct reg_default *_a = a;
-	const struct reg_default *_b = b;
-
-	return _a->reg - _b->reg;
 }
 
 int regcache_lookup_reg(struct regmap *map, unsigned int reg)
@@ -537,15 +754,48 @@ int regcache_lookup_reg(struct regmap *map, unsigned int reg)
 	key.def = 0;
 
 	r = bsearch(&key, map->reg_defaults, map->num_reg_defaults,
-		    sizeof(struct reg_default), regcache_default_cmp);
+		    sizeof(struct reg_default), regcache_defaults_cmp);
 
 	if (r)
 		return r - map->reg_defaults;
-	else
-		return -ENOENT;
+
+	return -ENOENT;
+}
+
+static bool regcache_reg_present(unsigned long *cache_present, unsigned int idx)
+{
+	if (!cache_present)
+		return true;
+
+	return test_bit(idx, cache_present);
+}
+
+int regcache_sync_val(struct regmap *map, unsigned int reg, unsigned int val)
+{
+	int ret;
+
+	if (!regcache_reg_needs_sync(map, reg, val))
+		return 0;
+
+	map->cache_bypass = true;
+
+	ret = _regmap_write(map, reg, val);
+
+	map->cache_bypass = false;
+
+	if (ret != 0) {
+		dev_err(map->dev, "Unable to sync register %#x. %d\n",
+			reg, ret);
+		return ret;
+	}
+	dev_dbg(map->dev, "Synced register %#x, value %#x\n",
+		reg, val);
+
+	return 0;
 }
 
 static int regcache_sync_block_single(struct regmap *map, void *block,
+				      unsigned long *cache_present,
 				      unsigned int block_base,
 				      unsigned int start, unsigned int end)
 {
@@ -555,25 +805,14 @@ static int regcache_sync_block_single(struct regmap *map, void *block,
 	for (i = start; i < end; i++) {
 		regtmp = block_base + (i * map->reg_stride);
 
-		if (!regcache_reg_present(map, regtmp))
+		if (!regcache_reg_present(cache_present, i) ||
+		    !regmap_writeable(map, regtmp))
 			continue;
 
 		val = regcache_get_val(map, block, i);
-
-		/* Is this the hardware default?  If so skip. */
-		ret = regcache_lookup_reg(map, regtmp);
-		if (ret >= 0 && val == map->reg_defaults[ret].def)
-			continue;
-
-		map->cache_bypass = 1;
-
-		ret = _regmap_write(map, regtmp, val);
-
-		map->cache_bypass = 0;
+		ret = regcache_sync_val(map, regtmp, val);
 		if (ret != 0)
 			return ret;
-		dev_dbg(map->dev, "Synced register %#x, value %#x\n",
-			regtmp, val);
 	}
 
 	return 0;
@@ -588,17 +827,19 @@ static int regcache_sync_block_raw_flush(struct regmap *map, const void **data,
 	if (*data == NULL)
 		return 0;
 
-	count = cur - base;
+	count = (cur - base) / map->reg_stride;
 
 	dev_dbg(map->dev, "Writing %zu bytes for %d registers from 0x%x-0x%x\n",
-		count * val_bytes, count, base, cur - 1);
+		count * val_bytes, count, base, cur - map->reg_stride);
 
-	map->cache_bypass = 1;
+	map->cache_bypass = true;
 
-	ret = _regmap_raw_write(map, base, *data, count * val_bytes,
-				false);
+	ret = _regmap_raw_write(map, base, *data, count * val_bytes, false);
+	if (ret)
+		dev_err(map->dev, "Unable to sync registers %#x-%#x. %d\n",
+			base, cur - map->reg_stride, ret);
 
-	map->cache_bypass = 0;
+	map->cache_bypass = false;
 
 	*data = NULL;
 
@@ -606,19 +847,21 @@ static int regcache_sync_block_raw_flush(struct regmap *map, const void **data,
 }
 
 static int regcache_sync_block_raw(struct regmap *map, void *block,
+			    unsigned long *cache_present,
 			    unsigned int block_base, unsigned int start,
 			    unsigned int end)
 {
-	unsigned int i, val;
 	unsigned int regtmp = 0;
 	unsigned int base = 0;
 	const void *data = NULL;
+	unsigned int val;
 	int ret;
 
-	for (i = start; i < end; i++) {
+	for (unsigned int i = start; i < end; i++) {
 		regtmp = block_base + (i * map->reg_stride);
 
-		if (!regcache_reg_present(map, regtmp)) {
+		if (!regcache_reg_present(cache_present, i) ||
+		    !regmap_writeable(map, regtmp)) {
 			ret = regcache_sync_block_raw_flush(map, &data,
 							    base, regtmp);
 			if (ret != 0)
@@ -627,10 +870,7 @@ static int regcache_sync_block_raw(struct regmap *map, void *block,
 		}
 
 		val = regcache_get_val(map, block, i);
-
-		/* Is this the hardware default?  If so skip. */
-		ret = regcache_lookup_reg(map, regtmp);
-		if (ret >= 0 && val == map->reg_defaults[ret].def) {
+		if (!regcache_reg_needs_sync(map, regtmp, val)) {
 			ret = regcache_sync_block_raw_flush(map, &data,
 							    base, regtmp);
 			if (ret != 0)
@@ -644,17 +884,19 @@ static int regcache_sync_block_raw(struct regmap *map, void *block,
 		}
 	}
 
-	return regcache_sync_block_raw_flush(map, &data, base, regtmp);
+	return regcache_sync_block_raw_flush(map, &data, base, regtmp +
+			map->reg_stride);
 }
 
 int regcache_sync_block(struct regmap *map, void *block,
+			unsigned long *cache_present,
 			unsigned int block_base, unsigned int start,
 			unsigned int end)
 {
-	if (regmap_can_raw_write(map))
-		return regcache_sync_block_raw(map, block, block_base,
-					       start, end);
-	else
-		return regcache_sync_block_single(map, block, block_base,
-						  start, end);
+	if (regmap_can_raw_write(map) && !map->use_single_write)
+		return regcache_sync_block_raw(map, block, cache_present,
+					       block_base, start, end);
+
+	return regcache_sync_block_single(map, block, cache_present,
+					  block_base, start, end);
 }

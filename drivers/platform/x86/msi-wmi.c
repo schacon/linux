@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * MSI WMI hotkeys
  *
  * Copyright (C) 2009 Novell <trenn@suse.de>
  *
  * Most stuff taken over from hp-wmi
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -29,6 +16,7 @@
 #include <linux/backlight.h>
 #include <linux/slab.h>
 #include <linux/module.h>
+#include <acpi/video.h>
 
 MODULE_AUTHOR("Thomas Renninger <trenn@suse.de>");
 MODULE_DESCRIPTION("MSI laptop WMI hotkeys driver");
@@ -45,19 +33,27 @@ MODULE_ALIAS("wmi:" MSIWMI_MSI_EVENT_GUID);
 MODULE_ALIAS("wmi:" MSIWMI_WIND_EVENT_GUID);
 
 enum msi_scancodes {
-	/* Generic MSI keys (not present on MSI Wind) */
-	MSI_KEY_BRIGHTNESSUP	= 0xD0,
-	MSI_KEY_BRIGHTNESSDOWN,
-	MSI_KEY_VOLUMEUP,
-	MSI_KEY_VOLUMEDOWN,
-	MSI_KEY_MUTE,
-	/* MSI Wind keys */
 	WIND_KEY_TOUCHPAD	= 0x08,	/* Fn+F3 touchpad toggle */
+	WIND_KEY_FN_NB		= 0x0b,
+	WIND_KEY_MICMUTE_NB	= 0x19,
+	WIND_KEY_SETTINGS_NB	= 0x1d,
+	CLAW_KEY_VOLUMEDOWN	= 0x21,
+	WIND_KEY_MUTE_NB	= 0x23,
+	CLAW_KEY_CENTER		= 0x29,	/* MSI M-Center main menu */
+	CLAW_KEY_QUICK_LONG	= 0x2a,	/* MSI M-Center quick access long hold */
+	CLAW_KEY_VOLUMEUP	= 0x32,
 	WIND_KEY_BLUETOOTH	= 0x56,	/* Fn+F11 Bluetooth toggle */
-	WIND_KEY_CAMERA,		/* Fn+F6 webcam toggle */
+	WIND_KEY_CAMERA		= 0x57,	/* Fn+F6 webcam toggle */
+	CLAW_KEY_QUICK_SHORT	= 0x58,	/* MSI M-Center quick access short press */
 	WIND_KEY_WLAN		= 0x5f,	/* Fn+F11 Wi-Fi toggle */
-	WIND_KEY_TURBO,			/* Fn+F10 turbo mode toggle */
+	WIND_KEY_TURBO		= 0x60,	/* Fn+F10 turbo mode toggle */
 	WIND_KEY_ECO		= 0x69,	/* Fn+F10 ECO mode toggle */
+	WIND_KEY_BLUETOOTH_NB	= 0x78,
+	MSI_KEY_BRIGHTNESSUP	= 0xd0,
+	MSI_KEY_BRIGHTNESSDOWN	= 0xd1,
+	MSI_KEY_VOLUMEUP	= 0xd2,
+	MSI_KEY_VOLUMEDOWN	= 0xd3,
+	MSI_KEY_MUTE		= 0xd4,
 };
 static struct key_entry msi_wmi_keymap[] = {
 	{ KE_KEY, MSI_KEY_BRIGHTNESSUP,		{KEY_BRIGHTNESSUP} },
@@ -72,6 +68,13 @@ static struct key_entry msi_wmi_keymap[] = {
 	{ KE_IGNORE, WIND_KEY_CAMERA,		{KEY_CAMERA} },
 	{ KE_IGNORE, WIND_KEY_WLAN,		{KEY_WLAN} },
 
+	/* These MSI Notebook keys work without WMI. Ignore them to avoid double keycodes */
+	{ KE_IGNORE, WIND_KEY_FN_NB },
+	{ KE_IGNORE, WIND_KEY_MICMUTE_NB },
+	{ KE_IGNORE, WIND_KEY_SETTINGS_NB },
+	{ KE_IGNORE, WIND_KEY_MUTE_NB },
+	{ KE_IGNORE, WIND_KEY_BLUETOOTH_NB },
+
 	/* These are unknown WMI events found on MSI Wind */
 	{ KE_IGNORE, 0x00 },
 	{ KE_IGNORE, 0x62 },
@@ -80,6 +83,15 @@ static struct key_entry msi_wmi_keymap[] = {
 	/* These are MSI Wind keys that should be handled via WMI */
 	{ KE_KEY, WIND_KEY_TURBO,		{KEY_PROG1} },
 	{ KE_KEY, WIND_KEY_ECO,			{KEY_PROG2} },
+
+	/* These are MSI Claw keys, used for MSI M-Center in Windows */
+	{ KE_KEY, CLAW_KEY_CENTER,		{KEY_F15} },
+
+	/* These MSI Claw keys work without WMI. Ignore them to avoid double keycodes */
+	{ KE_IGNORE, CLAW_KEY_QUICK_SHORT },
+	{ KE_IGNORE, CLAW_KEY_QUICK_LONG },
+	{ KE_IGNORE, CLAW_KEY_VOLUMEUP },
+	{ KE_IGNORE, CLAW_KEY_VOLUMEDOWN },
 
 	{ KE_END, 0 }
 };
@@ -108,6 +120,8 @@ static int msi_wmi_query_block(int instance, int *ret)
 	struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
 
 	status = wmi_query_block(MSIWMI_BIOS_GUID, instance, &output);
+	if (ACPI_FAILURE(status))
+		return -EIO;
 
 	obj = output.pointer;
 
@@ -180,60 +194,64 @@ static const struct backlight_ops msi_backlight_ops = {
 	.update_status	= bl_set_status,
 };
 
-static void msi_wmi_notify(u32 value, void *context)
+static void msi_wmi_notify(union acpi_object *obj, void *context)
 {
-	struct acpi_buffer response = { ACPI_ALLOCATE_BUFFER, NULL };
-	static struct key_entry *key;
-	union acpi_object *obj;
-	acpi_status status;
+	struct key_entry *key = NULL;
+	int eventcode = 0;
 
-	status = wmi_get_event_data(value, &response);
-	if (status != AE_OK) {
-		pr_info("bad event status 0x%x\n", status);
+	if (!obj)
+		return;
+
+	switch (obj->type) {
+	case ACPI_TYPE_INTEGER:
+		eventcode = obj->integer.value;
+		pr_debug("Eventcode: 0x%x\n", eventcode);
+		break;
+	case ACPI_TYPE_BUFFER:
+		/* Field returns u8[2] here, but is u32 by spec. Allow "oversized" buffers. */
+		if (obj->buffer.length < 2)
+			return;
+
+		/* pointer[0] is key ID, pointer[1] is active state. We don't get release
+		 * events, so ignore the active state and treat as autorelease.
+		 */
+		eventcode = obj->buffer.pointer[0];
+		pr_debug("Eventcode: 0x%x\n", eventcode);
+		break;
+	default:
+		pr_info("Unknown event received\n");
 		return;
 	}
 
-	obj = (union acpi_object *)response.pointer;
+	key = sparse_keymap_entry_from_scancode(msi_wmi_input_dev, eventcode);
 
-	if (obj && obj->type == ACPI_TYPE_INTEGER) {
-		int eventcode = obj->integer.value;
-		pr_debug("Eventcode: 0x%x\n", eventcode);
-		key = sparse_keymap_entry_from_scancode(msi_wmi_input_dev,
-				eventcode);
-		if (!key) {
-			pr_info("Unknown key pressed - %x\n", eventcode);
-			goto msi_wmi_notify_exit;
+	if (!key) {
+		pr_info("Unknown key pressed - 0x%x\n", eventcode);
+		return;
+	}
+
+	if (event_wmi->quirk_last_pressed) {
+		ktime_t cur = ktime_get_real();
+		ktime_t diff = ktime_sub(cur, last_pressed);
+		/* Ignore event if any event happened in a 50 ms
+		 * timeframe -> Key press may result in 10-20 GPEs
+		 */
+		if (ktime_to_us(diff) < 1000 * 50) {
+			pr_debug("Suppressed key event 0x%X - Last press was %lld us ago\n",
+				 key->code, ktime_to_us(diff));
+			return;
 		}
+		last_pressed = cur;
+	}
 
-		if (event_wmi->quirk_last_pressed) {
-			ktime_t cur = ktime_get_real();
-			ktime_t diff = ktime_sub(cur, last_pressed);
-			/* Ignore event if any event happened in a 50 ms
-			   timeframe -> Key press may result in 10-20 GPEs */
-			if (ktime_to_us(diff) < 1000 * 50) {
-				pr_debug("Suppressed key event 0x%X - "
-					 "Last press was %lld us ago\n",
-					 key->code, ktime_to_us(diff));
-				goto msi_wmi_notify_exit;
-			}
-			last_pressed = cur;
-		}
+	/* Brightness is served via acpi video driver */
+	if (key->type == KE_KEY && !backlight &&
+	    (key->code == MSI_KEY_BRIGHTNESSUP ||
+	     key->code == MSI_KEY_BRIGHTNESSDOWN))
+		return;
 
-		if (key->type == KE_KEY &&
-		/* Brightness is served via acpi video driver */
-		(backlight ||
-		(key->code != MSI_KEY_BRIGHTNESSUP &&
-		key->code != MSI_KEY_BRIGHTNESSDOWN))) {
-			pr_debug("Send key: 0x%X - Input layer keycode: %d\n",
-				 key->code, key->keycode);
-			sparse_keymap_report_entry(msi_wmi_input_dev, key, 1,
-						   true);
-		}
-	} else
-		pr_info("Unknown event received\n");
-
-msi_wmi_notify_exit:
-	kfree(response.pointer);
+	pr_debug("Send key: 0x%X - Input layer keycode: %d\n", key->code, key->keycode);
+	sparse_keymap_report_entry(msi_wmi_input_dev, key, 1, true);
 }
 
 static int __init msi_wmi_backlight_setup(void)
@@ -280,14 +298,12 @@ static int __init msi_wmi_input_setup(void)
 	err = input_register_device(msi_wmi_input_dev);
 
 	if (err)
-		goto err_free_keymap;
+		goto err_free_dev;
 
-	last_pressed = ktime_set(0, 0);
+	last_pressed = 0;
 
 	return 0;
 
-err_free_keymap:
-	sparse_keymap_free(msi_wmi_input_dev);
 err_free_dev:
 	input_free_device(msi_wmi_input_dev);
 	return err;
@@ -320,7 +336,8 @@ static int __init msi_wmi_init(void)
 		break;
 	}
 
-	if (wmi_has_guid(MSIWMI_BIOS_GUID) && !acpi_video_backlight_support()) {
+	if (wmi_has_guid(MSIWMI_BIOS_GUID) &&
+	    acpi_video_get_backlight_type() == acpi_backlight_vendor) {
 		err = msi_wmi_backlight_setup();
 		if (err) {
 			pr_err("Unable to setup backlight device\n");
@@ -340,10 +357,8 @@ err_uninstall_handler:
 	if (event_wmi)
 		wmi_remove_notify_handler(event_wmi->guid);
 err_free_input:
-	if (event_wmi) {
-		sparse_keymap_free(msi_wmi_input_dev);
+	if (event_wmi)
 		input_unregister_device(msi_wmi_input_dev);
-	}
 	return err;
 }
 
@@ -351,11 +366,9 @@ static void __exit msi_wmi_exit(void)
 {
 	if (event_wmi) {
 		wmi_remove_notify_handler(event_wmi->guid);
-		sparse_keymap_free(msi_wmi_input_dev);
 		input_unregister_device(msi_wmi_input_dev);
 	}
-	if (backlight)
-		backlight_device_unregister(backlight);
+	backlight_device_unregister(backlight);
 }
 
 module_init(msi_wmi_init);

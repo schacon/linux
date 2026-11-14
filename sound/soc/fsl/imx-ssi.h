@@ -1,8 +1,4 @@
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- */
+/* SPDX-License-Identifier: GPL-2.0 */
 
 #ifndef _IMX_SSI_H
 #define _IMX_SSI_H
@@ -186,7 +182,7 @@
 #define DRV_NAME "imx-ssi"
 
 #include <linux/dmaengine.h>
-#include <linux/platform_data/dma-imx.h>
+#include <linux/dma/imx-dma.h>
 #include <sound/dmaengine_pcm.h>
 #include "imx-pcm.h"
 
@@ -209,11 +205,10 @@ struct imx_ssi {
 	struct snd_dmaengine_dai_dma_data dma_params_tx;
 	struct imx_dma_data filter_data_tx;
 	struct imx_dma_data filter_data_rx;
+	struct imx_pcm_fiq_params fiq_params;
 
-	int enabled;
-
-	struct platform_device *soc_platform_pdev;
-	struct platform_device *soc_platform_pdev_fiq;
+	int fiq_init;
+	int dma_init;
 };
 
 #endif /* _IMX_SSI_H */

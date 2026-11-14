@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * tps65910.h  --  TI TPS6591x
  *
@@ -6,18 +7,12 @@
  * Author: Graeme Gregory <gg@slimlogic.co.uk>
  * Author: Jorge Eduardo Candelaria <jedu@slimlogic.co.uk>
  * Author: Arnaud Deconinck <a-deconinck@ti.com>
- *
- *  This program is free software; you can redistribute it and/or modify it
- *  under  the terms of the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the License, or (at your
- *  option) any later version.
- *
  */
 
 #ifndef __LINUX_MFD_TPS65910_H
 #define __LINUX_MFD_TPS65910_H
 
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/regmap.h>
 
 /* TPS chip id list */
@@ -134,6 +129,7 @@
 
 /* RTC_CTRL_REG bitfields */
 #define TPS65910_RTC_CTRL_STOP_RTC			0x01 /*0=stop, 1=run */
+#define TPS65910_RTC_CTRL_AUTO_COMP			0x04
 #define TPS65910_RTC_CTRL_GET_TIME			0x40
 
 /* RTC_STATUS_REG bitfields */
@@ -358,8 +354,6 @@
 /*Register BBCH  (0x80) register.RegisterDescription */
 #define BBCH_BBSEL_MASK					0x06
 #define BBCH_BBSEL_SHIFT				1
-#define BBCH_BBCHEN_MASK				0x01
-#define BBCH_BBCHEN_SHIFT				0
 
 
 /*Register DCDCCTRL  (0x80) register.RegisterDescription */
@@ -755,7 +749,7 @@
 #define VDDCTRL_ST_SHIFT                                 0
 
 
-/*Register VDDCTRL_OP  (0x28) bit definitios */
+/*Register VDDCTRL_OP  (0x28) bit definitions */
 #define VDDCTRL_OP_CMD_MASK                              0x80
 #define VDDCTRL_OP_CMD_SHIFT                             7
 #define VDDCTRL_OP_SEL_MASK                              0x7F
@@ -833,6 +827,7 @@
 #define TPS65910_REG_VAUX2				10
 #define TPS65910_REG_VAUX33				11
 #define TPS65910_REG_VMMC				12
+#define TPS65910_REG_VBB				13
 
 #define TPS65911_REG_VDDCTRL				4
 #define TPS65911_REG_LDO1				5
@@ -845,7 +840,7 @@
 #define TPS65911_REG_LDO8				12
 
 /* Max number of TPS65910/11 regulators */
-#define TPS65910_NUM_REGS				13
+#define TPS65910_NUM_REGS				14
 
 /* External sleep controls through EN1/EN2/EN3/SLEEP inputs */
 #define TPS65910_SLEEP_CONTROL_EXT_INPUT_EN1		0x1
@@ -879,7 +874,7 @@ struct tps65910_board {
 	bool en_ck32k_xtal;
 	bool en_dev_slp;
 	bool pm_off;
-	struct tps65910_sleep_keepon_data *slp_keepon;
+	struct tps65910_sleep_keepon_data slp_keepon;
 	bool en_gpio_sleep[TPS6591X_MAX_NUM_GPIO];
 	unsigned long regulator_ext_sleep_control[TPS65910_NUM_REGS];
 	struct regulator_init_data *tps65910_pmic_init_data[TPS65910_NUM_REGS];
@@ -893,12 +888,7 @@ struct tps65910 {
 	struct device *dev;
 	struct i2c_client *i2c_client;
 	struct regmap *regmap;
-	unsigned int id;
-
-	/* Client devices */
-	struct tps65910_pmic *pmic;
-	struct tps65910_rtc *rtc;
-	struct tps65910_power *power;
+	unsigned long id;
 
 	/* Device node parsed board data */
 	struct tps65910_board *of_plat_data;
@@ -916,41 +906,6 @@ struct tps65910_platform_data {
 static inline int tps65910_chip_id(struct tps65910 *tps65910)
 {
 	return tps65910->id;
-}
-
-static inline int tps65910_reg_read(struct tps65910 *tps65910, u8 reg,
-		unsigned int *val)
-{
-	return regmap_read(tps65910->regmap, reg, val);
-}
-
-static inline int tps65910_reg_write(struct tps65910 *tps65910, u8 reg,
-		unsigned int val)
-{
-	return regmap_write(tps65910->regmap, reg, val);
-}
-
-static inline int tps65910_reg_set_bits(struct tps65910 *tps65910, u8 reg,
-		u8 mask)
-{
-	return regmap_update_bits(tps65910->regmap, reg, mask, mask);
-}
-
-static inline int tps65910_reg_clear_bits(struct tps65910 *tps65910, u8 reg,
-		u8 mask)
-{
-	return regmap_update_bits(tps65910->regmap, reg, mask, 0);
-}
-
-static inline int tps65910_reg_update_bits(struct tps65910 *tps65910, u8 reg,
-					   u8 mask, u8 val)
-{
-	return regmap_update_bits(tps65910->regmap, reg, mask, val);
-}
-
-static inline int tps65910_irq_get_virq(struct tps65910 *tps65910, int irq)
-{
-	return regmap_irq_get_virq(tps65910->irq_data, irq);
 }
 
 #endif /*  __LINUX_MFD_TPS65910_H */

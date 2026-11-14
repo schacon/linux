@@ -32,18 +32,13 @@
 #define VME_SOURCE_BASE    56
 #define VME_MAX_SOURCES    16
 
-#define NUM_ATARI_SOURCES  141
+#define NUM_ATARI_SOURCES  142
 
 /* convert vector number to int source number */
 #define IRQ_VECTOR_TO_SOURCE(v)	((v) - ((v) < 0x20 ? 0x18 : (0x40-8)))
 
 /* convert irq_handler index to vector number */
 #define IRQ_SOURCE_TO_VECTOR(i)	((i) + ((i) < 8 ? 0x18 : (0x40-8)))
-
-/* interrupt service types */
-#define IRQ_TYPE_SLOW     0
-#define IRQ_TYPE_FAST     1
-#define IRQ_TYPE_PRIO     2
 
 /* ST-MFP interrupts */
 #define IRQ_MFP_BUSY      (8)

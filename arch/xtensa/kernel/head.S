@@ -15,10 +15,12 @@
  * Kevin Chea
  */
 
+#include <asm/asmmacro.h>
 #include <asm/processor.h>
 #include <asm/page.h>
 #include <asm/cacheasm.h>
 #include <asm/initialize_mmu.h>
+#include <asm/mxregs.h>
 
 #include <linux/init.h>
 #include <linux/linkage.h>
@@ -54,49 +56,68 @@ ENTRY(_start)
 
 	/* Preserve the pointer to the boot parameter list in EXCSAVE_1 */
 	wsr     a2, excsave1
-	_j	_SetupMMU
+	_j	_SetupOCD
 
 	.align	4
 	.literal_position
-.Lstartup:
-	.word	_startup
+_SetupOCD:
+	/*
+	 * Initialize WB, WS, and clear PS.EXCM (to allow loop instructions).
+	 * Set Interrupt Level just below XCHAL_DEBUGLEVEL to allow
+	 * xt-gdb to single step via DEBUG exceptions received directly
+	 * by ocd.
+	 */
+#if XCHAL_HAVE_WINDOWED
+	movi	a1, 1
+	movi	a0, 0
+	wsr	a1, windowstart
+	wsr	a0, windowbase
+	rsync
+#endif
 
-	.align	4
+	movi	a1, LOCKLEVEL
+	wsr	a1, ps
+	rsync
+
 	.global _SetupMMU
 _SetupMMU:
 	Offset = _SetupMMU - _start
 
 #ifdef CONFIG_INITIALIZE_XTENSA_MMU_INSIDE_VMLINUX
 	initialize_mmu
+#if defined(CONFIG_MMU) && XCHAL_HAVE_PTP_MMU && XCHAL_HAVE_SPANNING_WAY
+	rsr	a2, excsave1
+	movi	a3, XCHAL_KSEG_PADDR
+	bltu	a2, a3, 1f
+	sub	a2, a2, a3
+	movi	a3, XCHAL_KSEG_SIZE
+	bgeu	a2, a3, 1f
+	movi	a3, XCHAL_KSEG_CACHED_VADDR
+	add	a2, a2, a3
+	wsr	a2, excsave1
+1:
 #endif
-	.end	no-absolute-literals
+#endif
 
-	l32r	a0, .Lstartup
+	movi	a0, _startup
 	jx	a0
 
 ENDPROC(_start)
+	.end	no-absolute-literals
 
-	__INIT
+	__REF
 	.literal_position
 
 ENTRY(_startup)
 
-	/* Disable interrupts and exceptions. */
-
-	movi	a0, LOCKLEVEL
-	wsr	a0, ps
-
-	/* Start with a fresh windowbase and windowstart.  */
-
-	movi	a1, 1
-	movi	a0, 0
-	wsr	a1, windowstart
-	wsr	a0, windowbase
-	rsync
-
 	/* Set a0 to 0 for the remaining initialization. */
 
 	movi	a0, 0
+
+#if XCHAL_HAVE_VECBASE
+	movi    a2, VECBASE_VADDR
+	wsr	a2, vecbase
+#endif
 
 	/* Clear debugging registers. */
 
@@ -109,7 +130,7 @@ ENTRY(_startup)
 	wsr	a0, icountlevel
 
 	.set	_index, 0
-	.rept	XCHAL_NUM_DBREAK - 1
+	.rept	XCHAL_NUM_DBREAK
 	wsr	a0, SREG_DBREAKC + _index
 	.set	_index, _index + 1
 	.endr
@@ -145,17 +166,6 @@ ENTRY(_startup)
 	wsr	a0, cpenable
 #endif
 
-	/* Set PS.INTLEVEL=LOCKLEVEL, PS.WOE=0, kernel stack, PS.EXCM=0
-	 *
-	 * Note: PS.EXCM must be cleared before using any loop
-	 *	 instructions; otherwise, they are silently disabled, and
-	 * 	 at most one iteration of the loop is executed.
-	 */
-
-	movi	a1, LOCKLEVEL
-	wsr	a1, ps
-	rsync
-
 	/*  Initialize the caches.
 	 *  a2, a3 are just working registers (clobbered).
 	 */
@@ -173,11 +183,40 @@ ENTRY(_startup)
 
 	isync
 
+	initialize_cacheattr
+
+#ifdef CONFIG_HAVE_SMP
+	movi	a2, CCON	# MX External Register to Configure Cache
+	movi	a3, 1
+	wer	a3, a2
+#endif
+
+	/* Setup stack and enable window exceptions (keep irqs disabled) */
+
+	movi	a1, start_info
+	l32i	a1, a1, 0
+
+	/* Disable interrupts. */
+	/* Enable window exceptions if kernel is built with windowed ABI. */
+	movi	a2, KERNEL_PS_WOE_MASK | LOCKLEVEL
+	wsr	a2, ps
+	rsync
+
+#ifdef CONFIG_SMP
+	/*
+	 * Notice that we assume with SMP that cores have PRID
+	 * supported by the cores.
+	 */
+	rsr	a2, prid
+	bnez	a2, .Lboot_secondary
+
+#endif  /* CONFIG_SMP */
+
 	/* Unpack data sections
 	 *
 	 * The linker script used to build the Linux kernel image
 	 * creates a table located at __boot_reloc_table_start
-	 * that contans the information what data needs to be unpacked.
+	 * that contains the information what data needs to be unpacked.
 	 *
 	 * Uses a2-a7.
 	 */
@@ -187,7 +226,7 @@ ENTRY(_startup)
 
 1:	beq	a2, a3, 3f	# no more entries?
 	l32i	a4, a2, 0	# start destination (in RAM)
-	l32i	a5, a2, 4	# end desination (in RAM)
+	l32i	a5, a2, 4	# end destination (in RAM)
 	l32i	a6, a2, 8	# start source (in ROM)
 	addi	a2, a2, 12	# next entry
 	beq	a4, a5, 1b	# skip, empty entry
@@ -210,7 +249,7 @@ ENTRY(_startup)
 
 	__loopt	a2, a3, a4, 2
 	s32i	a0, a2, 0
-	__endla	a2, a4, 4
+	__endla	a2, a3, 4
 
 #if XCHAL_DCACHE_IS_WRITEBACK
 
@@ -225,38 +264,112 @@ ENTRY(_startup)
 	___invalidate_icache_all a2 a3
 	isync
 
-	/* Setup stack and enable window exceptions (keep irqs disabled) */
+#ifdef CONFIG_XIP_KERNEL
+	/* Setup bootstrap CPU stack in XIP kernel */
 
-	movi	a1, init_thread_union
-	addi	a1, a1, KERNEL_STACK_SIZE
+	movi	a1, start_info
+	l32i	a1, a1, 0
+#endif
 
-	movi	a2, (1 << PS_WOE_BIT) | LOCKLEVEL
-					# WOE=1, INTLEVEL=LOCKLEVEL, UM=0
-	wsr	a2, ps			# (enable reg-windows; progmode stack)
-	rsync
-
-	/* Set up EXCSAVE[DEBUGLEVEL] to point to the Debug Exception Handler.*/
-
-	movi	a2, debug_exception
-	wsr	a2, SREG_EXCSAVE + XCHAL_DEBUGLEVEL
-
-	/* Set up EXCSAVE[1] to point to the exc_table. */
-
-	movi	a6, exc_table
-	xsr	a6, excsave1
+	movi	abi_arg0, 0
+	xsr	abi_arg0, excsave1
 
 	/* init_arch kick-starts the linux kernel */
 
-	movi	a4, init_arch
-	callx4	a4
-
-	movi	a4, start_kernel
-	callx4	a4
+	abi_call	init_arch
+	abi_call	start_kernel
 
 should_never_return:
 	j	should_never_return
 
+#ifdef CONFIG_SMP
+.Lboot_secondary:
+
+	movi	a2, cpu_start_ccount
+1:
+	memw
+	l32i	a3, a2, 0
+	beqi	a3, 0, 1b
+	movi	a3, 0
+	s32i	a3, a2, 0
+1:
+	memw
+	l32i	a3, a2, 0
+	beqi	a3, 0, 1b
+	wsr	a3, ccount
+	movi	a3, 0
+	s32i	a3, a2, 0
+	memw
+
+	movi	abi_arg0, 0
+	wsr	abi_arg0, excsave1
+
+	abi_call	secondary_start_kernel
+	j	should_never_return
+
+#endif  /* CONFIG_SMP */
+
 ENDPROC(_startup)
+
+#ifdef CONFIG_HOTPLUG_CPU
+
+ENTRY(cpu_restart)
+
+#if XCHAL_DCACHE_IS_WRITEBACK
+	___flush_invalidate_dcache_all a2 a3
+#else
+	___invalidate_dcache_all a2 a3
+#endif
+	memw
+	movi	a2, CCON	# MX External Register to Configure Cache
+	movi	a3, 0
+	wer	a3, a2
+	extw
+
+	rsr	a0, prid
+	neg	a2, a0
+	movi	a3, cpu_start_id
+	memw
+	s32i	a2, a3, 0
+#if XCHAL_DCACHE_IS_WRITEBACK
+	dhwbi	a3, 0
+#endif
+1:
+	memw
+	l32i	a2, a3, 0
+	dhi	a3, 0
+	bne	a2, a0, 1b
+
+	/*
+	 * Initialize WB, WS, and clear PS.EXCM (to allow loop instructions).
+	 * Set Interrupt Level just below XCHAL_DEBUGLEVEL to allow
+	 * xt-gdb to single step via DEBUG exceptions received directly
+	 * by ocd.
+	 */
+	movi	a1, 1
+	movi	a0, 0
+	wsr	a1, windowstart
+	wsr	a0, windowbase
+	rsync
+
+	movi	a1, LOCKLEVEL
+	wsr	a1, ps
+	rsync
+
+	j	_startup
+
+ENDPROC(cpu_restart)
+
+#endif  /* CONFIG_HOTPLUG_CPU */
+
+/*
+ * DATA section
+ */
+
+	__REFDATA
+	.align  4
+ENTRY(start_info)
+	.long	init_thread_union + KERNEL_STACK_SIZE
 
 /*
  * BSS section
@@ -268,6 +381,3 @@ ENTRY(swapper_pg_dir)
 	.fill	PAGE_SIZE, 1, 0
 END(swapper_pg_dir)
 #endif
-ENTRY(empty_zero_page)
-	.fill	PAGE_SIZE, 1, 0
-END(empty_zero_page)

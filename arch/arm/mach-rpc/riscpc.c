@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mach-rpc/riscpc.c
  *
  *  Copyright (C) 1998-2001 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  Architecture specific fixups.
  */
@@ -20,6 +17,7 @@
 #include <linux/ata_platform.h>
 #include <linux/io.h>
 #include <linux/i2c.h>
+#include <linux/reboot.h>
 
 #include <asm/elf.h>
 #include <asm/mach-types.h>
@@ -48,8 +46,10 @@ static int __init parse_tag_acorn(const struct tag *tag)
 	switch (tag->u.acorn.vram_pages) {
 	case 512:
 		vram_size += PAGE_SIZE * 256;
+		fallthrough;	/* ??? */
 	case 256:
 		vram_size += PAGE_SIZE * 256;
+		break;
 	default:
 		break;
 	}
@@ -201,7 +201,7 @@ static int __init rpc_init(void)
 
 arch_initcall(rpc_init);
 
-static void rpc_restart(char mode, const char *cmd)
+static void rpc_restart(enum reboot_mode mode, const char *cmd)
 {
 	iomd_writeb(0, IOMD_ROMCR0);
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * starfire.c: Starfire/E10000 support.
  *
@@ -28,11 +29,6 @@ void check_if_starfire(void)
 		this_is_starfire = 1;
 }
 
-int starfire_hard_smp_processor_id(void)
-{
-	return upa_readl(0x1fff40000d0UL);
-}
-
 /*
  * Each Starfire board has 32 registers which perform translation
  * and delivery of traditional interrupt packets into the extended
@@ -54,7 +50,7 @@ void starfire_hookup(int upaid)
 	struct starfire_irqinfo *p;
 	unsigned long treg_base, hwmid, i;
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kmalloc_obj(*p);
 	if (!p) {
 		prom_printf("starfire_hookup: No memory, this is insane.\n");
 		prom_halt();

@@ -1,43 +1,99 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_S390_FUTEX_H
 #define _ASM_S390_FUTEX_H
 
-#include <linux/futex.h>
+#include <linux/instrumented.h>
 #include <linux/uaccess.h>
+#include <linux/futex.h>
+#include <asm/asm-extable.h>
+#include <asm/mmu_context.h>
 #include <asm/errno.h>
 
-static inline int futex_atomic_op_inuser (int encoded_op, u32 __user *uaddr)
-{
-	int op = (encoded_op >> 28) & 7;
-	int cmp = (encoded_op >> 24) & 15;
-	int oparg = (encoded_op << 8) >> 20;
-	int cmparg = (encoded_op << 20) >> 20;
-	int oldval, ret;
-
-	if (encoded_op & (FUTEX_OP_OPARG_SHIFT << 28))
-		oparg = 1 << oparg;
-
-	pagefault_disable();
-	ret = uaccess.futex_atomic_op(op, uaddr, oparg, &oldval);
-	pagefault_enable();
-
-	if (!ret) {
-		switch (cmp) {
-		case FUTEX_OP_CMP_EQ: ret = (oldval == cmparg); break;
-		case FUTEX_OP_CMP_NE: ret = (oldval != cmparg); break;
-		case FUTEX_OP_CMP_LT: ret = (oldval < cmparg); break;
-		case FUTEX_OP_CMP_GE: ret = (oldval >= cmparg); break;
-		case FUTEX_OP_CMP_LE: ret = (oldval <= cmparg); break;
-		case FUTEX_OP_CMP_GT: ret = (oldval > cmparg); break;
-		default: ret = -ENOSYS;
-		}
-	}
-	return ret;
+#define FUTEX_OP_FUNC(name, insn)						\
+static uaccess_kmsan_or_inline int						\
+__futex_atomic_##name(int oparg, int *old, u32 __user *uaddr)			\
+{										\
+	bool sacf_flag;								\
+	int rc, new;								\
+										\
+	instrument_copy_from_user_before(old, uaddr, sizeof(*old));		\
+	sacf_flag = enable_sacf_uaccess();					\
+	asm_inline volatile(							\
+		"	sacf	256\n"						\
+		"0:	l	%[old],%[uaddr]\n"				\
+		"1:"insn							\
+		"2:	cs	%[old],%[new],%[uaddr]\n"			\
+		"	jl	1b\n"						\
+		"	lhi	%[rc],0\n"					\
+		"3:	sacf	768\n"						\
+		EX_TABLE_INSN_UA_FAULT(0b, 3b, %[rc])				\
+		EX_TABLE_INSN_UA_FAULT(2b, 3b, %[rc])				\
+		: [rc] "=d" (rc), [old] "=&d" (*old),				\
+		  [new] "=&d" (new), [uaddr] "+Q" (*uaddr)			\
+		: [oparg] "d" (oparg)						\
+		: "cc");							\
+	disable_sacf_uaccess(sacf_flag);					\
+	if (!rc)								\
+		instrument_copy_from_user_after(old, uaddr, sizeof(*old), 0);	\
+	return rc;								\
 }
 
-static inline int futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
-						u32 oldval, u32 newval)
+FUTEX_OP_FUNC(set, "lr %[new],%[oparg]\n")
+FUTEX_OP_FUNC(add, "lr %[new],%[old]\n ar %[new],%[oparg]\n")
+FUTEX_OP_FUNC(or,  "lr %[new],%[old]\n or %[new],%[oparg]\n")
+FUTEX_OP_FUNC(and, "lr %[new],%[old]\n nr %[new],%[oparg]\n")
+FUTEX_OP_FUNC(xor, "lr %[new],%[old]\n xr %[new],%[oparg]\n")
+
+static inline
+int arch_futex_atomic_op_inuser(int op, int oparg, int *oval, u32 __user *uaddr)
 {
-	return uaccess.futex_atomic_cmpxchg(uval, uaddr, oldval, newval);
+	int old, rc;
+
+	switch (op) {
+	case FUTEX_OP_SET:
+		rc = __futex_atomic_set(oparg, &old, uaddr);
+		break;
+	case FUTEX_OP_ADD:
+		rc = __futex_atomic_add(oparg, &old, uaddr);
+		break;
+	case FUTEX_OP_OR:
+		rc = __futex_atomic_or(oparg, &old, uaddr);
+		break;
+	case FUTEX_OP_ANDN:
+		rc = __futex_atomic_and(~oparg, &old, uaddr);
+		break;
+	case FUTEX_OP_XOR:
+		rc = __futex_atomic_xor(oparg, &old, uaddr);
+		break;
+	default:
+		rc = -ENOSYS;
+	}
+	if (!rc)
+		*oval = old;
+	return rc;
+}
+
+static uaccess_kmsan_or_inline
+int futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr, u32 oldval, u32 newval)
+{
+	bool sacf_flag;
+	int rc;
+
+	instrument_copy_from_user_before(uval, uaddr, sizeof(*uval));
+	sacf_flag = enable_sacf_uaccess();
+	asm_inline volatile(
+		"	sacf	256\n"
+		"0:	cs	%[old],%[new],%[uaddr]\n"
+		"	lhi	%[rc],0\n"
+		"1:	sacf	768\n"
+		EX_TABLE_INSN_UA_FAULT(0b, 1b, %[rc])
+		: [rc] "=d" (rc), [old] "+d" (oldval), [uaddr] "+Q" (*uaddr)
+		: [new] "d" (newval)
+		: "cc", "memory");
+	disable_sacf_uaccess(sacf_flag);
+	*uval = oldval;
+	instrument_copy_from_user_after(uval, uaddr, sizeof(*uval), 0);
+	return rc;
 }
 
 #endif /* _ASM_S390_FUTEX_H */

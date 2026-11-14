@@ -1,30 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
  /*
     tea6420 - i2c-driver for the tea6420 by SGS Thomson
 
     Copyright (C) 1998-2003 Michael Hunold <michael@mihu.de>
-    Copyright (C) 2008 Hans Verkuil <hverkuil@xs4all.nl>
+    Copyright (C) 2008 Hans Verkuil <hverkuil@kernel.org>
 
     The tea6420 is a bus controlled audio-matrix with 5 stereo inputs,
     4 stereo outputs and gain control for each output.
     It is cascadable, i.e. it can be found at the addresses 0x98
     and 0x9a on the i2c-bus.
 
-    For detailed informations download the specifications directly
+    For detailed information download the specifications directly
     from SGS Thomson at http://www.st.com
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
   */
 
 
@@ -33,7 +21,6 @@
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <media/v4l2-device.h>
-#include <media/v4l2-chip-ident.h>
 #include "tea6420.h"
 
 MODULE_AUTHOR("Michael Hunold <michael@mihu.de>");
@@ -90,30 +77,17 @@ static int tea6420_s_routing(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int tea6420_g_chip_ident(struct v4l2_subdev *sd, struct v4l2_dbg_chip_ident *chip)
-{
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	return v4l2_chip_ident_i2c_client(client, chip, V4L2_IDENT_TEA6420, 0);
-}
-
 /* ----------------------------------------------------------------------- */
-
-static const struct v4l2_subdev_core_ops tea6420_core_ops = {
-	.g_chip_ident = tea6420_g_chip_ident,
-};
 
 static const struct v4l2_subdev_audio_ops tea6420_audio_ops = {
 	.s_routing = tea6420_s_routing,
 };
 
 static const struct v4l2_subdev_ops tea6420_ops = {
-	.core = &tea6420_core_ops,
 	.audio = &tea6420_audio_ops,
 };
 
-static int tea6420_probe(struct i2c_client *client,
-			  const struct i2c_device_id *id)
+static int tea6420_probe(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd;
 	int err, i;
@@ -125,7 +99,7 @@ static int tea6420_probe(struct i2c_client *client,
 	v4l_info(client, "chip found @ 0x%x (%s)\n",
 			client->addr << 1, client->adapter->name);
 
-	sd = kzalloc(sizeof(struct v4l2_subdev), GFP_KERNEL);
+	sd = devm_kzalloc_obj(&client->dev, *sd);
 	if (sd == NULL)
 		return -ENOMEM;
 	v4l2_i2c_subdev_init(sd, client, &tea6420_ops);
@@ -141,24 +115,21 @@ static int tea6420_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int tea6420_remove(struct i2c_client *client)
+static void tea6420_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_device_unregister_subdev(sd);
-	kfree(sd);
-	return 0;
 }
 
 static const struct i2c_device_id tea6420_id[] = {
-	{ "tea6420", 0 },
+	{ .name = "tea6420" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, tea6420_id);
 
 static struct i2c_driver tea6420_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "tea6420",
 	},
 	.probe		= tea6420_probe,

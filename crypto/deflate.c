@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Cryptographic API.
  *
@@ -5,215 +6,250 @@
  * by IPCOMP (RFC 3173 & RFC 2394).
  *
  * Copyright (c) 2003 James Morris <jmorris@intercode.com.au>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * FIXME: deflate transforms will require up to a total of about 436k of kernel
- * memory on i386 (390k for compression, the rest for decompression), as the
- * current zlib kernel code uses a worst case pre-allocation system by default.
- * This needs to be fixed so that the amount of memory required is properly
- * related to the  winbits and memlevel parameters.
- *
- * The default winbits of 11 should suit most packets, and it may be something
- * to configure on a per-tfm basis in the future.
- *
- * Currently, compression history is not maintained between tfm calls, as
- * it is not needed for IPCOMP and keeps the code simpler.  It can be
- * implemented if someone wants it.
+ * Copyright (c) 2023 Google, LLC. <ardb@kernel.org>
+ * Copyright (c) 2025 Herbert Xu <herbert@gondor.apana.org.au>
  */
+#include <crypto/internal/acompress.h>
+#include <crypto/scatterwalk.h>
 #include <linux/init.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/crypto.h>
+#include <linux/mutex.h>
+#include <linux/overflow.h>
+#include <linux/percpu.h>
+#include <linux/scatterlist.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/zlib.h>
-#include <linux/vmalloc.h>
-#include <linux/interrupt.h>
-#include <linux/mm.h>
-#include <linux/net.h>
 
 #define DEFLATE_DEF_LEVEL		Z_DEFAULT_COMPRESSION
 #define DEFLATE_DEF_WINBITS		11
 #define DEFLATE_DEF_MEMLEVEL		MAX_MEM_LEVEL
 
-struct deflate_ctx {
-	struct z_stream_s comp_stream;
-	struct z_stream_s decomp_stream;
+struct deflate_stream {
+	struct z_stream_s stream;
+	u8 workspace[];
 };
 
-static int deflate_comp_init(struct deflate_ctx *ctx)
-{
-	int ret = 0;
-	struct z_stream_s *stream = &ctx->comp_stream;
+static DEFINE_MUTEX(deflate_stream_lock);
 
-	stream->workspace = vzalloc(zlib_deflate_workspacesize(
-				-DEFLATE_DEF_WINBITS, DEFLATE_DEF_MEMLEVEL));
-	if (!stream->workspace) {
-		ret = -ENOMEM;
-		goto out;
-	}
-	ret = zlib_deflateInit2(stream, DEFLATE_DEF_LEVEL, Z_DEFLATED,
-	                        -DEFLATE_DEF_WINBITS, DEFLATE_DEF_MEMLEVEL,
-	                        Z_DEFAULT_STRATEGY);
-	if (ret != Z_OK) {
-		ret = -EINVAL;
-		goto out_free;
-	}
-out:
-	return ret;
-out_free:
-	vfree(stream->workspace);
-	goto out;
+static void *deflate_alloc_stream(void)
+{
+	size_t size = max(zlib_inflate_workspacesize(),
+			  zlib_deflate_workspacesize(-DEFLATE_DEF_WINBITS,
+						     DEFLATE_DEF_MEMLEVEL));
+	struct deflate_stream *ctx;
+
+	ctx = kvmalloc_flex(*ctx, workspace, size);
+	if (!ctx)
+		return ERR_PTR(-ENOMEM);
+
+	ctx->stream.workspace = ctx->workspace;
+
+	return ctx;
 }
 
-static int deflate_decomp_init(struct deflate_ctx *ctx)
+static void deflate_free_stream(void *ctx)
 {
-	int ret = 0;
-	struct z_stream_s *stream = &ctx->decomp_stream;
-
-	stream->workspace = vzalloc(zlib_inflate_workspacesize());
-	if (!stream->workspace) {
-		ret = -ENOMEM;
-		goto out;
-	}
-	ret = zlib_inflateInit2(stream, -DEFLATE_DEF_WINBITS);
-	if (ret != Z_OK) {
-		ret = -EINVAL;
-		goto out_free;
-	}
-out:
-	return ret;
-out_free:
-	vfree(stream->workspace);
-	goto out;
+	kvfree(ctx);
 }
 
-static void deflate_comp_exit(struct deflate_ctx *ctx)
-{
-	zlib_deflateEnd(&ctx->comp_stream);
-	vfree(ctx->comp_stream.workspace);
-}
+static struct crypto_acomp_streams deflate_streams = {
+	.alloc_ctx = deflate_alloc_stream,
+	.free_ctx = deflate_free_stream,
+};
 
-static void deflate_decomp_exit(struct deflate_ctx *ctx)
+static int deflate_compress_one(struct acomp_req *req,
+				struct deflate_stream *ds)
 {
-	zlib_inflateEnd(&ctx->decomp_stream);
-	vfree(ctx->decomp_stream.workspace);
-}
-
-static int deflate_init(struct crypto_tfm *tfm)
-{
-	struct deflate_ctx *ctx = crypto_tfm_ctx(tfm);
+	struct z_stream_s *stream = &ds->stream;
+	struct acomp_walk walk;
 	int ret;
 
-	ret = deflate_comp_init(ctx);
+	ret = acomp_walk_virt(&walk, req, true);
 	if (ret)
+		return ret;
+
+	do {
+		unsigned int dcur;
+
+		dcur = acomp_walk_next_dst(&walk);
+		if (!dcur)
+			return -ENOSPC;
+
+		stream->avail_out = dcur;
+		stream->next_out = walk.dst.virt.addr;
+
+		do {
+			int flush = Z_FINISH;
+			unsigned int scur;
+
+			stream->avail_in = 0;
+			stream->next_in = NULL;
+
+			scur = acomp_walk_next_src(&walk);
+			if (scur) {
+				if (acomp_walk_more_src(&walk, scur))
+					flush = Z_NO_FLUSH;
+				stream->avail_in = scur;
+				stream->next_in = walk.src.virt.addr;
+			}
+
+			ret = zlib_deflate(stream, flush);
+
+			if (scur) {
+				scur -= stream->avail_in;
+				acomp_walk_done_src(&walk, scur);
+			}
+		} while (ret == Z_OK && stream->avail_out);
+
+		acomp_walk_done_dst(&walk, dcur);
+	} while (ret == Z_OK);
+
+	if (ret != Z_STREAM_END)
+		return -EINVAL;
+
+	req->dlen = stream->total_out;
+	return 0;
+}
+
+static int deflate_compress(struct acomp_req *req)
+{
+	struct crypto_acomp_stream *s;
+	struct deflate_stream *ds;
+	int err;
+
+	s = crypto_acomp_lock_stream_bh(&deflate_streams);
+	ds = s->ctx;
+
+	err = zlib_deflateInit2(&ds->stream, DEFLATE_DEF_LEVEL, Z_DEFLATED,
+				-DEFLATE_DEF_WINBITS, DEFLATE_DEF_MEMLEVEL,
+				Z_DEFAULT_STRATEGY);
+	if (err != Z_OK) {
+		err = -EINVAL;
 		goto out;
-	ret = deflate_decomp_init(ctx);
+	}
+
+	err = deflate_compress_one(req, ds);
+
+out:
+	crypto_acomp_unlock_stream_bh(s);
+
+	return err;
+}
+
+static int deflate_decompress_one(struct acomp_req *req,
+				  struct deflate_stream *ds)
+{
+	struct z_stream_s *stream = &ds->stream;
+	bool out_of_space = false;
+	struct acomp_walk walk;
+	int ret;
+
+	ret = acomp_walk_virt(&walk, req, true);
 	if (ret)
-		deflate_comp_exit(ctx);
+		return ret;
+
+	do {
+		unsigned int scur;
+
+		stream->avail_in = 0;
+		stream->next_in = NULL;
+
+		scur = acomp_walk_next_src(&walk);
+		if (scur) {
+			stream->avail_in = scur;
+			stream->next_in = walk.src.virt.addr;
+		}
+
+		do {
+			unsigned int dcur;
+			unsigned long avail_in;
+
+			dcur = acomp_walk_next_dst(&walk);
+
+			stream->avail_out = dcur;
+			stream->next_out = walk.dst.virt.addr;
+			avail_in = stream->avail_in;
+
+			ret = zlib_inflate(stream, Z_NO_FLUSH);
+
+			if (!dcur && avail_in == stream->avail_in) {
+				out_of_space = true;
+				break;
+			}
+
+			dcur -= stream->avail_out;
+			acomp_walk_done_dst(&walk, dcur);
+		} while (ret == Z_OK && stream->avail_in);
+
+		if (scur)
+			acomp_walk_done_src(&walk, scur);
+
+		if (out_of_space)
+			return -ENOSPC;
+	} while (ret == Z_OK);
+
+	if (ret != Z_STREAM_END)
+		return -EINVAL;
+
+	req->dlen = stream->total_out;
+	return 0;
+}
+
+static int deflate_decompress(struct acomp_req *req)
+{
+	struct crypto_acomp_stream *s;
+	struct deflate_stream *ds;
+	int err;
+
+	s = crypto_acomp_lock_stream_bh(&deflate_streams);
+	ds = s->ctx;
+
+	err = zlib_inflateInit2(&ds->stream, -DEFLATE_DEF_WINBITS);
+	if (err != Z_OK) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	err = deflate_decompress_one(req, ds);
+
 out:
+	crypto_acomp_unlock_stream_bh(s);
+
+	return err;
+}
+
+static int deflate_init(struct crypto_acomp *tfm)
+{
+	int ret;
+
+	mutex_lock(&deflate_stream_lock);
+	ret = crypto_acomp_alloc_streams(&deflate_streams);
+	mutex_unlock(&deflate_stream_lock);
+
 	return ret;
 }
 
-static void deflate_exit(struct crypto_tfm *tfm)
-{
-	struct deflate_ctx *ctx = crypto_tfm_ctx(tfm);
-
-	deflate_comp_exit(ctx);
-	deflate_decomp_exit(ctx);
-}
-
-static int deflate_compress(struct crypto_tfm *tfm, const u8 *src,
-			    unsigned int slen, u8 *dst, unsigned int *dlen)
-{
-	int ret = 0;
-	struct deflate_ctx *dctx = crypto_tfm_ctx(tfm);
-	struct z_stream_s *stream = &dctx->comp_stream;
-
-	ret = zlib_deflateReset(stream);
-	if (ret != Z_OK) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	stream->next_in = (u8 *)src;
-	stream->avail_in = slen;
-	stream->next_out = (u8 *)dst;
-	stream->avail_out = *dlen;
-
-	ret = zlib_deflate(stream, Z_FINISH);
-	if (ret != Z_STREAM_END) {
-		ret = -EINVAL;
-		goto out;
-	}
-	ret = 0;
-	*dlen = stream->total_out;
-out:
-	return ret;
-}
-
-static int deflate_decompress(struct crypto_tfm *tfm, const u8 *src,
-			      unsigned int slen, u8 *dst, unsigned int *dlen)
-{
-
-	int ret = 0;
-	struct deflate_ctx *dctx = crypto_tfm_ctx(tfm);
-	struct z_stream_s *stream = &dctx->decomp_stream;
-
-	ret = zlib_inflateReset(stream);
-	if (ret != Z_OK) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	stream->next_in = (u8 *)src;
-	stream->avail_in = slen;
-	stream->next_out = (u8 *)dst;
-	stream->avail_out = *dlen;
-
-	ret = zlib_inflate(stream, Z_SYNC_FLUSH);
-	/*
-	 * Work around a bug in zlib, which sometimes wants to taste an extra
-	 * byte when being used in the (undocumented) raw deflate mode.
-	 * (From USAGI).
-	 */
-	if (ret == Z_OK && !stream->avail_in && stream->avail_out) {
-		u8 zerostuff = 0;
-		stream->next_in = &zerostuff;
-		stream->avail_in = 1;
-		ret = zlib_inflate(stream, Z_FINISH);
-	}
-	if (ret != Z_STREAM_END) {
-		ret = -EINVAL;
-		goto out;
-	}
-	ret = 0;
-	*dlen = stream->total_out;
-out:
-	return ret;
-}
-
-static struct crypto_alg alg = {
-	.cra_name		= "deflate",
-	.cra_flags		= CRYPTO_ALG_TYPE_COMPRESS,
-	.cra_ctxsize		= sizeof(struct deflate_ctx),
-	.cra_module		= THIS_MODULE,
-	.cra_init		= deflate_init,
-	.cra_exit		= deflate_exit,
-	.cra_u			= { .compress = {
-	.coa_compress 		= deflate_compress,
-	.coa_decompress  	= deflate_decompress } }
+static struct acomp_alg acomp = {
+	.compress		= deflate_compress,
+	.decompress		= deflate_decompress,
+	.init			= deflate_init,
+	.base.cra_name		= "deflate",
+	.base.cra_driver_name	= "deflate-generic",
+	.base.cra_flags		= CRYPTO_ALG_REQ_VIRT,
+	.base.cra_module	= THIS_MODULE,
 };
 
 static int __init deflate_mod_init(void)
 {
-	return crypto_register_alg(&alg);
+	return crypto_register_acomp(&acomp);
 }
 
 static void __exit deflate_mod_fini(void)
 {
-	crypto_unregister_alg(&alg);
+	crypto_unregister_acomp(&acomp);
+	crypto_acomp_free_streams(&deflate_streams);
 }
 
 module_init(deflate_mod_init);
@@ -222,4 +258,7 @@ module_exit(deflate_mod_fini);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Deflate Compression Algorithm for IPCOMP");
 MODULE_AUTHOR("James Morris <jmorris@intercode.com.au>");
-
+MODULE_AUTHOR("Ard Biesheuvel <ardb@kernel.org>");
+MODULE_AUTHOR("Herbert Xu <herbert@gondor.apana.org.au>");
+MODULE_ALIAS_CRYPTO("deflate");
+MODULE_ALIAS_CRYPTO("deflate-generic");

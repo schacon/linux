@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * EISA bus support functions for sysfs.
  *
  * (C) 2002, 2003 Marc Zyngier <maz@wild-wind.fr.eu.org>
- *
- * This code is released under the GPL version 2.
  */
 
 #include <linux/kernel.h>
@@ -13,6 +12,7 @@
 #include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/string_choices.h>
 #include <linux/ioport.h>
 #include <asm/io.h>
 
@@ -22,7 +22,7 @@
 
 struct eisa_device_info {
 	struct eisa_device_id id;
-	char name[50];
+	char name[EISA_DEVICE_INFO_NAME_SIZE];
 };
 
 #ifdef CONFIG_EISA_NAMES
@@ -61,7 +61,7 @@ static void __init eisa_name_device(struct eisa_device *edev)
 	int i;
 	for (i = 0; i < EISA_INFOS; i++) {
 		if (!strcmp(edev->id.sig, eisa_table[i].id.sig)) {
-			strlcpy(edev->pretty_name,
+			strscpy(edev->pretty_name,
 				eisa_table[i].name,
 				sizeof(edev->pretty_name));
 			return;
@@ -75,9 +75,9 @@ static void __init eisa_name_device(struct eisa_device *edev)
 
 static char __init *decode_eisa_sig(unsigned long addr)
 {
-        static char sig_str[EISA_SIG_LEN];
+	static char sig_str[EISA_SIG_LEN];
 	u8 sig[4];
-        u16 rev;
+	u16 rev;
 	int i;
 
 	for (i = 0; i < 4; i++) {
@@ -96,20 +96,20 @@ static char __init *decode_eisa_sig(unsigned long addr)
 		if (!i && (sig[0] & 0x80))
 			return NULL;
 	}
-	
-        sig_str[0] = ((sig[0] >> 2) & 0x1f) + ('A' - 1);
-        sig_str[1] = (((sig[0] & 3) << 3) | (sig[1] >> 5)) + ('A' - 1);
-        sig_str[2] = (sig[1] & 0x1f) + ('A' - 1);
-        rev = (sig[2] << 8) | sig[3];
-        sprintf(sig_str + 3, "%04X", rev);
 
-        return sig_str;
+	sig_str[0] = ((sig[0] >> 2) & 0x1f) + ('A' - 1);
+	sig_str[1] = (((sig[0] & 3) << 3) | (sig[1] >> 5)) + ('A' - 1);
+	sig_str[2] = (sig[1] & 0x1f) + ('A' - 1);
+	rev = (sig[2] << 8) | sig[3];
+	sprintf(sig_str + 3, "%04X", rev);
+
+	return sig_str;
 }
 
-static int eisa_bus_match(struct device *dev, struct device_driver *drv)
+static int eisa_bus_match(struct device *dev, const struct device_driver *drv)
 {
 	struct eisa_device *edev = to_eisa_device(dev);
-	struct eisa_driver *edrv = to_eisa_driver(drv);
+	const struct eisa_driver *edrv = to_eisa_driver(drv);
 	const struct eisa_device_id *eids = edrv->id_table;
 
 	if (!eids)
@@ -128,15 +128,15 @@ static int eisa_bus_match(struct device *dev, struct device_driver *drv)
 	return 0;
 }
 
-static int eisa_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int eisa_bus_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
-	struct eisa_device *edev = to_eisa_device(dev);
+	const struct eisa_device *edev = to_eisa_device(dev);
 
 	add_uevent_var(env, "MODALIAS=" EISA_DEVICE_MODALIAS_FMT, edev->id.sig);
 	return 0;
 }
 
-struct bus_type eisa_bus_type = {
+const struct bus_type eisa_bus_type = {
 	.name  = "eisa",
 	.match = eisa_bus_match,
 	.uevent = eisa_bus_uevent,
@@ -156,34 +156,29 @@ void eisa_driver_unregister(struct eisa_driver *edrv)
 }
 EXPORT_SYMBOL(eisa_driver_unregister);
 
-static ssize_t eisa_show_sig(struct device *dev, struct device_attribute *attr,
-			     char *buf)
+static ssize_t signature_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
 {
 	struct eisa_device *edev = to_eisa_device(dev);
 	return sprintf(buf, "%s\n", edev->id.sig);
 }
+static DEVICE_ATTR_RO(signature);
 
-static DEVICE_ATTR(signature, S_IRUGO, eisa_show_sig, NULL);
-
-static ssize_t eisa_show_state(struct device *dev,
-			       struct device_attribute *attr,
-			       char *buf)
+static ssize_t enabled_show(struct device *dev,
+			    struct device_attribute *attr, char *buf)
 {
 	struct eisa_device *edev = to_eisa_device(dev);
 	return sprintf(buf, "%d\n", edev->state & EISA_CONFIG_ENABLED);
 }
+static DEVICE_ATTR_RO(enabled);
 
-static DEVICE_ATTR(enabled, S_IRUGO, eisa_show_state, NULL);
-
-static ssize_t eisa_show_modalias(struct device *dev,
-				  struct device_attribute *attr,
-				  char *buf)
+static ssize_t modalias_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
 {
 	struct eisa_device *edev = to_eisa_device(dev);
 	return sprintf(buf, EISA_DEVICE_MODALIAS_FMT "\n", edev->id.sig);
 }
-
-static DEVICE_ATTR(modalias, S_IRUGO, eisa_show_modalias, NULL);
+static DEVICE_ATTR_RO(modalias);
 
 static int __init eisa_init_device(struct eisa_root_device *root,
 				   struct eisa_device *edev,
@@ -198,7 +193,7 @@ static int __init eisa_init_device(struct eisa_root_device *root,
 	sig = decode_eisa_sig(sig_addr);
 	if (!sig)
 		return -1;	/* No EISA device here */
-	
+
 	memcpy(edev->id.sig, sig, EISA_SIG_LEN);
 	edev->slot = slot;
 	edev->state = inb(SLOT_ADDRESS(root, slot) + EISA_CONFIG_OFFSET)
@@ -222,7 +217,7 @@ static int __init eisa_init_device(struct eisa_root_device *root,
 
 	if (is_forced_dev(enable_dev, enable_dev_count, root, edev))
 		edev->state = EISA_CONFIG_ENABLED | EISA_CONFIG_FORCED;
-	
+
 	if (is_forced_dev(disable_dev, disable_dev_count, root, edev))
 		edev->state = EISA_CONFIG_FORCED;
 
@@ -232,8 +227,10 @@ static int __init eisa_init_device(struct eisa_root_device *root,
 static int __init eisa_register_device(struct eisa_device *edev)
 {
 	int rc = device_register(&edev->dev);
-	if (rc)
+	if (rc) {
+		put_device(&edev->dev);
 		return rc;
+	}
 
 	rc = device_create_file(&edev->dev, &dev_attr_signature);
 	if (rc)
@@ -273,26 +270,27 @@ static int __init eisa_request_resources(struct eisa_root_device *root,
 			edev->res[i].start = edev->res[i].end = 0;
 			continue;
 		}
-		
+
 		if (slot) {
+			edev->res[i].name  = NULL;
 			edev->res[i].start = SLOT_ADDRESS(root, slot)
 					     + (i * 0x400);
 			edev->res[i].end   = edev->res[i].start + 0xff;
 			edev->res[i].flags = IORESOURCE_IO;
 		} else {
+			edev->res[i].name  = NULL;
 			edev->res[i].start = SLOT_ADDRESS(root, slot)
 					     + EISA_VENDOR_ID_OFFSET;
 			edev->res[i].end   = edev->res[i].start + 3;
 			edev->res[i].flags = IORESOURCE_IO | IORESOURCE_BUSY;
 		}
 
-		dev_printk(KERN_DEBUG, &edev->dev, "%pR\n", &edev->res[i]);
 		if (request_resource(root->res, &edev->res[i]))
 			goto failed;
 	}
 
 	return 0;
-	
+
  failed:
 	while (--i >= 0)
 		release_resource(&edev->res[i]);
@@ -311,7 +309,7 @@ static void __init eisa_release_resources(struct eisa_device *edev)
 
 static int __init eisa_probe(struct eisa_root_device *root)
 {
-        int i, c;
+	int i, c;
 	struct eisa_device *edev;
 	char *enabled_str;
 
@@ -319,26 +317,25 @@ static int __init eisa_probe(struct eisa_root_device *root)
 
 	/* First try to get hold of slot 0. If there is no device
 	 * here, simply fail, unless root->force_probe is set. */
-	
-	edev = kzalloc(sizeof(*edev), GFP_KERNEL);
-	if (!edev) {
-		dev_err(root->dev, "EISA: Couldn't allocate mainboard slot\n");
+
+	edev = kzalloc_obj(*edev);
+	if (!edev)
 		return -ENOMEM;
-	}
-		
-	if (eisa_init_device(root, edev, 0)) {
-		kfree(edev);
-		if (!root->force_probe)
-			return -ENODEV;
-		goto force_probe;
-	}
 
 	if (eisa_request_resources(root, edev, 0)) {
 		dev_warn(root->dev,
-		         "EISA: Cannot allocate resource for mainboard\n");
+			 "EISA: Cannot allocate resource for mainboard\n");
 		kfree(edev);
 		if (!root->force_probe)
 			return -EBUSY;
+		goto force_probe;
+	}
+
+	if (eisa_init_device(root, edev, 0)) {
+		eisa_release_resources(edev);
+		kfree(edev);
+		if (!root->force_probe)
+			return -ENODEV;
 		goto force_probe;
 	}
 
@@ -346,30 +343,31 @@ static int __init eisa_probe(struct eisa_root_device *root)
 
 	if (eisa_register_device(edev)) {
 		dev_err(&edev->dev, "EISA: Failed to register %s\n",
-		        edev->id.sig);
+			edev->id.sig);
 		eisa_release_resources(edev);
 		kfree(edev);
 	}
-	
+
  force_probe:
-	
-        for (c = 0, i = 1; i <= root->slots; i++) {
-		edev = kzalloc(sizeof(*edev), GFP_KERNEL);
+
+	for (c = 0, i = 1; i <= root->slots; i++) {
+		edev = kzalloc_obj(*edev);
 		if (!edev) {
 			dev_err(root->dev, "EISA: Out of memory for slot %d\n",
 				i);
 			continue;
 		}
 
-		if (eisa_init_device(root, edev, i)) {
+		if (eisa_request_resources(root, edev, i)) {
+			dev_warn(root->dev,
+				 "Cannot allocate resource for EISA slot %d\n",
+				 i);
 			kfree(edev);
 			continue;
 		}
 
-		if (eisa_request_resources(root, edev, i)) {
-			dev_warn(root->dev,
-			         "Cannot allocate resource for EISA slot %d\n",
-			         i);
+		if (eisa_init_device(root, edev, i)) {
+			eisa_release_resources(edev);
 			kfree(edev);
 			continue;
 		}
@@ -390,13 +388,13 @@ static int __init eisa_probe(struct eisa_root_device *root)
 
 		if (eisa_register_device(edev)) {
 			dev_err(&edev->dev, "EISA: Failed to register %s\n",
-			        edev->id.sig);
+				edev->id.sig);
 			eisa_release_resources(edev);
 			kfree(edev);
 		}
-        }
+	}
 
-	dev_info(root->dev, "EISA: Detected %d card%s\n", c, c == 1 ? "" : "s");
+	dev_info(root->dev, "EISA: Detected %d card%s\n", c, str_plural(c));
 	return 0;
 }
 
@@ -417,7 +415,7 @@ int __init eisa_root_register(struct eisa_root_device *root)
 	 * been already registered. This prevents the virtual root
 	 * device from registering after the real one has, for
 	 * example... */
-	
+
 	root->eisa_root_res.name  = eisa_root_res.name;
 	root->eisa_root_res.start = root->res->start;
 	root->eisa_root_res.end   = root->res->end;
@@ -426,7 +424,7 @@ int __init eisa_root_register(struct eisa_root_device *root)
 	err = request_resource(&eisa_root_res, &root->eisa_root_res);
 	if (err)
 		return err;
-	
+
 	root->bus_nr = eisa_bus_count++;
 
 	err = eisa_probe(root);
@@ -439,7 +437,7 @@ int __init eisa_root_register(struct eisa_root_device *root)
 static int __init eisa_init(void)
 {
 	int r;
-	
+
 	r = bus_register(&eisa_bus_type);
 	if (r)
 		return r;

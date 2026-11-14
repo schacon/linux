@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * SMP support: Entry point for secondary CPUs
  *
@@ -6,10 +7,6 @@
  * Yehuda Yitschak <yehuday@marvell.com>
  * Gregory CLEMENT <gregory.clement@free-electrons.com>
  * Thomas Petazzoni <thomas.petazzoni@free-electrons.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2.  This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  *
  * This file implements the assembly entry point for secondary CPUs in
  * an SMP kernel. The only thing we need to do is to add the CPU to
@@ -21,13 +18,7 @@
 #include <linux/linkage.h>
 #include <linux/init.h>
 
-/*
- * At this stage the secondary CPUs don't have acces yet to the MMU, so
- * we have to provide physical addresses
- */
-#define ARMADA_XP_CFB_BASE	     0xD0020200
-
-	__CPUINIT
+#include <asm/assembler.h>
 
 /*
  * Armada XP specific entry point for secondary CPUs.
@@ -35,15 +26,12 @@
  * startup
  */
 ENTRY(armada_xp_secondary_startup)
+ ARM_BE8(setend	be )			@ go BE8 if entered LE
 
-	/* Read CPU id */
-	mrc     p15, 0, r1, c0, c0, 5
-	and     r1, r1, #0xF
+	bl	ll_add_cpu_to_smp_group
 
-	/* Add CPU to coherency fabric */
-	ldr     r0, =ARMADA_XP_CFB_BASE
+	bl	ll_enable_coherency
 
-	bl	ll_set_cpu_coherent
 	b	secondary_startup
 
 ENDPROC(armada_xp_secondary_startup)

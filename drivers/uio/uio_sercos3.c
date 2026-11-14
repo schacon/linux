@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* sercos3: UIO driver for the Automata Sercos III PCI card
 
    Copyright (C) 2008 Linutronix GmbH
@@ -123,16 +124,16 @@ static int sercos3_pci_probe(struct pci_dev *dev,
 	struct sercos3_priv *priv;
 	int i;
 
-	info = kzalloc(sizeof(struct uio_info), GFP_KERNEL);
+	info = devm_kzalloc_obj(&dev->dev, struct uio_info);
 	if (!info)
 		return -ENOMEM;
 
-	priv = kzalloc(sizeof(struct sercos3_priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&dev->dev, struct sercos3_priv);
 	if (!priv)
-		goto out_free;
+		return -ENOMEM;
 
 	if (pci_enable_device(dev))
-		goto out_free_priv;
+		return -ENODEV;
 
 	if (pci_request_regions(dev, "sercos3"))
 		goto out_disable;
@@ -173,10 +174,6 @@ out_unmap:
 	pci_release_regions(dev);
 out_disable:
 	pci_disable_device(dev);
-out_free_priv:
-	kfree(priv);
-out_free:
-	kfree(info);
 	return -ENODEV;
 }
 
@@ -188,16 +185,13 @@ static void sercos3_pci_remove(struct pci_dev *dev)
 	uio_unregister_device(info);
 	pci_release_regions(dev);
 	pci_disable_device(dev);
-	pci_set_drvdata(dev, NULL);
 	for (i = 0; i < 5; i++) {
 		if (info->mem[i].internal_addr)
 			iounmap(info->mem[i].internal_addr);
 	}
-	kfree(info->priv);
-	kfree(info);
 }
 
-static struct pci_device_id sercos3_pci_ids[] = {
+static const struct pci_device_id sercos3_pci_ids[] = {
 	{
 		.vendor =       PCI_VENDOR_ID_PLX,
 		.device =       PCI_DEVICE_ID_PLX_9030,
@@ -218,6 +212,7 @@ static struct pci_device_id sercos3_pci_ids[] = {
 	},
 	{ 0, }
 };
+MODULE_DEVICE_TABLE(pci, sercos3_pci_ids);
 
 static struct pci_driver sercos3_pci_driver = {
 	.name = "sercos3",
@@ -226,19 +221,7 @@ static struct pci_driver sercos3_pci_driver = {
 	.remove = sercos3_pci_remove,
 };
 
-static int __init sercos3_init_module(void)
-{
-	return pci_register_driver(&sercos3_pci_driver);
-}
-
-static void __exit sercos3_exit_module(void)
-{
-	pci_unregister_driver(&sercos3_pci_driver);
-}
-
-module_init(sercos3_init_module);
-module_exit(sercos3_exit_module);
-
+module_pci_driver(sercos3_pci_driver);
 MODULE_DESCRIPTION("UIO driver for the Automata Sercos III PCI card");
 MODULE_AUTHOR("John Ogness <john.ogness@linutronix.de>");
 MODULE_LICENSE("GPL v2");

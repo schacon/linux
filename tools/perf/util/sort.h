@@ -1,38 +1,22 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __PERF_SORT_H
 #define __PERF_SORT_H
-#include "../builtin.h"
+#include <regex.h>
+#include <stdbool.h>
+#include "hist.h"
 
-#include "util.h"
-
-#include "color.h"
-#include <linux/list.h>
-#include "cache.h"
-#include <linux/rbtree.h>
-#include "symbol.h"
-#include "string.h"
-#include "callchain.h"
-#include "strlist.h"
-#include "values.h"
-
-#include "../perf.h"
-#include "debug.h"
-#include "header.h"
-
-#include "parse-options.h"
-#include "parse-events.h"
-
-#include "thread.h"
-#include "sort.h"
+struct option;
+struct perf_env;
 
 extern regex_t parent_regex;
 extern const char *sort_order;
+extern const char *field_order;
 extern const char default_parent_pattern[];
 extern const char *parent_pattern;
-extern const char default_sort_order[];
-extern int sort__need_collapse;
-extern int sort__has_parent;
-extern int sort__has_sym;
-extern int sort__branch_mode;
+extern const char *default_sort_order;
+extern regex_t ignore_callees_regex;
+extern int have_ignore_callees;
+extern enum sort_mode sort__mode;
 extern struct sort_entry sort_comm;
 extern struct sort_entry sort_dso;
 extern struct sort_entry sort_sym;
@@ -41,105 +25,57 @@ extern struct sort_entry sort_dso_from;
 extern struct sort_entry sort_dso_to;
 extern struct sort_entry sort_sym_from;
 extern struct sort_entry sort_sym_to;
-extern enum sort_type sort__first_dimension;
+extern struct sort_entry sort_srcline;
+extern struct sort_entry sort_type;
+extern const char default_mem_sort_order[];
+extern bool chk_double_cl;
 
-struct he_stat {
-	u64			period;
-	u64			period_sys;
-	u64			period_us;
-	u64			period_guest_sys;
-	u64			period_guest_us;
-	u64			weight;
-	u32			nr_events;
+enum sort_mode {
+	SORT_MODE__NORMAL,
+	SORT_MODE__BRANCH,
+	SORT_MODE__MEMORY,
+	SORT_MODE__TOP,
+	SORT_MODE__DIFF,
+	SORT_MODE__TRACEPOINT,
 };
-
-struct hist_entry_diff {
-	bool	computed;
-
-	/* PERF_HPP__DELTA */
-	double	period_ratio_delta;
-
-	/* PERF_HPP__RATIO */
-	double	period_ratio;
-
-	/* HISTC_WEIGHTED_DIFF */
-	s64	wdiff;
-};
-
-/**
- * struct hist_entry - histogram entry
- *
- * @row_offset - offset from the first callchain expanded to appear on screen
- * @nr_rows - rows expanded in callchain, recalculated on folding/unfolding
- */
-struct hist_entry {
-	struct rb_node		rb_node_in;
-	struct rb_node		rb_node;
-	union {
-		struct list_head node;
-		struct list_head head;
-	} pairs;
-	struct he_stat		stat;
-	struct map_symbol	ms;
-	struct thread		*thread;
-	u64			ip;
-	s32			cpu;
-
-	struct hist_entry_diff	diff;
-
-	/* XXX These two should move to some tree widget lib */
-	u16			row_offset;
-	u16			nr_rows;
-
-	bool			init_have_children;
-	char			level;
-	bool			used;
-	u8			filtered;
-	char			*srcline;
-	struct symbol		*parent;
-	unsigned long		position;
-	struct rb_root		sorted_chain;
-	struct branch_info	*branch_info;
-	struct hists		*hists;
-	struct mem_info		*mem_info;
-	struct callchain_root	callchain[0]; /* must be last member */
-};
-
-static inline bool hist_entry__has_pairs(struct hist_entry *he)
-{
-	return !list_empty(&he->pairs.node);
-}
-
-static inline struct hist_entry *hist_entry__next_pair(struct hist_entry *he)
-{
-	if (hist_entry__has_pairs(he))
-		return list_entry(he->pairs.node.next, struct hist_entry, pairs.node);
-	return NULL;
-}
-
-static inline void hist_entry__add_pair(struct hist_entry *he,
-					struct hist_entry *pair)
-{
-	list_add_tail(&he->pairs.head, &pair->pairs.node);
-}
 
 enum sort_type {
 	/* common sort keys */
 	SORT_PID,
 	SORT_COMM,
+	SORT_COMM_NODIGIT,
 	SORT_DSO,
 	SORT_SYM,
 	SORT_PARENT,
 	SORT_CPU,
+	SORT_SOCKET,
 	SORT_SRCLINE,
+	SORT_SRCFILE,
 	SORT_LOCAL_WEIGHT,
 	SORT_GLOBAL_WEIGHT,
-	SORT_MEM_DADDR_SYMBOL,
-	SORT_MEM_DADDR_DSO,
-	SORT_MEM_LOCKED,
-	SORT_MEM_TLB,
-	SORT_MEM_LVL,
-	SORT_MEM_SNOOP,
+	SORT_TRANSACTION,
+	SORT_TRACE,
+	SORT_SYM_SIZE,
+	SORT_DSO_SIZE,
+	SORT_CGROUP,
+	SORT_CGROUP_ID,
+	SORT_SYM_IPC_NULL,
+	SORT_TIME,
+	SORT_CODE_PAGE_SIZE,
+	SORT_LOCAL_INS_LAT,
+	SORT_GLOBAL_INS_LAT,
+	SORT_LOCAL_PIPELINE_STAGE_CYC,
+	SORT_GLOBAL_PIPELINE_STAGE_CYC,
+	SORT_ADDR,
+	SORT_LOCAL_RETIRE_LAT,
+	SORT_GLOBAL_RETIRE_LAT,
+	SORT_SIMD,
+	SORT_ANNOTATE_DATA_TYPE,
+	SORT_ANNOTATE_DATA_TYPE_OFFSET,
+	SORT_SYM_OFFSET,
+	SORT_ANNOTATE_DATA_TYPE_CACHELINE,
+	SORT_PARALLELISM,
+	SORT_TGID,
 
 	/* branch stack specific sort keys */
 	__SORT_BRANCH_STACK,
@@ -148,6 +84,31 @@ enum sort_type {
 	SORT_SYM_FROM,
 	SORT_SYM_TO,
 	SORT_MISPREDICT,
+	SORT_ABORT,
+	SORT_IN_TX,
+	SORT_CYCLES,
+	SORT_SRCLINE_FROM,
+	SORT_SRCLINE_TO,
+	SORT_SYM_IPC,
+	SORT_ADDR_FROM,
+	SORT_ADDR_TO,
+	SORT_CALLCHAIN_BRANCH_PREDICTED,
+	SORT_CALLCHAIN_BRANCH_ABORT,
+	SORT_CALLCHAIN_BRANCH_CYCLES,
+
+	/* memory mode specific sort keys */
+	__SORT_MEMORY_MODE,
+	SORT_MEM_DADDR_SYMBOL = __SORT_MEMORY_MODE,
+	SORT_MEM_DADDR_DSO,
+	SORT_MEM_LOCKED,
+	SORT_MEM_TLB,
+	SORT_MEM_LVL,
+	SORT_MEM_SNOOP,
+	SORT_MEM_DCACHELINE,
+	SORT_MEM_IADDR_SYMBOL,
+	SORT_MEM_PHYS_DADDR,
+	SORT_MEM_DATA_PAGE_SIZE,
+	SORT_MEM_BLOCKED,
 };
 
 /*
@@ -155,24 +116,48 @@ enum sort_type {
  */
 
 struct sort_entry {
-	struct list_head list;
-
 	const char *se_header;
 
 	int64_t (*se_cmp)(struct hist_entry *, struct hist_entry *);
 	int64_t (*se_collapse)(struct hist_entry *, struct hist_entry *);
-	int	(*se_snprintf)(struct hist_entry *self, char *bf, size_t size,
+	int64_t	(*se_sort)(struct hist_entry *, struct hist_entry *);
+	int	(*se_snprintf)(struct hist_entry *he, char *bf, size_t size,
 			       unsigned int width);
+	int	(*se_filter)(struct hist_entry *he, int type, const void *arg);
+	void	(*se_init)(struct hist_entry *he);
 	u8	se_width_idx;
-	bool	elide;
 };
 
 extern struct sort_entry sort_thread;
-extern struct list_head hist_entry__sort_list;
 
-int setup_sorting(void);
-extern int sort_dimension__add(const char *);
-void sort_entry__setup_elide(struct sort_entry *self, struct strlist *list,
-			     const char *list_name, FILE *fp);
+struct evlist;
+struct tep_handle;
+int setup_sorting(struct evlist *evlist, struct perf_env *env);
+int setup_output_field(void);
+void reset_output_field(void);
+void sort__setup_elide(FILE *fp);
+void perf_hpp__set_elide(int idx, bool elide);
 
+char *sort_help(const char *prefix, enum sort_mode mode);
+
+int report_parse_ignore_callees_opt(const struct option *opt, const char *arg, int unset);
+
+bool is_strict_order(const char *order);
+
+int hpp_dimension__add_output(unsigned col, bool implicit);
+void reset_dimensions(void);
+int sort_dimension__add(struct perf_hpp_list *list, const char *tok,
+			struct evlist *evlist, struct perf_env *env,
+			int level);
+int output_field_add(struct perf_hpp_list *list, const char *tok, int *level);
+int64_t
+sort__iaddr_cmp(struct hist_entry *left, struct hist_entry *right);
+int64_t
+sort__daddr_cmp(struct hist_entry *left, struct hist_entry *right);
+int64_t
+sort__dcacheline_cmp(struct hist_entry *left, struct hist_entry *right);
+int64_t
+_sort__sym_cmp(struct symbol *sym_l, struct symbol *sym_r);
+char *hist_entry__srcline(struct hist_entry *he);
+size_t sort__comm_nodigit_len(struct hist_entry *entry);
 #endif	/* __PERF_SORT_H */

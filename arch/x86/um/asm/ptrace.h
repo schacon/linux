@@ -1,10 +1,19 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __UM_X86_PTRACE_H
 #define __UM_X86_PTRACE_H
 
-#include <linux/compiler.h>
-#ifndef CONFIG_X86_32
-#define __FRAME_OFFSETS /* Needed to get the R* macros */
+/* This is here because signal.c needs the REGSET_FP_LEGACY definition */
+enum {
+	REGSET_GENERAL,
+#ifdef CONFIG_X86_32
+	REGSET_FP_LEGACY,
 #endif
+	REGSET_FP,
+	REGSET_XSTATE,
+};
+
+#include <linux/compiler.h>
+#define __FRAME_OFFSETS /* Needed to get the register macros */
 #include <asm/ptrace-generic.h>
 
 #define user_mode(r) UPT_IS_USER(&(r)->regs)
@@ -47,17 +56,15 @@ struct user_desc;
 
 #ifdef CONFIG_X86_32
 
-#define HOST_AUDIT_ARCH AUDIT_ARCH_I386
-
 extern int ptrace_get_thread_area(struct task_struct *child, int idx,
                                   struct user_desc __user *user_desc);
 
 extern int ptrace_set_thread_area(struct task_struct *child, int idx,
                                   struct user_desc __user *user_desc);
 
-#else
+extern int arch_switch_tls(struct task_struct *to);
 
-#define HOST_AUDIT_ARCH AUDIT_ARCH_X86_64
+#else
 
 #define PT_REGS_R8(r) UPT_R8(&(r)->regs)
 #define PT_REGS_R9(r) UPT_R9(&(r)->regs)
@@ -82,9 +89,13 @@ static inline int ptrace_set_thread_area(struct task_struct *child, int idx,
         return -ENOSYS;
 }
 
-extern long arch_prctl(struct task_struct *task, int code,
+extern long arch_prctl(struct task_struct *task, int option,
 		       unsigned long __user *addr);
 
 #endif
+
 #define user_stack_pointer(regs) PT_REGS_SP(regs)
+
+extern void arch_switch_to(struct task_struct *to);
+
 #endif /* __UM_X86_PTRACE_H */

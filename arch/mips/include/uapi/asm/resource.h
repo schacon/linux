@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -26,7 +27,7 @@
  * but we keep the old value on MIPS32,
  * for compatibility:
  */
-#ifdef CONFIG_32BIT
+#ifndef __mips64
 # define RLIM_INFINITY		0x7fffffffUL
 #endif
 

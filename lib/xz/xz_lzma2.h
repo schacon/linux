@@ -1,11 +1,10 @@
+/* SPDX-License-Identifier: 0BSD */
+
 /*
  * LZMA2 definitions
  *
  * Authors: Lasse Collin <lasse.collin@tukaani.org>
- *          Igor Pavlov <http://7-zip.org/>
- *
- * This file has been put into the public domain.
- * You can do whatever you want with this file.
+ *          Igor Pavlov <https://7-zip.org/>
  */
 
 #ifndef XZ_LZMA2_H
@@ -144,7 +143,7 @@ static inline bool lzma_state_is_literal(enum lzma_state state)
  * Get the index of the appropriate probability array for decoding
  * the distance slot.
  */
-static inline uint32_t lzma_get_dist_state(uint32_t len)
+static inline size_t lzma_get_dist_state(size_t len)
 {
 	return len < DIST_STATES + MATCH_LEN_MIN
 			? len - MATCH_LEN_MIN : DIST_STATES - 1;

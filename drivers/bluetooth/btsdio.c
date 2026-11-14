@@ -1,25 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *
  *  Generic Bluetooth SDIO driver
  *
  *  Copyright (C) 2007  Cambridge Silicon Radio Ltd.
  *  Copyright (C) 2007  Marcel Holtmann <marcel@holtmann.org>
- *
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
  */
 
 #include <linux/kernel.h>
@@ -31,6 +16,7 @@
 #include <linux/errno.h>
 #include <linux/skbuff.h>
 
+#include <linux/mmc/host.h>
 #include <linux/mmc/sdio_ids.h>
 #include <linux/mmc/sdio_func.h>
 
@@ -45,9 +31,6 @@ static const struct sdio_device_id btsdio_table[] = {
 
 	/* Generic Bluetooth Type-B SDIO device */
 	{ SDIO_DEVICE_CLASS(SDIO_CLASS_BT_B) },
-
-	/* Generic Bluetooth AMP controller */
-	{ SDIO_DEVICE_CLASS(SDIO_CLASS_BT_AMP) },
 
 	{ }	/* Terminating entry */
 };
@@ -73,6 +56,7 @@ struct btsdio_data {
 #define REG_CL_INTRD 0x13	/* Interrupt Clear */
 #define REG_EN_INTRD 0x14	/* Interrupt Enable */
 #define REG_MD_STAT  0x20	/* Bluetooth Mode Status */
+#define REG_MD_SET   0x20	/* Bluetooth Mode Set */
 
 static int btsdio_tx_packet(struct btsdio_data *data, struct sk_buff *skb)
 {
@@ -85,7 +69,7 @@ static int btsdio_tx_packet(struct btsdio_data *data, struct sk_buff *skb)
 	skb->data[0] = (skb->len & 0x0000ff);
 	skb->data[1] = (skb->len & 0x00ff00) >> 8;
 	skb->data[2] = (skb->len & 0xff0000) >> 16;
-	skb->data[3] = bt_cb(skb)->pkt_type;
+	skb->data[3] = hci_skb_pkt_type(skb);
 
 	err = sdio_writesb(data->func, REG_TDAT, skb->data, skb->len);
 	if (err < 0) {
@@ -143,7 +127,8 @@ static int btsdio_rx_packet(struct btsdio_data *data)
 	if (!skb) {
 		/* Out of memory. Prepare a read retry and just
 		 * return with the expectation that the next time
-		 * we're called we'll have more memory. */
+		 * we're called we'll have more memory.
+		 */
 		return -ENOMEM;
 	}
 
@@ -157,12 +142,20 @@ static int btsdio_rx_packet(struct btsdio_data *data)
 
 	data->hdev->stat.byte_rx += len;
 
-	skb->dev = (void *) data->hdev;
-	bt_cb(skb)->pkt_type = hdr[3];
-
-	err = hci_recv_frame(skb);
-	if (err < 0)
-		return err;
+	switch (hdr[3]) {
+	case HCI_EVENT_PKT:
+	case HCI_ACLDATA_PKT:
+	case HCI_SCODATA_PKT:
+	case HCI_ISODATA_PKT:
+		hci_skb_pkt_type(skb) = hdr[3];
+		err = hci_recv_frame(data->hdev, skb);
+		if (err < 0)
+			return err;
+		break;
+	default:
+		kfree_skb(skb);
+		return -EINVAL;
+	}
 
 	sdio_writeb(data->func, 0x00, REG_PC_RRT, NULL);
 
@@ -194,26 +187,20 @@ static int btsdio_open(struct hci_dev *hdev)
 
 	BT_DBG("%s", hdev->name);
 
-	if (test_and_set_bit(HCI_RUNNING, &hdev->flags))
-		return 0;
-
 	sdio_claim_host(data->func);
 
 	err = sdio_enable_func(data->func);
-	if (err < 0) {
-		clear_bit(HCI_RUNNING, &hdev->flags);
+	if (err < 0)
 		goto release;
-	}
 
 	err = sdio_claim_irq(data->func, btsdio_interrupt);
 	if (err < 0) {
 		sdio_disable_func(data->func);
-		clear_bit(HCI_RUNNING, &hdev->flags);
 		goto release;
 	}
 
 	if (data->func->class == SDIO_CLASS_BT_B)
-		sdio_writeb(data->func, 0x00, REG_MD_STAT, NULL);
+		sdio_writeb(data->func, 0x00, REG_MD_SET, NULL);
 
 	sdio_writeb(data->func, 0x01, REG_EN_INTRD, NULL);
 
@@ -228,9 +215,6 @@ static int btsdio_close(struct hci_dev *hdev)
 	struct btsdio_data *data = hci_get_drvdata(hdev);
 
 	BT_DBG("%s", hdev->name);
-
-	if (!test_and_clear_bit(HCI_RUNNING, &hdev->flags))
-		return 0;
 
 	sdio_claim_host(data->func);
 
@@ -255,17 +239,13 @@ static int btsdio_flush(struct hci_dev *hdev)
 	return 0;
 }
 
-static int btsdio_send_frame(struct sk_buff *skb)
+static int btsdio_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
 {
-	struct hci_dev *hdev = (struct hci_dev *) skb->dev;
 	struct btsdio_data *data = hci_get_drvdata(hdev);
 
 	BT_DBG("%s", hdev->name);
 
-	if (!test_bit(HCI_RUNNING, &hdev->flags))
-		return -EBUSY;
-
-	switch (bt_cb(skb)->pkt_type) {
+	switch (hci_skb_pkt_type(skb)) {
 	case HCI_COMMAND_PKT:
 		hdev->stat.cmd_tx++;
 		break;
@@ -304,7 +284,23 @@ static int btsdio_probe(struct sdio_func *func,
 		tuple = tuple->next;
 	}
 
-	data = devm_kzalloc(&func->dev, sizeof(*data), GFP_KERNEL);
+	/* Broadcom devices soldered onto the PCB (non-removable) use an
+	 * UART connection for Bluetooth, ignore the BT SDIO interface.
+	 */
+	if (func->vendor == SDIO_VENDOR_ID_BROADCOM &&
+	    !mmc_card_is_removable(func->card->host)) {
+		switch (func->device) {
+		case SDIO_DEVICE_ID_BROADCOM_43341:
+		case SDIO_DEVICE_ID_BROADCOM_43430:
+		case SDIO_DEVICE_ID_BROADCOM_4345:
+		case SDIO_DEVICE_ID_BROADCOM_43455:
+		case SDIO_DEVICE_ID_BROADCOM_4356:
+		case SDIO_DEVICE_ID_BROADCOM_CYPRESS_4373:
+			return -ENODEV;
+		}
+	}
+
+	data = devm_kzalloc_obj(&func->dev, *data);
 	if (!data)
 		return -ENOMEM;
 
@@ -321,11 +317,6 @@ static int btsdio_probe(struct sdio_func *func,
 	hdev->bus = HCI_SDIO;
 	hci_set_drvdata(hdev, data);
 
-	if (id->class == SDIO_CLASS_BT_AMP)
-		hdev->dev_type = HCI_AMP;
-	else
-		hdev->dev_type = HCI_BREDR;
-
 	data->hdev = hdev;
 
 	SET_HCIDEV_DEV(hdev, &func->dev);
@@ -334,6 +325,9 @@ static int btsdio_probe(struct sdio_func *func,
 	hdev->close    = btsdio_close;
 	hdev->flush    = btsdio_flush;
 	hdev->send     = btsdio_send_frame;
+
+	if (func->vendor == 0x0104 && func->device == 0x00c5)
+		hci_set_quirk(hdev, HCI_QUIRK_RESET_ON_CLOSE);
 
 	err = hci_register_dev(hdev);
 	if (err < 0) {
@@ -356,6 +350,7 @@ static void btsdio_remove(struct sdio_func *func)
 	if (!data)
 		return;
 
+	cancel_work_sync(&data->work);
 	hdev = data->hdev;
 
 	sdio_set_drvdata(func, NULL);
@@ -372,20 +367,7 @@ static struct sdio_driver btsdio_driver = {
 	.id_table	= btsdio_table,
 };
 
-static int __init btsdio_init(void)
-{
-	BT_INFO("Generic Bluetooth SDIO driver ver %s", VERSION);
-
-	return sdio_register_driver(&btsdio_driver);
-}
-
-static void __exit btsdio_exit(void)
-{
-	sdio_unregister_driver(&btsdio_driver);
-}
-
-module_init(btsdio_init);
-module_exit(btsdio_exit);
+module_sdio_driver(btsdio_driver);
 
 MODULE_AUTHOR("Marcel Holtmann <marcel@holtmann.org>");
 MODULE_DESCRIPTION("Generic Bluetooth SDIO driver ver " VERSION);

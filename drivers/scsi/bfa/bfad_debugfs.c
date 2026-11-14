@@ -1,18 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2005-2010 Brocade Communications Systems, Inc.
+ * Copyright (c) 2005-2014 Brocade Communications Systems, Inc.
+ * Copyright (c) 2014- QLogic Corporation.
  * All rights reserved
- * www.brocade.com
+ * www.qlogic.com
  *
- * Linux driver for Brocade Fibre Channel Host Bus Adapter.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License (GPL) Version 2 as
- * published by the Free Software Foundation
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * Linux driver for QLogic BR-series Fibre Channel Host Bus Adapter.
  */
 
 #include <linux/debugfs.h>
@@ -53,7 +46,7 @@ bfad_debugfs_open_drvtrc(struct inode *inode, struct file *file)
 	struct bfad_s *bfad = port->bfad;
 	struct bfad_debug_info *debug;
 
-	debug = kzalloc(sizeof(struct bfad_debug_info), GFP_KERNEL);
+	debug = kzalloc_obj(struct bfad_debug_info);
 	if (!debug)
 		return -ENOMEM;
 
@@ -74,21 +67,19 @@ bfad_debugfs_open_fwtrc(struct inode *inode, struct file *file)
 	unsigned long flags;
 	int rc;
 
-	fw_debug = kzalloc(sizeof(struct bfad_debug_info), GFP_KERNEL);
+	fw_debug = kzalloc_obj(struct bfad_debug_info);
 	if (!fw_debug)
 		return -ENOMEM;
 
 	fw_debug->buffer_len = sizeof(struct bfa_trc_mod_s);
 
-	fw_debug->debug_buffer = vmalloc(fw_debug->buffer_len);
+	fw_debug->debug_buffer = vzalloc(fw_debug->buffer_len);
 	if (!fw_debug->debug_buffer) {
 		kfree(fw_debug);
 		printk(KERN_INFO "bfad[%d]: Failed to allocate fwtrc buffer\n",
 				bfad->inst_no);
 		return -ENOMEM;
 	}
-
-	memset(fw_debug->debug_buffer, 0, fw_debug->buffer_len);
 
 	spin_lock_irqsave(&bfad->bfad_lock, flags);
 	rc = bfa_ioc_debug_fwtrc(&bfad->bfa.ioc,
@@ -118,21 +109,19 @@ bfad_debugfs_open_fwsave(struct inode *inode, struct file *file)
 	unsigned long flags;
 	int rc;
 
-	fw_debug = kzalloc(sizeof(struct bfad_debug_info), GFP_KERNEL);
+	fw_debug = kzalloc_obj(struct bfad_debug_info);
 	if (!fw_debug)
 		return -ENOMEM;
 
 	fw_debug->buffer_len = sizeof(struct bfa_trc_mod_s);
 
-	fw_debug->debug_buffer = vmalloc(fw_debug->buffer_len);
+	fw_debug->debug_buffer = vzalloc(fw_debug->buffer_len);
 	if (!fw_debug->debug_buffer) {
 		kfree(fw_debug);
 		printk(KERN_INFO "bfad[%d]: Failed to allocate fwsave buffer\n",
 				bfad->inst_no);
 		return -ENOMEM;
 	}
-
-	memset(fw_debug->debug_buffer, 0, fw_debug->buffer_len);
 
 	spin_lock_irqsave(&bfad->bfad_lock, flags);
 	rc = bfa_ioc_debug_fwsave(&bfad->bfa.ioc,
@@ -158,7 +147,7 @@ bfad_debugfs_open_reg(struct inode *inode, struct file *file)
 {
 	struct bfad_debug_info *reg_debug;
 
-	reg_debug = kzalloc(sizeof(struct bfad_debug_info), GFP_KERNEL);
+	reg_debug = kzalloc_obj(struct bfad_debug_info);
 	if (!reg_debug)
 		return -ENOMEM;
 
@@ -173,31 +162,9 @@ bfad_debugfs_open_reg(struct inode *inode, struct file *file)
 static loff_t
 bfad_debugfs_lseek(struct file *file, loff_t offset, int orig)
 {
-	struct bfad_debug_info *debug;
-	loff_t pos = file->f_pos;
-
-	debug = file->private_data;
-
-	switch (orig) {
-	case 0:
-		file->f_pos = offset;
-		break;
-	case 1:
-		file->f_pos += offset;
-		break;
-	case 2:
-		file->f_pos = debug->buffer_len - offset;
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	if (file->f_pos < 0 || file->f_pos > debug->buffer_len) {
-		file->f_pos = pos;
-		return -EINVAL;
-	}
-
-	return file->f_pos;
+	struct bfad_debug_info *debug = file->private_data;
+	return fixed_size_llseek(file, offset, orig,
+				debug->buffer_len);
 }
 
 static ssize_t
@@ -276,27 +243,19 @@ bfad_debugfs_write_regrd(struct file *file, const char __user *buf,
 	struct bfad_s *bfad = port->bfad;
 	struct bfa_s *bfa = &bfad->bfa;
 	struct bfa_ioc_s *ioc = &bfa->ioc;
-	int addr, len, rc, i;
+	int addr, rc, i;
+	u32 len;
 	u32 *regbuf;
 	void __iomem *rb, *reg_addr;
 	unsigned long flags;
 	void *kern_buf;
 
-	kern_buf = kzalloc(nbytes, GFP_KERNEL);
-
-	if (!kern_buf) {
-		printk(KERN_INFO "bfad[%d]: Failed to allocate buffer\n",
-				bfad->inst_no);
-		return -ENOMEM;
-	}
-
-	if (copy_from_user(kern_buf, (void  __user *)buf, nbytes)) {
-		kfree(kern_buf);
-		return -ENOMEM;
-	}
+	kern_buf = memdup_user_nul(buf, nbytes);
+	if (IS_ERR(kern_buf))
+		return PTR_ERR(kern_buf);
 
 	rc = sscanf(kern_buf, "%x:%x", &addr, &len);
-	if (rc < 2) {
+	if (rc < 2 || len > (UINT_MAX >> 2)) {
 		printk(KERN_INFO
 			"bfad[%d]: %s failed to read user buf\n",
 			bfad->inst_no, __func__);
@@ -358,18 +317,9 @@ bfad_debugfs_write_regwr(struct file *file, const char __user *buf,
 	unsigned long flags;
 	void *kern_buf;
 
-	kern_buf = kzalloc(nbytes, GFP_KERNEL);
-
-	if (!kern_buf) {
-		printk(KERN_INFO "bfad[%d]: Failed to allocate buffer\n",
-				bfad->inst_no);
-		return -ENOMEM;
-	}
-
-	if (copy_from_user(kern_buf, (void  __user *)buf, nbytes)) {
-		kfree(kern_buf);
-		return -ENOMEM;
-	}
+	kern_buf = memdup_user_nul(buf, nbytes);
+	if (IS_ERR(kern_buf))
+		return PTR_ERR(kern_buf);
 
 	rc = sscanf(kern_buf, "%x:%x", &addr, &val);
 	if (rc < 2) {
@@ -421,8 +371,7 @@ bfad_debugfs_release_fwtrc(struct inode *inode, struct file *file)
 	if (!fw_debug)
 		return 0;
 
-	if (fw_debug->debug_buffer)
-		vfree(fw_debug->debug_buffer);
+	vfree(fw_debug->debug_buffer);
 
 	file->private_data = NULL;
 	kfree(fw_debug);
@@ -502,11 +451,6 @@ bfad_debugfs_init(struct bfad_port_s *port)
 	if (!bfa_debugfs_root) {
 		bfa_debugfs_root = debugfs_create_dir("bfa", NULL);
 		atomic_set(&bfa_debugfs_port_count, 0);
-		if (!bfa_debugfs_root) {
-			printk(KERN_WARNING
-				"BFA debugfs root dir creation failed\n");
-			goto err;
-		}
 	}
 
 	/* Setup the pci_dev debugfs directory for the port */
@@ -514,12 +458,6 @@ bfad_debugfs_init(struct bfad_port_s *port)
 	if (!port->port_debugfs_root) {
 		port->port_debugfs_root =
 			debugfs_create_dir(name, bfa_debugfs_root);
-		if (!port->port_debugfs_root) {
-			printk(KERN_WARNING
-				"bfa %s: debugfs root creation failed\n",
-				bfad->pci_name);
-			goto err;
-		}
 
 		atomic_inc(&bfa_debugfs_port_count);
 
@@ -531,16 +469,9 @@ bfad_debugfs_init(struct bfad_port_s *port)
 							port->port_debugfs_root,
 							port,
 							file->fops);
-			if (!bfad->bfad_dentry_files[i]) {
-				printk(KERN_WARNING
-					"bfa %s: debugfs %s creation failed\n",
-					bfad->pci_name, file->name);
-				goto err;
-			}
 		}
 	}
 
-err:
 	return;
 }
 

@@ -1,6 +1,8 @@
-#ifndef __LINUX_IF_PACKET_H
-#define __LINUX_IF_PACKET_H
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+#ifndef _UAPI__LINUX_IF_PACKET_H
+#define _UAPI__LINUX_IF_PACKET_H
 
+#include <asm/byteorder.h>
 #include <linux/types.h>
 
 struct sockaddr_pkt {
@@ -26,8 +28,10 @@ struct sockaddr_ll {
 #define PACKET_MULTICAST	2		/* To group		*/
 #define PACKET_OTHERHOST	3		/* To someone else 	*/
 #define PACKET_OUTGOING		4		/* Outgoing of any type */
-/* These ones are invisible by user level */
 #define PACKET_LOOPBACK		5		/* MC/BRD frame looped back */
+#define PACKET_USER		6		/* To user space	*/
+#define PACKET_KERNEL		7		/* To kernel space	*/
+/* Unused, PACKET_FASTROUTE and PACKET_LOOPBACK are invisible to user space */
 #define PACKET_FASTROUTE	6		/* Fastrouted frame	*/
 
 /* Packet socket options */
@@ -51,12 +55,23 @@ struct sockaddr_ll {
 #define PACKET_TIMESTAMP		17
 #define PACKET_FANOUT			18
 #define PACKET_TX_HAS_OFF		19
+#define PACKET_QDISC_BYPASS		20
+#define PACKET_ROLLOVER_STATS		21
+#define PACKET_FANOUT_DATA		22
+#define PACKET_IGNORE_OUTGOING		23
+#define PACKET_VNET_HDR_SZ		24
 
 #define PACKET_FANOUT_HASH		0
 #define PACKET_FANOUT_LB		1
 #define PACKET_FANOUT_CPU		2
 #define PACKET_FANOUT_ROLLOVER		3
+#define PACKET_FANOUT_RND		4
+#define PACKET_FANOUT_QM		5
+#define PACKET_FANOUT_CBPF		6
+#define PACKET_FANOUT_EBPF		7
 #define PACKET_FANOUT_FLAG_ROLLOVER	0x1000
+#define PACKET_FANOUT_FLAG_UNIQUEID	0x2000
+#define PACKET_FANOUT_FLAG_IGNORE_OUTGOING     0x4000
 #define PACKET_FANOUT_FLAG_DEFRAG	0x8000
 
 struct tpacket_stats {
@@ -68,6 +83,12 @@ struct tpacket_stats_v3 {
 	unsigned int	tp_packets;
 	unsigned int	tp_drops;
 	unsigned int	tp_freeze_q_cnt;
+};
+
+struct tpacket_rollover_stats {
+	__aligned_u64	tp_all;
+	__aligned_u64	tp_huge;
+	__aligned_u64	tp_failed;
 };
 
 union tpacket_stats_u {
@@ -82,17 +103,20 @@ struct tpacket_auxdata {
 	__u16		tp_mac;
 	__u16		tp_net;
 	__u16		tp_vlan_tci;
-	__u16		tp_padding;
+	__u16		tp_vlan_tpid;
 };
 
 /* Rx ring - header status */
-#define TP_STATUS_KERNEL	      0
-#define TP_STATUS_USER		(1 << 0)
-#define TP_STATUS_COPY		(1 << 1)
-#define TP_STATUS_LOSING	(1 << 2)
-#define TP_STATUS_CSUMNOTREADY	(1 << 3)
-#define TP_STATUS_VLAN_VALID	(1 << 4) /* auxdata has valid tp_vlan_tci */
-#define TP_STATUS_BLK_TMO	(1 << 5)
+#define TP_STATUS_KERNEL		      0
+#define TP_STATUS_USER			(1 << 0)
+#define TP_STATUS_COPY			(1 << 1)
+#define TP_STATUS_LOSING		(1 << 2)
+#define TP_STATUS_CSUMNOTREADY		(1 << 3)
+#define TP_STATUS_VLAN_VALID		(1 << 4) /* auxdata has valid tp_vlan_tci */
+#define TP_STATUS_BLK_TMO		(1 << 5)
+#define TP_STATUS_VLAN_TPID_VALID	(1 << 6) /* auxdata has valid tp_vlan_tpid */
+#define TP_STATUS_CSUM_VALID		(1 << 7)
+#define TP_STATUS_GSO_TCP		(1 << 8)
 
 /* Tx ring - header status */
 #define TP_STATUS_AVAILABLE	      0
@@ -102,8 +126,8 @@ struct tpacket_auxdata {
 
 /* Rx and Tx ring - header status */
 #define TP_STATUS_TS_SOFTWARE		(1 << 29)
-#define TP_STATUS_TS_SYS_HARDWARE	(1 << 30)
-#define TP_STATUS_TS_RAW_HARDWARE	(1 << 31)
+#define TP_STATUS_TS_SYS_HARDWARE	(1 << 30) /* deprecated, never set */
+#define TP_STATUS_TS_RAW_HARDWARE	(1U << 31)
 
 /* Rx ring - feature request bits */
 #define TP_FT_REQ_FILL_RXHASH	0x1
@@ -131,12 +155,15 @@ struct tpacket2_hdr {
 	__u32		tp_sec;
 	__u32		tp_nsec;
 	__u16		tp_vlan_tci;
-	__u16		tp_padding;
+	__u16		tp_vlan_tpid;
+	__u8		tp_padding[4];
 };
 
 struct tpacket_hdr_variant1 {
 	__u32	tp_rxhash;
 	__u32	tp_vlan_tci;
+	__u16	tp_vlan_tpid;
+	__u16	tp_padding;
 };
 
 struct tpacket3_hdr {
@@ -152,6 +179,7 @@ struct tpacket3_hdr {
 	union {
 		struct tpacket_hdr_variant1 hv1;
 	};
+	__u8		tp_padding[8];
 };
 
 struct tpacket_bd_ts {
@@ -202,8 +230,8 @@ struct tpacket_hdr_v1 {
 	 * ts_first_pkt:
 	 *		Is always the time-stamp when the block was opened.
 	 *		Case a)	ZERO packets
-	 *			No packets to deal with but atleast you know the
-	 *			time-interval of this block.
+	 *			No packets to deal with but at least you know
+	 *			the time-interval of this block.
 	 *		Case b) Non-zero packets
 	 *			Use the ts of the first packet in the block.
 	 *
@@ -237,7 +265,8 @@ enum tpacket_versions {
    - struct tpacket_hdr
    - pad to TPACKET_ALIGNMENT=16
    - struct sockaddr_ll
-   - Gap, chosen so that packet data (Start+tp_net) alignes to TPACKET_ALIGNMENT=16
+   - Gap, chosen so that packet data (Start+tp_net) aligns to
+     TPACKET_ALIGNMENT=16
    - Start+tp_mac: [ Optional MAC header ]
    - Start+tp_net: Packet data, aligned to TPACKET_ALIGNMENT=16.
    - Pad to align to TPACKET_ALIGNMENT=16
@@ -270,6 +299,17 @@ struct packet_mreq {
 	unsigned short	mr_type;
 	unsigned short	mr_alen;
 	unsigned char	mr_address[8];
+};
+
+struct fanout_args {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
+	__u16		id;
+	__u16		type_flags;
+#else
+	__u16		type_flags;
+	__u16		id;
+#endif
+	__u32		max_num_members;
 };
 
 #define PACKET_MR_MULTICAST	0

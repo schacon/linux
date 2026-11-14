@@ -1,0 +1,51 @@
+error: recursive dependency detected!
+	symbol A depends on A
+For a resolution refer to Documentation/kbuild/kconfig-language.rst
+subsection "Kconfig recursive dependency limitations"
+
+error: recursive dependency detected!
+	symbol B is selected by B
+For a resolution refer to Documentation/kbuild/kconfig-language.rst
+subsection "Kconfig recursive dependency limitations"
+
+error: recursive dependency detected!
+	symbol C1 depends on C2
+	symbol C2 depends on C1
+For a resolution refer to Documentation/kbuild/kconfig-language.rst
+subsection "Kconfig recursive dependency limitations"
+
+error: recursive dependency detected!
+	symbol D1 depends on D2
+	symbol D2 is selected by D1
+For a resolution refer to Documentation/kbuild/kconfig-language.rst
+subsection "Kconfig recursive dependency limitations"
+
+error: recursive dependency detected!
+	symbol E1 depends on E2
+	symbol E2 is implied by E1
+For a resolution refer to Documentation/kbuild/kconfig-language.rst
+subsection "Kconfig recursive dependency limitations"
+
+error: recursive dependency detected!
+	symbol F1 default value contains F2
+	symbol F2 depends on F1
+For a resolution refer to Documentation/kbuild/kconfig-language.rst
+subsection "Kconfig recursive dependency limitations"
+
+error: recursive dependency detected!
+	symbol G depends on G
+For a resolution refer to Documentation/kbuild/kconfig-language.rst
+subsection "Kconfig recursive dependency limitations"
+
+error: recursive dependency detected!
+	symbol H1 depends on H2
+	symbol H2 range value contains H3
+	symbol H3 range value contains H1
+For a resolution refer to Documentation/kbuild/kconfig-language.rst
+subsection "Kconfig recursive dependency limitations"
+
+error: recursive dependency detected!
+	symbol I1 range value contains I2
+	symbol I2 range value contains I1
+For a resolution refer to Documentation/kbuild/kconfig-language.rst
+subsection "Kconfig recursive dependency limitations"

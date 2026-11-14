@@ -1,9 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __M68K_ENTRY_H
 #define __M68K_ENTRY_H
 
 #include <asm/setup.h>
 #include <asm/page.h>
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #include <asm/thread_info.h>
 #endif
 
@@ -40,7 +41,7 @@
 #define ALLOWINT	(~0x700)
 #endif /* machine compilation types */
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 /*
  * This defines the normal kernel pt-regs layout.
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * File ported from IRIX to Linux by Kanoj Sarcar, 06/08/00.
  * Copyright 2000 Silicon Graphics, Inc.
@@ -11,7 +12,7 @@
 
 #define KV_MAGIC		0x5f4b565f
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <asm/sn/types.h>
 
@@ -23,6 +24,6 @@ typedef struct kern_vars_s {
 	unsigned long	kv_rw_baseaddr;
 } kern_vars_t;
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #endif /* __ASM_SN_KLKERNVARS_H */

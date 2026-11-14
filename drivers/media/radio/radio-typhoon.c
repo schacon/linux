@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* Typhoon Radio Card driver for radio support
  * (c) 1999 Dr. Henrik Seidel <Henrik.Seidel@gmx.de>
  *
@@ -25,7 +26,7 @@
  * The frequency change is necessary since the card never seems to be
  * completely silent.
  *
- * Converted to V4L2 API by Mauro Carvalho Chehab <mchehab@infradead.org>
+ * Converted to V4L2 API by Mauro Carvalho Chehab <mchehab@kernel.org>
  */
 
 #include <linux/module.h>	/* Modules                        */
@@ -74,7 +75,7 @@ struct typhoon {
 
 static struct radio_isa_card *typhoon_alloc(void)
 {
-	struct typhoon *ty = kzalloc(sizeof(*ty), GFP_KERNEL);
+	struct typhoon *ty = kzalloc_obj(*ty);
 
 	return ty ? &ty->isa : NULL;
 }

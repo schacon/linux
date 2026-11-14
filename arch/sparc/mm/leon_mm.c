@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/sparc/mm/leon_m.c
  *
@@ -15,10 +16,10 @@
 #include <asm/leon.h>
 #include <asm/tlbflush.h>
 
-#include "srmmu.h"
+#include "mm_32.h"
 
 int leon_flush_during_switch = 1;
-int srmmu_swprobe_trace;
+static int srmmu_swprobe_trace;
 
 static inline unsigned long leon_get_ctable_ptr(void)
 {
@@ -38,11 +39,9 @@ unsigned long leon_swprobe(unsigned long vaddr, unsigned long *paddr)
 	unsigned int ctxtbl;
 	unsigned int pgd, pmd, ped;
 	unsigned int ptr;
-	unsigned int lvl, pte, paddrbase;
+	unsigned int lvl, pte;
 	unsigned int ctx;
 	unsigned int paddr_calc;
-
-	paddrbase = 0;
 
 	if (srmmu_swprobe_trace)
 		printk(KERN_INFO "swprobe: trace on\n");
@@ -72,7 +71,6 @@ unsigned long leon_swprobe(unsigned long vaddr, unsigned long *paddr)
 			printk(KERN_INFO "swprobe: pgd is entry level 3\n");
 		lvl = 3;
 		pte = pgd;
-		paddrbase = pgd & _SRMMU_PTE_PMASK_LEON;
 		goto ready;
 	}
 	if (((pgd & SRMMU_ET_MASK) != SRMMU_ET_PTD)) {
@@ -95,7 +93,6 @@ unsigned long leon_swprobe(unsigned long vaddr, unsigned long *paddr)
 			printk(KERN_INFO "swprobe: pmd is entry level 2\n");
 		lvl = 2;
 		pte = pmd;
-		paddrbase = pmd & _SRMMU_PTE_PMASK_LEON;
 		goto ready;
 	}
 	if (((pmd & SRMMU_ET_MASK) != SRMMU_ET_PTD)) {
@@ -123,7 +120,6 @@ unsigned long leon_swprobe(unsigned long vaddr, unsigned long *paddr)
 			printk(KERN_INFO "swprobe: ped is entry level 1\n");
 		lvl = 1;
 		pte = ped;
-		paddrbase = ped & _SRMMU_PTE_PMASK_LEON;
 		goto ready;
 	}
 	if (((ped & SRMMU_ET_MASK) != SRMMU_ET_PTD)) {
@@ -146,7 +142,6 @@ unsigned long leon_swprobe(unsigned long vaddr, unsigned long *paddr)
 			printk(KERN_INFO "swprobe: ptr is entry level 0\n");
 		lvl = 0;
 		pte = ptr;
-		paddrbase = ptr & _SRMMU_PTE_PMASK_LEON;
 		goto ready;
 	}
 	if (srmmu_swprobe_trace)

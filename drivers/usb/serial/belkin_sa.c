@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Belkin USB Serial Adapter Driver
  *
@@ -9,30 +10,22 @@
  *  and associated source files.  Please see the usb/serial files for
  *  individual credits and copyrights.
  *
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *	the Free Software Foundation; either version 2 of the License, or
- *	(at your option) any later version.
- *
- * See Documentation/usb/usb-serial.txt for more information on using this
+ * See Documentation/usb/usb-serial.rst for more information on using this
  * driver
  *
  * TODO:
- * -- Add true modem contol line query capability.  Currently we track the
+ * -- Add true modem control line query capability.  Currently we track the
  *    states reported by the interrupt and the states we request.
  * -- Add support for flush commands
  */
 
 #include <linux/kernel.h>
 #include <linux/errno.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-#include <linux/uaccess.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 #include "belkin_sa.h"
@@ -42,15 +35,16 @@
 
 /* function prototypes for a Belkin USB Serial Adapter F5U103 */
 static int belkin_sa_port_probe(struct usb_serial_port *port);
-static int belkin_sa_port_remove(struct usb_serial_port *port);
+static void belkin_sa_port_remove(struct usb_serial_port *port);
 static int  belkin_sa_open(struct tty_struct *tty,
 			struct usb_serial_port *port);
 static void belkin_sa_close(struct usb_serial_port *port);
 static void belkin_sa_read_int_callback(struct urb *urb);
 static void belkin_sa_process_read_urb(struct urb *urb);
 static void belkin_sa_set_termios(struct tty_struct *tty,
-			struct usb_serial_port *port, struct ktermios * old);
-static void belkin_sa_break_ctl(struct tty_struct *tty, int break_state);
+				  struct usb_serial_port *port,
+				  const struct ktermios *old_termios);
+static int belkin_sa_break_ctl(struct tty_struct *tty, int break_state);
 static int  belkin_sa_tiocmget(struct tty_struct *tty);
 static int  belkin_sa_tiocmset(struct tty_struct *tty,
 					unsigned int set, unsigned int clear);
@@ -70,7 +64,6 @@ MODULE_DEVICE_TABLE(usb, id_table);
 /* All of the device info needed for the serial converters */
 static struct usb_serial_driver belkin_device = {
 	.driver = {
-		.owner =	THIS_MODULE,
 		.name =		"belkin",
 	},
 	.description =		"Belkin / Peracom / GoHubs USB Serial Adapter",
@@ -119,7 +112,7 @@ static int belkin_sa_port_probe(struct usb_serial_port *port)
 	struct usb_device *dev = port->serial->dev;
 	struct belkin_sa_private *priv;
 
-	priv = kmalloc(sizeof(struct belkin_sa_private), GFP_KERNEL);
+	priv = kmalloc_obj(struct belkin_sa_private);
 	if (!priv)
 		return -ENOMEM;
 
@@ -139,14 +132,12 @@ static int belkin_sa_port_probe(struct usb_serial_port *port)
 	return 0;
 }
 
-static int belkin_sa_port_remove(struct usb_serial_port *port)
+static void belkin_sa_port_remove(struct usb_serial_port *port)
 {
 	struct belkin_sa_private *priv;
 
 	priv = usb_get_serial_port_data(port);
 	kfree(priv);
-
-	return 0;
 }
 
 static int belkin_sa_open(struct tty_struct *tty,
@@ -200,6 +191,9 @@ static void belkin_sa_read_int_callback(struct urb *urb)
 	}
 
 	usb_serial_debug_data(&port->dev, __func__, urb->actual_length, data);
+
+	if (urb->actual_length < BELKIN_SA_MSR_INDEX + 1)
+		goto exit;
 
 	/* Handle known interrupt data */
 	/* ignore data[0] and data[1] */
@@ -280,7 +274,8 @@ static void belkin_sa_process_read_urb(struct urb *urb)
 }
 
 static void belkin_sa_set_termios(struct tty_struct *tty,
-		struct usb_serial_port *port, struct ktermios *old_termios)
+				  struct usb_serial_port *port,
+				  const struct ktermios *old_termios)
 {
 	struct usb_serial *serial = port->serial;
 	struct belkin_sa_private *priv = usb_get_serial_port_data(port);
@@ -363,25 +358,7 @@ static void belkin_sa_set_termios(struct tty_struct *tty,
 
 	/* set the number of data bits */
 	if ((cflag & CSIZE) != (old_cflag & CSIZE)) {
-		switch (cflag & CSIZE) {
-		case CS5:
-			urb_value = BELKIN_SA_DATA_BITS(5);
-			break;
-		case CS6:
-			urb_value = BELKIN_SA_DATA_BITS(6);
-			break;
-		case CS7:
-			urb_value = BELKIN_SA_DATA_BITS(7);
-			break;
-		case CS8:
-			urb_value = BELKIN_SA_DATA_BITS(8);
-			break;
-		default:
-			dev_dbg(&port->dev,
-				"CSIZE was not CS5-CS8, using default of 8\n");
-			urb_value = BELKIN_SA_DATA_BITS(8);
-			break;
-		}
+		urb_value = BELKIN_SA_DATA_BITS(tty_get_char_size(cflag));
 		if (BSA_USB_CMD(BELKIN_SA_SET_DATA_BITS_REQUEST, urb_value) < 0)
 			dev_err(&port->dev, "Set data bits error\n");
 	}
@@ -422,13 +399,19 @@ static void belkin_sa_set_termios(struct tty_struct *tty,
 	spin_unlock_irqrestore(&priv->lock, flags);
 }
 
-static void belkin_sa_break_ctl(struct tty_struct *tty, int break_state)
+static int belkin_sa_break_ctl(struct tty_struct *tty, int break_state)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	struct usb_serial *serial = port->serial;
+	int ret;
 
-	if (BSA_USB_CMD(BELKIN_SA_SET_BREAK_REQUEST, break_state ? 1 : 0) < 0)
+	ret = BSA_USB_CMD(BELKIN_SA_SET_BREAK_REQUEST, break_state ? 1 : 0);
+	if (ret < 0) {
 		dev_err(&port->dev, "Set break_ctl %d\n", break_state);
+		return ret;
+	}
+
+	return 0;
 }
 
 static int belkin_sa_tiocmget(struct tty_struct *tty)
@@ -453,43 +436,39 @@ static int belkin_sa_tiocmset(struct tty_struct *tty,
 	struct belkin_sa_private *priv = usb_get_serial_port_data(port);
 	unsigned long control_state;
 	unsigned long flags;
-	int retval;
-	int rts = 0;
-	int dtr = 0;
+	int retval = 0;
 
 	spin_lock_irqsave(&priv->lock, flags);
 	control_state = priv->control_state;
 
-	if (set & TIOCM_RTS) {
+	if (set & TIOCM_RTS)
 		control_state |= TIOCM_RTS;
-		rts = 1;
-	}
-	if (set & TIOCM_DTR) {
+	if (set & TIOCM_DTR)
 		control_state |= TIOCM_DTR;
-		dtr = 1;
-	}
-	if (clear & TIOCM_RTS) {
+	if (clear & TIOCM_RTS)
 		control_state &= ~TIOCM_RTS;
-		rts = 0;
-	}
-	if (clear & TIOCM_DTR) {
+	if (clear & TIOCM_DTR)
 		control_state &= ~TIOCM_DTR;
-		dtr = 0;
-	}
 
 	priv->control_state = control_state;
 	spin_unlock_irqrestore(&priv->lock, flags);
 
-	retval = BSA_USB_CMD(BELKIN_SA_SET_RTS_REQUEST, rts);
-	if (retval < 0) {
-		dev_err(&port->dev, "Set RTS error %d\n", retval);
-		goto exit;
+	if ((set | clear) & TIOCM_RTS) {
+		retval = BSA_USB_CMD(BELKIN_SA_SET_RTS_REQUEST,
+					!!(control_state & TIOCM_RTS));
+		if (retval < 0) {
+			dev_err(&port->dev, "Set RTS error %d\n", retval);
+			goto exit;
+		}
 	}
 
-	retval = BSA_USB_CMD(BELKIN_SA_SET_DTR_REQUEST, dtr);
-	if (retval < 0) {
-		dev_err(&port->dev, "Set DTR error %d\n", retval);
-		goto exit;
+	if ((set | clear) & TIOCM_DTR) {
+		retval = BSA_USB_CMD(BELKIN_SA_SET_DTR_REQUEST,
+					!!(control_state & TIOCM_DTR));
+		if (retval < 0) {
+			dev_err(&port->dev, "Set DTR error %d\n", retval);
+			goto exit;
+		}
 	}
 exit:
 	return retval;

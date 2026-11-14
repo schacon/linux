@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Linux driver for digital TV devices equipped with B2C2 FlexcopII(b)/III
  * flexcop-sram.c - functions for controlling the SRAM
@@ -85,7 +86,7 @@ static void flexcop_sram_write(struct adapter *adapter, u32 bank, u32 addr, u8 *
 		while (((read_reg_dw(adapter, 0x700) & 0x80000000) != 0) && (retries > 0)) {
 			mdelay(1);
 			retries--;
-		};
+		}
 
 		if (retries == 0)
 			printk("%s: SRAM timeout\n", __func__);
@@ -110,7 +111,7 @@ static void flex_sram_read(struct adapter *adapter, u32 bank, u32 addr, u8 *buf,
 		while (((read_reg_dw(adapter, 0x700) & 0x80000000) != 0) && (retries > 0)) {
 			mdelay(1);
 			retries--;
-		};
+		}
 
 		if (retries == 0)
 			printk("%s: SRAM timeout\n", __func__);
@@ -122,7 +123,7 @@ static void flex_sram_read(struct adapter *adapter, u32 bank, u32 addr, u8 *buf,
 		while (((read_reg_dw(adapter, 0x700) & 0x80000000) != 0) && (retries > 0)) {
 			mdelay(1);
 			retries--;
-		};
+		}
 
 		if (retries == 0)
 			printk("%s: SRAM timeout\n", __func__);
@@ -351,7 +352,7 @@ static int flexcop_sram_detect(struct flexcop_device *fc)
 	sram_set_size(adapter, 0x10000);
 	sram_init(adapter);
 	write_reg_dw(adapter, 0x208, tmp);
-	dprintk("%s: SRAM detection failed. Set to 32K \n", __func__);
+	dprintk("%s: SRAM detection failed. Set to 32K\n", __func__);
 	return 0;
 }
 

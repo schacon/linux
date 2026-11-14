@@ -1,17 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Dynapro serial touchscreen driver
  *
  * Copyright (c) 2009 Tias Guns
  * Based on the inexio driver (c) Vojtech Pavlik and Dan Streetman and
  * Richard Lemon
- *
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- */
 
 /*
  * 2009/09/19 Tias Guns <tias@ulyssis.org>
@@ -24,7 +19,6 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/serio.h>
-#include <linux/init.h>
 
 #define DRIVER_DESC	"Dynapro serial touchscreen driver"
 
@@ -116,7 +110,7 @@ static int dynapro_connect(struct serio *serio, struct serio_driver *drv)
 	struct input_dev *input_dev;
 	int err;
 
-	pdynapro = kzalloc(sizeof(struct dynapro), GFP_KERNEL);
+	pdynapro = kzalloc_obj(*pdynapro);
 	input_dev = input_allocate_device();
 	if (!pdynapro || !input_dev) {
 		err = -ENOMEM;
@@ -125,8 +119,8 @@ static int dynapro_connect(struct serio *serio, struct serio_driver *drv)
 
 	pdynapro->serio = serio;
 	pdynapro->dev = input_dev;
-	snprintf(pdynapro->phys, sizeof(pdynapro->phys),
-		 "%s/input0", serio->phys);
+	scnprintf(pdynapro->phys, sizeof(pdynapro->phys),
+		  "%s/input0", serio->phys);
 
 	input_dev->name = "Dynapro Serial TouchScreen";
 	input_dev->phys = pdynapro->phys;
@@ -165,7 +159,7 @@ static int dynapro_connect(struct serio *serio, struct serio_driver *drv)
  * The serio driver structure.
  */
 
-static struct serio_device_id dynapro_serio_ids[] = {
+static const struct serio_device_id dynapro_serio_ids[] = {
 	{
 		.type	= SERIO_RS232,
 		.proto	= SERIO_DYNAPRO,

@@ -1,74 +1,27 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2008 Silicon Graphics, Inc.
  * All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #ifndef __XFS_IOCTL_H__
 #define __XFS_IOCTL_H__
 
-extern int
-xfs_ioc_space(
-	struct xfs_inode	*ip,
-	struct inode		*inode,
-	struct file		*filp,
-	int			ioflags,
-	unsigned int		cmd,
-	xfs_flock64_t		*bf);
+struct xfs_bstat;
+struct xfs_ibulk;
+struct xfs_inogrp;
+
+int xfs_swapext(struct xfs_swapext *sxp);
 
 extern int
-xfs_find_handle(
-	unsigned int		cmd,
-	xfs_fsop_handlereq_t	*hreq);
+xfs_fileattr_get(
+	struct dentry		*dentry,
+	struct file_kattr	*fa);
 
 extern int
-xfs_open_by_handle(
-	struct file		*parfilp,
-	xfs_fsop_handlereq_t	*hreq);
-
-extern int
-xfs_readlink_by_handle(
-	struct file		*parfilp,
-	xfs_fsop_handlereq_t	*hreq);
-
-extern int
-xfs_attrmulti_attr_get(
-	struct inode		*inode,
-	unsigned char		*name,
-	unsigned char		__user *ubuf,
-	__uint32_t		*len,
-	__uint32_t		flags);
-
-extern int
-xfs_attrmulti_attr_set(
-	struct inode		*inode,
-	unsigned char		*name,
-	const unsigned char	__user *ubuf,
-	__uint32_t		len,
-	__uint32_t		flags);
-
-extern int
-xfs_attrmulti_attr_remove(
-	struct inode		*inode,
-	unsigned char		*name,
-	__uint32_t		flags);
-
-extern struct dentry *
-xfs_handle_to_dentry(
-	struct file		*parfilp,
-	void __user		*uhandle,
-	u32			hlen);
+xfs_fileattr_set(
+	const struct mnt_idmap	*idmap,
+	struct dentry		*dentry,
+	struct file_kattr	*fa);
 
 extern long
 xfs_file_ioctl(
@@ -81,5 +34,9 @@ xfs_file_compat_ioctl(
 	struct file		*file,
 	unsigned int		cmd,
 	unsigned long		arg);
+
+int xfs_fsbulkstat_one_fmt(struct xfs_ibulk *breq,
+			   const struct xfs_bulkstat *bstat);
+int xfs_fsinumbers_fmt(struct xfs_ibulk *breq, const struct xfs_inumbers *igrp);
 
 #endif

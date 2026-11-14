@@ -1,30 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Signal support for Hexagon processor
  *
  * Copyright (c) 2010-2012, The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
- * 02110-1301, USA.
  */
 
 #include <linux/linkage.h>
 #include <linux/syscalls.h>
-#include <linux/tracehook.h>
+#include <linux/sched/task_stack.h>
+
 #include <asm/registers.h>
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/ucontext.h>
 #include <asm/cacheflush.h>
 #include <asm/signal.h>
@@ -36,130 +24,129 @@ struct rt_sigframe {
 	struct ucontext uc;
 };
 
-static void __user *get_sigframe(struct k_sigaction *ka, struct pt_regs *regs,
+static void __user *get_sigframe(struct ksignal *ksig, struct pt_regs *regs,
 			  size_t frame_size)
 {
-	unsigned long sp = regs->r29;
-
-	/* check if we would overflow the alt stack */
-	if (on_sig_stack(sp) && !likely(on_sig_stack(sp - frame_size)))
-		return (void __user __force *)-1UL;
-
-	/* Switch to signal stack if appropriate */
-	if ((ka->sa.sa_flags & SA_ONSTACK) && (sas_ss_flags(sp) == 0))
-		sp = current->sas_ss_sp + current->sas_ss_size;
+	unsigned long sp = sigsp(regs->r29, ksig);
 
 	return (void __user *)((sp - frame_size) & ~(sizeof(long long) - 1));
 }
 
 static int setup_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc)
 {
-	unsigned long tmp;
-	int err = 0;
+	scoped_user_write_access(sc, Efault) {
+		unsafe_copy_to_user(&sc->sc_regs.r0, &regs->r00,
+				    32*sizeof(unsigned long), Efault);
 
-	err |= copy_to_user(&sc->sc_regs.r0, &regs->r00,
-			    32*sizeof(unsigned long));
-
-	err |= __put_user(regs->sa0, &sc->sc_regs.sa0);
-	err |= __put_user(regs->lc0, &sc->sc_regs.lc0);
-	err |= __put_user(regs->sa1, &sc->sc_regs.sa1);
-	err |= __put_user(regs->lc1, &sc->sc_regs.lc1);
-	err |= __put_user(regs->m0, &sc->sc_regs.m0);
-	err |= __put_user(regs->m1, &sc->sc_regs.m1);
-	err |= __put_user(regs->usr, &sc->sc_regs.usr);
-	err |= __put_user(regs->preds, &sc->sc_regs.p3_0);
-	err |= __put_user(regs->gp, &sc->sc_regs.gp);
-	err |= __put_user(regs->ugp, &sc->sc_regs.ugp);
+		unsafe_put_user(regs->sa0, &sc->sc_regs.sa0, Efault);
+		unsafe_put_user(regs->lc0, &sc->sc_regs.lc0, Efault);
+		unsafe_put_user(regs->sa1, &sc->sc_regs.sa1, Efault);
+		unsafe_put_user(regs->lc1, &sc->sc_regs.lc1, Efault);
+		unsafe_put_user(regs->m0, &sc->sc_regs.m0, Efault);
+		unsafe_put_user(regs->m1, &sc->sc_regs.m1, Efault);
+		unsafe_put_user(regs->usr, &sc->sc_regs.usr, Efault);
+		unsafe_put_user(regs->preds, &sc->sc_regs.p3_0, Efault);
+		unsafe_put_user(regs->gp, &sc->sc_regs.gp, Efault);
+		unsafe_put_user(regs->ugp, &sc->sc_regs.ugp, Efault);
 #if CONFIG_HEXAGON_ARCH_VERSION >= 4
-	err |= __put_user(regs->cs0, &sc->sc_regs.cs0);
-	err |= __put_user(regs->cs1, &sc->sc_regs.cs1);
+		unsafe_put_user(regs->cs0, &sc->sc_regs.cs0, Efault);
+		unsafe_put_user(regs->cs1, &sc->sc_regs.cs1, Efault);
 #endif
-	tmp = pt_elr(regs); err |= __put_user(tmp, &sc->sc_regs.pc);
-	tmp = pt_cause(regs); err |= __put_user(tmp, &sc->sc_regs.cause);
-	tmp = pt_badva(regs); err |= __put_user(tmp, &sc->sc_regs.badva);
+		unsafe_put_user(pt_elr(regs), &sc->sc_regs.pc, Efault);
+		unsafe_put_user(pt_cause(regs), &sc->sc_regs.cause, Efault);
+		unsafe_put_user(pt_badva(regs), &sc->sc_regs.badva, Efault);
+	}
+	return 0;
 
-	return err;
+Efault:
+	return -EFAULT;
 }
 
 static int restore_sigcontext(struct pt_regs *regs,
 			      struct sigcontext __user *sc)
 {
 	unsigned long tmp;
-	int err = 0;
 
-	err |= copy_from_user(&regs->r00, &sc->sc_regs.r0,
-			      32 * sizeof(unsigned long));
+	scoped_user_read_access(sc, Efault) {
+		unsafe_copy_from_user(&regs->r00, &sc->sc_regs.r0,
+				      32 * sizeof(unsigned long), Efault);
 
-	err |= __get_user(regs->sa0, &sc->sc_regs.sa0);
-	err |= __get_user(regs->lc0, &sc->sc_regs.lc0);
-	err |= __get_user(regs->sa1, &sc->sc_regs.sa1);
-	err |= __get_user(regs->lc1, &sc->sc_regs.lc1);
-	err |= __get_user(regs->m0, &sc->sc_regs.m0);
-	err |= __get_user(regs->m1, &sc->sc_regs.m1);
-	err |= __get_user(regs->usr, &sc->sc_regs.usr);
-	err |= __get_user(regs->preds, &sc->sc_regs.p3_0);
-	err |= __get_user(regs->gp, &sc->sc_regs.gp);
-	err |= __get_user(regs->ugp, &sc->sc_regs.ugp);
+		unsafe_get_user(regs->sa0, &sc->sc_regs.sa0, Efault);
+		unsafe_get_user(regs->lc0, &sc->sc_regs.lc0, Efault);
+		unsafe_get_user(regs->sa1, &sc->sc_regs.sa1, Efault);
+		unsafe_get_user(regs->lc1, &sc->sc_regs.lc1, Efault);
+		unsafe_get_user(regs->m0, &sc->sc_regs.m0, Efault);
+		unsafe_get_user(regs->m1, &sc->sc_regs.m1, Efault);
+		unsafe_get_user(regs->usr, &sc->sc_regs.usr, Efault);
+		unsafe_get_user(regs->preds, &sc->sc_regs.p3_0, Efault);
+		unsafe_get_user(regs->gp, &sc->sc_regs.gp, Efault);
+		unsafe_get_user(regs->ugp, &sc->sc_regs.ugp, Efault);
 #if CONFIG_HEXAGON_ARCH_VERSION >= 4
-	err |= __get_user(regs->cs0, &sc->sc_regs.cs0);
-	err |= __get_user(regs->cs1, &sc->sc_regs.cs1);
+		unsafe_get_user(regs->cs0, &sc->sc_regs.cs0, Efault);
+		unsafe_get_user(regs->cs1, &sc->sc_regs.cs1, Efault);
 #endif
-	err |= __get_user(tmp, &sc->sc_regs.pc); pt_set_elr(regs, tmp);
+		unsafe_get_user(tmp, &sc->sc_regs.pc, Efault);
+	}
+	pt_set_elr(regs, tmp);
+	return 0;
 
-	return err;
+Efault:
+	return -EFAULT;
 }
 
 /*
  * Setup signal stack frame with siginfo structure
  */
-static int setup_rt_frame(int signr, struct k_sigaction *ka, siginfo_t *info,
-			  sigset_t *set,  struct pt_regs *regs)
+static int setup_rt_frame(struct ksignal *ksig, sigset_t *set,
+			  struct pt_regs *regs)
 {
 	int err = 0;
 	struct rt_sigframe __user *frame;
 	struct hexagon_vdso *vdso = current->mm->context.vdso;
 
-	frame = get_sigframe(ka, regs, sizeof(struct rt_sigframe));
+	frame = get_sigframe(ksig, regs, sizeof(struct rt_sigframe));
 
-	if (!access_ok(VERIFY_WRITE, frame, sizeof(struct rt_sigframe)))
-		goto	sigsegv;
+	if (!access_ok(frame, sizeof(struct rt_sigframe)))
+		return -EFAULT;
 
-	if (copy_siginfo_to_user(&frame->info, info))
-		goto	sigsegv;
+	if (copy_siginfo_to_user(&frame->info, &ksig->info))
+		return -EFAULT;
 
 	/* The on-stack signal trampoline is no longer executed;
 	 * however, the libgcc signal frame unwinding code checks for
 	 * the presence of these two numeric magic values.
 	 */
-	err |= __put_user(0x7800d166, &frame->tramp[0]);
-	err |= __put_user(0x5400c004, &frame->tramp[1]);
+	scoped_user_write_access(frame, Efault) {
+		unsafe_put_user(0x7800d166, &frame->tramp[0], Efault);
+		unsafe_put_user(0x5400c004, &frame->tramp[1], Efault);
+	}
 	err |= setup_sigcontext(regs, &frame->uc.uc_mcontext);
 	err |= __copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set));
 	err |= __save_altstack(&frame->uc.uc_stack, user_stack_pointer(regs));
 	if (err)
-		goto sigsegv;
+		return -EFAULT;
 
 	/* Load r0/r1 pair with signumber/siginfo pointer... */
 	regs->r0100 = ((unsigned long long)((unsigned long)&frame->info) << 32)
-		| (unsigned long long)signr;
+		| (unsigned long long)ksig->sig;
 	regs->r02 = (unsigned long) &frame->uc;
 	regs->r31 = (unsigned long) vdso->rt_signal_trampoline;
 	pt_psp(regs) = (unsigned long) frame;
-	pt_set_elr(regs, (unsigned long)ka->sa.sa_handler);
+	pt_set_elr(regs, (unsigned long)ksig->ka.sa.sa_handler);
 
 	return 0;
 
-sigsegv:
-	force_sigsegv(signr, current);
+Efault:
 	return -EFAULT;
 }
 
 /*
  * Setup invocation of signal handler
  */
-static void handle_signal(int sig, siginfo_t *info, struct k_sigaction *ka,
-			 struct pt_regs *regs)
+static void handle_signal(struct ksignal *ksig, struct pt_regs *regs)
 {
+	int ret;
+
 	/*
 	 * If we're handling a signal that aborted a system call,
 	 * set up the error return value before adding the signal
@@ -173,11 +160,11 @@ static void handle_signal(int sig, siginfo_t *info, struct k_sigaction *ka,
 			regs->r00 = -EINTR;
 			break;
 		case -ERESTARTSYS:
-			if (!(ka->sa.sa_flags & SA_RESTART)) {
+			if (!(ksig->ka.sa.sa_flags & SA_RESTART)) {
 				regs->r00 = -EINTR;
 				break;
 			}
-			/* Fall through */
+			fallthrough;
 		case -ERESTARTNOINTR:
 			regs->r06 = regs->syscall_nr;
 			pt_set_elr(regs, pt_elr(regs) - 4);
@@ -193,11 +180,9 @@ static void handle_signal(int sig, siginfo_t *info, struct k_sigaction *ka,
 	 * only set up the rt_frame flavor.
 	 */
 	/* If there was an error on setup, no signal was delivered. */
-	if (setup_rt_frame(sig, ka, info, sigmask_to_save(), regs) < 0)
-		return;
+	ret = setup_rt_frame(ksig, sigmask_to_save(), regs);
 
-	signal_delivered(sig, info, ka, regs,
-			test_thread_flag(TIF_SINGLESTEP));
+	signal_setup_done(ret, ksig, test_thread_flag(TIF_SINGLESTEP));
 }
 
 /*
@@ -205,17 +190,13 @@ static void handle_signal(int sig, siginfo_t *info, struct k_sigaction *ka,
  */
 void do_signal(struct pt_regs *regs)
 {
-	struct k_sigaction sigact;
-	siginfo_t info;
-	int signo;
+	struct ksignal ksig;
 
 	if (!user_mode(regs))
 		return;
 
-	signo = get_signal_to_deliver(&info, &sigact, regs, NULL);
-
-	if (signo > 0) {
-		handle_signal(signo, &info, &sigact, regs);
+	if (get_signal(&ksig)) {
+		handle_signal(&ksig, regs);
 		return;
 	}
 
@@ -249,17 +230,17 @@ no_restart:
  * Architecture-specific wrappers for signal-related system calls
  */
 
-asmlinkage int sys_rt_sigreturn(void)
+SYSCALL_DEFINE0(rt_sigreturn)
 {
 	struct pt_regs *regs = current_pt_regs();
 	struct rt_sigframe __user *frame;
 	sigset_t blocked;
 
 	/* Always make any pending restarted system calls return -EINTR */
-	current_thread_info()->restart_block.fn = do_no_restart_syscall;
+	current->restart_block.fn = do_no_restart_syscall;
 
 	frame = (struct rt_sigframe __user *)pt_psp(regs);
-	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
+	if (!access_ok(frame, sizeof(*frame)))
 		goto badframe;
 	if (__copy_from_user(&blocked, &frame->uc.uc_sigmask, sizeof(blocked)))
 		goto badframe;
@@ -280,6 +261,6 @@ asmlinkage int sys_rt_sigreturn(void)
 	return regs->r00;
 
 badframe:
-	force_sig(SIGSEGV, current);
+	force_sig(SIGSEGV);
 	return 0;
 }

@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  PS3 gelic network driver.
  *
  * Copyright (C) 2007 Sony Computer Entertainment Inc.
  * Copyright 2007 Sony Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 #undef DEBUG
 
@@ -221,7 +209,7 @@ static struct gelic_eurus_cmd *gelic_eurus_sync_cmd(struct gelic_wl_info *wl,
 	struct gelic_eurus_cmd *cmd;
 
 	/* allocate cmd */
-	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	cmd = kzalloc_obj(*cmd);
 	if (!cmd)
 		return NULL;
 
@@ -723,13 +711,10 @@ static int gelic_wl_get_scan(struct net_device *netdev,
 		/* If a scan in progress, caller should call me again */
 		ret = -EAGAIN;
 		goto out;
-		break;
-
 	case GELIC_WL_SCAN_STAT_INIT:
 		/* last scan request failed or never issued */
 		ret = -ENODEV;
 		goto out;
-		break;
 	case GELIC_WL_SCAN_STAT_GOT_LIST:
 		/* ok, use current list */
 		break;
@@ -892,7 +877,7 @@ static int gelic_wl_set_auth(struct net_device *netdev,
 	case IW_AUTH_KEY_MGMT:
 		if (param->value & IW_AUTH_KEY_MGMT_PSK)
 			break;
-		/* intentionally fall through */
+		fallthrough;
 	default:
 		ret = -EOPNOTSUPP;
 		break;
@@ -1097,7 +1082,7 @@ static int gelic_wl_get_encode(struct net_device *netdev,
 	struct gelic_wl_info *wl = port_wl(netdev_priv(netdev));
 	struct iw_point *enc = &data->encoding;
 	unsigned long irqflag;
-	unsigned int key_index, index_specified;
+	unsigned int key_index;
 	int ret = 0;
 
 	pr_debug("%s: <-\n", __func__);
@@ -1108,13 +1093,10 @@ static int gelic_wl_get_encode(struct net_device *netdev,
 		return -EINVAL;
 
 	spin_lock_irqsave(&wl->lock, irqflag);
-	if (key_index) {
-		index_specified = 1;
+	if (key_index)
 		key_index--;
-	} else {
-		index_specified = 0;
+	else
 		key_index = wl->current_key;
-	}
 
 	if (wl->group_cipher_method == GELIC_WL_CIPHER_WEP) {
 		switch (wl->auth_method) {
@@ -1170,7 +1152,7 @@ static int gelic_wl_set_ap(struct net_device *netdev,
 	} else {
 		pr_debug("%s: clear bssid\n", __func__);
 		clear_bit(GELIC_WL_STAT_BSSID_SET, &wl->stat);
-		memset(wl->bssid, 0, ETH_ALEN);
+		eth_zero_addr(wl->bssid);
 	}
 	spin_unlock_irqrestore(&wl->lock, irqflag);
 	pr_debug("%s: ->\n", __func__);
@@ -1192,7 +1174,7 @@ static int gelic_wl_get_ap(struct net_device *netdev,
 		memcpy(data->ap_addr.sa_data, wl->active_bssid,
 		       ETH_ALEN);
 	} else
-		memset(data->ap_addr.sa_data, 0, ETH_ALEN);
+		eth_zero_addr(data->ap_addr.sa_data);
 
 	spin_unlock_irqrestore(&wl->lock, irqflag);
 	mutex_unlock(&wl->assoc_stat_lock);
@@ -1235,7 +1217,7 @@ static int gelic_wl_set_encodeext(struct net_device *netdev,
 		key_index = wl->current_key;
 
 	if (!enc->length && (ext->ext_flags & IW_ENCODE_EXT_SET_TX_KEY)) {
-		/* reques to change default key index */
+		/* request to change default key index */
 		pr_debug("%s: request to change default key to %d\n",
 			 __func__, key_index);
 		wl->current_key = key_index;
@@ -1619,13 +1601,13 @@ static void gelic_wl_scan_complete_event(struct gelic_wl_info *wl)
 		target->valid = 1;
 		target->eurus_index = i;
 		kfree(target->hwinfo);
-		target->hwinfo = kzalloc(be16_to_cpu(scan_info->size),
+		target->hwinfo = kmemdup(scan_info,
+					 be16_to_cpu(scan_info->size),
 					 GFP_KERNEL);
 		if (!target->hwinfo)
 			continue;
 
 		/* copy hw scan info */
-		memcpy(target->hwinfo, scan_info, scan_info->size);
 		target->essid_len = strnlen(scan_info->essid,
 					    sizeof(scan_info->essid));
 		target->rate_len = 0;
@@ -1697,7 +1679,7 @@ struct gelic_wl_scan_info *gelic_wl_find_best_bss(struct gelic_wl_info *wl)
 				pr_debug("%s: bssid matched\n", __func__);
 				break;
 			} else {
-				pr_debug("%s: bssid unmached\n", __func__);
+				pr_debug("%s: bssid unmatched\n", __func__);
 				continue;
 			}
 		}
@@ -1831,25 +1813,18 @@ static const char *wpasecstr(enum gelic_eurus_wpa_security sec)
 	switch (sec) {
 	case GELIC_EURUS_WPA_SEC_NONE:
 		return "NONE";
-		break;
 	case GELIC_EURUS_WPA_SEC_WPA_TKIP_TKIP:
 		return "WPA_TKIP_TKIP";
-		break;
 	case GELIC_EURUS_WPA_SEC_WPA_TKIP_AES:
 		return "WPA_TKIP_AES";
-		break;
 	case GELIC_EURUS_WPA_SEC_WPA_AES_AES:
 		return "WPA_AES_AES";
-		break;
 	case GELIC_EURUS_WPA_SEC_WPA2_TKIP_TKIP:
 		return "WPA2_TKIP_TKIP";
-		break;
 	case GELIC_EURUS_WPA_SEC_WPA2_TKIP_AES:
 		return "WPA2_TKIP_AES";
-		break;
 	case GELIC_EURUS_WPA_SEC_WPA2_AES_AES:
 		return "WPA2_AES_AES";
-		break;
 	}
 	return "";
 };
@@ -2330,8 +2305,8 @@ static struct net_device *gelic_wl_alloc(struct gelic_card *card)
 	pr_debug("%s: wl=%p port=%p\n", __func__, wl, port);
 
 	/* allocate scan list */
-	wl->networks = kzalloc(sizeof(struct gelic_wl_scan_info) *
-			       GELIC_WL_BSS_MAX_ENT, GFP_KERNEL);
+	wl->networks = kzalloc_objs(struct gelic_wl_scan_info,
+				    GELIC_WL_BSS_MAX_ENT);
 
 	if (!wl->networks)
 		goto fail_bss;
@@ -2568,7 +2543,6 @@ static const struct net_device_ops gelic_wl_netdevice_ops = {
 	.ndo_stop = gelic_wl_stop,
 	.ndo_start_xmit = gelic_net_xmit,
 	.ndo_set_rx_mode = gelic_net_set_multi,
-	.ndo_change_mtu = gelic_net_change_mtu,
 	.ndo_tx_timeout = gelic_net_tx_timeout,
 	.ndo_set_mac_address = eth_mac_addr,
 	.ndo_validate_addr = eth_validate_addr,
@@ -2591,7 +2565,6 @@ static void gelic_wl_setup_netdev_ops(struct net_device *netdev)
 
 	netdev->ethtool_ops = &gelic_wl_ethtool_ops;
 	netdev->netdev_ops = &gelic_wl_netdevice_ops;
-	netdev->wireless_data = &wl->wireless_data;
 	netdev->wireless_handlers = &gelic_wl_wext_handler_def;
 }
 

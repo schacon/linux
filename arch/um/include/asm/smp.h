@@ -1,32 +1,20 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __UM_SMP_H
 #define __UM_SMP_H
 
-#ifdef CONFIG_SMP
+#if IS_ENABLED(CONFIG_SMP)
 
-#include <linux/bitops.h>
-#include <asm/current.h>
 #include <linux/cpumask.h>
+#include <shared/smp.h>
 
-#define raw_smp_processor_id() (current_thread->cpu)
+#define raw_smp_processor_id() uml_curr_cpu()
 
-#define cpu_logical_map(n) (n)
-#define cpu_number_map(n) (n)
-extern int hard_smp_processor_id(void);
-#define NO_PROC_ID -1
+void arch_smp_send_reschedule(int cpu);
 
-extern int ncpus;
+void arch_send_call_function_single_ipi(int cpu);
 
+void arch_send_call_function_ipi_mask(const struct cpumask *mask);
 
-static inline void smp_cpus_done(unsigned int maxcpus)
-{
-}
-
-extern struct task_struct *idle_threads[NR_CPUS];
-
-#else
-
-#define hard_smp_processor_id()		0
-
-#endif
+#endif /* CONFIG_SMP */
 
 #endif

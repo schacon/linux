@@ -1,22 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * pps_parport.c -- kernel parallel port PPS client
  *
- *
  * Copyright (C) 2009   Alexander Gordeev <lasaine@lvk.cs.msu.su>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 
@@ -36,8 +22,6 @@
 #include <linux/parport.h>
 #include <linux/pps_kernel.h>
 
-#define DRVDESC "parallel port PPS client"
-
 /* module parameters */
 
 #define CLEAR_WAIT_MAX		100
@@ -49,6 +33,7 @@ MODULE_PARM_DESC(clear_wait,
 	" zero turns clear edge capture off entirely");
 module_param(clear_wait, uint, 0);
 
+static DEFINE_IDA(pps_client_index);
 
 /* internal per port structure */
 struct pps_client_pp {
@@ -56,6 +41,7 @@ struct pps_client_pp {
 	struct pps_device *pps;		/* PPS device */
 	unsigned int cw;		/* port clear timeout */
 	unsigned int cw_err;		/* number of timeouts */
+	int index;			/* device number */
 };
 
 static inline int signal_is_set(struct parport *port)
@@ -95,7 +81,7 @@ static void parport_irq(void *handle)
 	/* check the signal (no signal means the pulse is lost this time) */
 	if (!signal_is_set(port)) {
 		local_irq_restore(flags);
-		dev_err(dev->pps->dev, "lost the signal\n");
+		dev_err(&dev->pps->dev, "lost the signal\n");
 		goto out_assert;
 	}
 
@@ -112,7 +98,7 @@ static void parport_irq(void *handle)
 	/* timeout */
 	dev->cw_err++;
 	if (dev->cw_err >= CLEAR_WAIT_MAX_ERRORS) {
-		dev_err(dev->pps->dev, "disabled clear edge capture after %d"
+		dev_err(&dev->pps->dev, "disabled clear edge capture after %d"
 				" timeouts\n", dev->cw_err);
 		dev->cw = 0;
 		dev->cw_err = 0;
@@ -136,6 +122,8 @@ out_both:
 
 static void parport_attach(struct parport *port)
 {
+	struct pardev_cb pps_client_cb;
+	int index;
 	struct pps_client_pp *device;
 	struct pps_source_info info = {
 		.name		= KBUILD_MODNAME,
@@ -148,17 +136,33 @@ static void parport_attach(struct parport *port)
 		.dev		= NULL
 	};
 
-	device = kzalloc(sizeof(struct pps_client_pp), GFP_KERNEL);
+	if (clear_wait > CLEAR_WAIT_MAX) {
+		pr_err("clear_wait value should be not greater then %d\n",
+		       CLEAR_WAIT_MAX);
+		return;
+	}
+
+	device = kzalloc_obj(struct pps_client_pp);
 	if (!device) {
 		pr_err("memory allocation failed, not attaching\n");
 		return;
 	}
 
-	device->pardev = parport_register_device(port, KBUILD_MODNAME,
-			NULL, NULL, parport_irq, PARPORT_FLAG_EXCL, device);
+	index = ida_alloc(&pps_client_index, GFP_KERNEL);
+	if (index < 0)
+		goto err_free_device;
+
+	memset(&pps_client_cb, 0, sizeof(pps_client_cb));
+	pps_client_cb.private = device;
+	pps_client_cb.irq_func = parport_irq;
+	pps_client_cb.flags = PARPORT_FLAG_EXCL;
+	device->pardev = parport_register_dev_model(port,
+						    KBUILD_MODNAME,
+						    &pps_client_cb,
+						    index);
 	if (!device->pardev) {
 		pr_err("couldn't register with %s\n", port->name);
-		goto err_free;
+		goto err_free_ida;
 	}
 
 	if (parport_claim_or_block(device->pardev) < 0) {
@@ -168,7 +172,7 @@ static void parport_attach(struct parport *port)
 
 	device->pps = pps_register_source(&info,
 			PPS_CAPTUREBOTH | PPS_OFFSETASSERT | PPS_OFFSETCLEAR);
-	if (device->pps == NULL) {
+	if (IS_ERR(device->pps)) {
 		pr_err("couldn't register PPS source\n");
 		goto err_release_dev;
 	}
@@ -176,6 +180,7 @@ static void parport_attach(struct parport *port)
 	device->cw = clear_wait;
 
 	port->ops->enable_irq(port);
+	device->index = index;
 
 	pr_info("attached to %s\n", port->name);
 
@@ -185,7 +190,9 @@ err_release_dev:
 	parport_release(device->pardev);
 err_unregister_dev:
 	parport_unregister_device(device->pardev);
-err_free:
+err_free_ida:
+	ida_free(&pps_client_index, index);
+err_free_device:
 	kfree(device);
 }
 
@@ -195,7 +202,7 @@ static void parport_detach(struct parport *port)
 	struct pps_client_pp *device;
 
 	/* FIXME: oooh, this is ugly! */
-	if (strcmp(pardev->name, KBUILD_MODNAME))
+	if (!pardev || strcmp(pardev->name, KBUILD_MODNAME))
 		/* not our port */
 		return;
 
@@ -205,46 +212,17 @@ static void parport_detach(struct parport *port)
 	pps_unregister_source(device->pps);
 	parport_release(pardev);
 	parport_unregister_device(pardev);
+	ida_free(&pps_client_index, device->index);
 	kfree(device);
 }
 
 static struct parport_driver pps_parport_driver = {
 	.name = KBUILD_MODNAME,
-	.attach = parport_attach,
+	.match_port = parport_attach,
 	.detach = parport_detach,
 };
-
-/* module staff */
-
-static int __init pps_parport_init(void)
-{
-	int ret;
-
-	pr_info(DRVDESC "\n");
-
-	if (clear_wait > CLEAR_WAIT_MAX) {
-		pr_err("clear_wait value should be not greater"
-				" then %d\n", CLEAR_WAIT_MAX);
-		return -EINVAL;
-	}
-
-	ret = parport_register_driver(&pps_parport_driver);
-	if (ret) {
-		pr_err("unable to register with parport\n");
-		return ret;
-	}
-
-	return  0;
-}
-
-static void __exit pps_parport_exit(void)
-{
-	parport_unregister_driver(&pps_parport_driver);
-}
-
-module_init(pps_parport_init);
-module_exit(pps_parport_exit);
+module_parport_driver(pps_parport_driver);
 
 MODULE_AUTHOR("Alexander Gordeev <lasaine@lvk.cs.msu.su>");
-MODULE_DESCRIPTION(DRVDESC);
+MODULE_DESCRIPTION("parallel port PPS client");
 MODULE_LICENSE("GPL");

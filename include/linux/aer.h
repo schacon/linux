@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2006 Intel Corp.
  *     Tom Long Nguyen (tom.l.nguyen@intel.com)
@@ -7,11 +8,41 @@
 #ifndef _AER_H_
 #define _AER_H_
 
-struct aer_header_log_regs {
-	unsigned int dw0;
-	unsigned int dw1;
-	unsigned int dw2;
-	unsigned int dw3;
+#include <linux/errno.h>
+#include <linux/types.h>
+
+#define AER_NONFATAL			0
+#define AER_FATAL			1
+#define AER_CORRECTABLE			2
+#define DPC_FATAL			3
+
+/*
+ * AER and DPC capabilities TLP Logging register sizes (PCIe r6.2, sec 7.8.4
+ * & 7.9.14).
+ */
+#define PCIE_STD_NUM_TLP_HEADERLOG     4
+#define PCIE_STD_MAX_TLP_PREFIXLOG     4
+#define PCIE_STD_MAX_TLP_HEADERLOG	(PCIE_STD_NUM_TLP_HEADERLOG + 10)
+
+/*
+ * Size of the AER Capability register block in hardware, long enough for the
+ * longest Flit mode TLP Log. struct aer_capability_regs below is larger and
+ * laid out differently; use aer_cap_regs_unpack() to convert.
+ */
+#define PCIE_AER_CAP_HW_SIZE		96
+
+struct pci_dev;
+
+struct pcie_tlp_log {
+	union {
+		u32 dw[PCIE_STD_MAX_TLP_HEADERLOG];
+		struct {
+			u32 _do_not_use[PCIE_STD_NUM_TLP_HEADERLOG];
+			u32 prefix[PCIE_STD_MAX_TLP_PREFIXLOG];
+		};
+	};
+	u8 header_len;		/* Length of the Logged TLP Header in DWORDs */
+	bool flit;		/* TLP was logged when in Flit mode */
 };
 
 struct aer_capability_regs {
@@ -22,7 +53,7 @@ struct aer_capability_regs {
 	u32 cor_status;
 	u32 cor_mask;
 	u32 cap_control;
-	struct aer_header_log_regs header_log;
+	struct pcie_tlp_log header_log;
 	u32 root_command;
 	u32 root_status;
 	u16 cor_err_source;
@@ -30,30 +61,24 @@ struct aer_capability_regs {
 };
 
 #if defined(CONFIG_PCIEAER)
-/* pci-e port driver needs this function to enable aer */
-extern int pci_enable_pcie_error_reporting(struct pci_dev *dev);
-extern int pci_disable_pcie_error_reporting(struct pci_dev *dev);
-extern int pci_cleanup_aer_uncorrect_error_status(struct pci_dev *dev);
+int pci_aer_clear_nonfatal_status(struct pci_dev *dev);
+int pcie_aer_is_native(struct pci_dev *dev);
+void pci_aer_unmask_internal_errors(struct pci_dev *dev);
 #else
-static inline int pci_enable_pcie_error_reporting(struct pci_dev *dev)
+static inline int pci_aer_clear_nonfatal_status(struct pci_dev *dev)
 {
 	return -EINVAL;
 }
-static inline int pci_disable_pcie_error_reporting(struct pci_dev *dev)
-{
-	return -EINVAL;
-}
-static inline int pci_cleanup_aer_uncorrect_error_status(struct pci_dev *dev)
-{
-	return -EINVAL;
-}
+static inline int pcie_aer_is_native(struct pci_dev *dev) { return 0; }
+static inline void pci_aer_unmask_internal_errors(struct pci_dev *dev) { }
 #endif
 
-extern void cper_print_aer(struct pci_dev *dev,
-			   int cper_severity, struct aer_capability_regs *aer);
-extern int cper_severity_to_aer(int cper_severity);
-extern void aer_recover_queue(int domain, unsigned int bus, unsigned int devfn,
-			      int severity,
-			      struct aer_capability_regs *aer_regs);
+void pci_print_aer(struct pci_dev *dev, int aer_severity,
+		    struct aer_capability_regs *aer);
+void aer_cap_regs_unpack(struct aer_capability_regs *regs, const void *raw,
+			 size_t raw_len);
+int cper_severity_to_aer(int cper_severity);
+void aer_recover_queue(int domain, unsigned int bus, unsigned int devfn,
+		       int severity, struct aer_capability_regs *aer_regs);
 #endif //_AER_H_
 

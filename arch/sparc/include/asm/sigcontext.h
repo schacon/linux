@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __SPARC_SIGCONTEXT_H
 #define __SPARC_SIGCONTEXT_H
 
 #include <asm/ptrace.h>
 #include <uapi/asm/sigcontext.h>
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #define __SUNOS_MAXWIN   31
 
@@ -25,7 +26,7 @@ struct sigcontext32 {
 	int sigc_oswins;       /* outstanding windows */
 
 	/* stack ptrs for each regwin buf */
-	unsigned sigc_spbuf[__SUNOS_MAXWIN];
+	unsigned int sigc_spbuf[__SUNOS_MAXWIN];
 
 	/* Windows to restore after signal */
 	struct reg_window32 sigc_wbuf[__SUNOS_MAXWIN];
@@ -103,6 +104,6 @@ typedef struct {
 #endif /* (CONFIG_SPARC64) */
 
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* !(__ASSEMBLER__) */
 
 #endif /* !(__SPARC_SIGCONTEXT_H) */

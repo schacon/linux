@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /****************************************************************************
 
    Copyright Echo Digital Audio Corporation (c) 1998 - 2004
@@ -5,22 +6,6 @@
    www.echoaudio.com
 
    This file is part of Echo Digital Audio's generic driver library.
-
-   Echo Digital Audio's generic driver library is free software;
-   you can redistribute it and/or modify it under the terms of
-   the GNU General Public License as published by the Free Software
-   Foundation.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 59 Temple Place - Suite 330, Boston,
-   MA  02111-1307, USA.
-
    *************************************************************************
 
  Translation from C++ and adaptation for use in ALSA-Driver
@@ -41,7 +26,7 @@ static int check_asic_status(struct echoaudio *chip)
 		return -EIO;
 
 	chip->comm_page->ext_box_status = cpu_to_le32(E3G_ASIC_NOT_LOADED);
-	chip->asic_loaded = FALSE;
+	chip->asic_loaded = false;
 	clear_handshake(chip);
 	send_vector(chip, DSP_VC_TEST_ASIC);
 
@@ -51,11 +36,11 @@ static int check_asic_status(struct echoaudio *chip)
 	}
 
 	box_status = le32_to_cpu(chip->comm_page->ext_box_status);
-	DE_INIT(("box_status=%x\n", box_status));
+	dev_dbg(chip->card->dev, "box_status=%x\n", box_status);
 	if (box_status == E3G_ASIC_NOT_LOADED)
 		return -ENODEV;
 
-	chip->asic_loaded = TRUE;
+	chip->asic_loaded = true;
 	return box_status & E3G_BOX_TYPE_MASK;
 }
 
@@ -73,23 +58,26 @@ register. write_control_reg sends the new control register value to the DSP. */
 static int write_control_reg(struct echoaudio *chip, u32 ctl, u32 frq,
 			     char force)
 {
+	__le32 ctl_reg, frq_reg;
+
 	if (wait_handshake(chip))
 		return -EIO;
 
-	DE_ACT(("WriteControlReg: Setting 0x%x, 0x%x\n", ctl, frq));
+	dev_dbg(chip->card->dev,
+		"WriteControlReg: Setting 0x%x, 0x%x\n", ctl, frq);
 
-	ctl = cpu_to_le32(ctl);
-	frq = cpu_to_le32(frq);
+	ctl_reg = cpu_to_le32(ctl);
+	frq_reg = cpu_to_le32(frq);
 
-	if (ctl != chip->comm_page->control_register ||
-	    frq != chip->comm_page->e3g_frq_register || force) {
-		chip->comm_page->e3g_frq_register = frq;
-		chip->comm_page->control_register = ctl;
+	if (ctl_reg != chip->comm_page->control_register ||
+	    frq_reg != chip->comm_page->e3g_frq_register || force) {
+		chip->comm_page->e3g_frq_register = frq_reg;
+		chip->comm_page->control_register = ctl_reg;
 		clear_handshake(chip);
 		return send_vector(chip, DSP_VC_WRITE_CONTROL_REG);
 	}
 
-	DE_ACT(("WriteControlReg: not written, no change\n"));
+	dev_dbg(chip->card->dev, "WriteControlReg: not written, no change\n");
 	return 0;
 }
 
@@ -116,7 +104,7 @@ static int set_digital_mode(struct echoaudio *chip, u8 mode)
 	 * updated by the DSP comm object. */
 	if (err >= 0 && previous_mode != mode &&
 	    (previous_mode == DIGITAL_MODE_ADAT || mode == DIGITAL_MODE_ADAT)) {
-		spin_lock_irq(&chip->lock);
+		guard(spinlock_irq)(&chip->lock);
 		for (o = 0; o < num_busses_out(chip); o++)
 			for (i = 0; i < num_busses_in(chip); i++)
 				set_monitor_gain(chip, o, i,
@@ -131,7 +119,6 @@ static int set_digital_mode(struct echoaudio *chip, u8 mode)
 		for (o = 0; o < num_busses_out(chip); o++)
 			set_output_gain(chip, o, chip->output_gain[o]);
 		update_output_line_level(chip);
-		spin_unlock_irq(&chip->lock);
 	}
 
 	return err;
@@ -242,7 +229,7 @@ static int load_asic(struct echoaudio *chip)
 	 * 48 kHz, internal clock, S/PDIF RCA mode */
 	if (box_type >= 0) {
 		err = write_control_reg(chip, E3G_48KHZ,
-					E3G_FREQ_REG_DEFAULT, TRUE);
+					E3G_FREQ_REG_DEFAULT, true);
 		if (err < 0)
 			return err;
 	}
@@ -258,8 +245,8 @@ static int set_sample_rate(struct echoaudio *chip, u32 rate)
 
 	/* Only set the clock for internal mode. */
 	if (chip->input_clock != ECHO_CLOCK_INTERNAL) {
-		DE_ACT(("set_sample_rate: Cannot set sample rate - "
-			"clock not set to CLK_CLOCKININTERNAL\n"));
+		dev_warn(chip->card->dev,
+			 "Cannot set sample rate - clock not set to CLK_CLOCKININTERNAL\n");
 		/* Save the rate anyhow */
 		chip->comm_page->sample_rate = cpu_to_le32(rate);
 		chip->sample_rate = rate;
@@ -271,7 +258,6 @@ static int set_sample_rate(struct echoaudio *chip, u32 rate)
 		       chip->digital_mode == DIGITAL_MODE_ADAT))
 		return -EINVAL;
 
-	clock = 0;
 	control_reg = le32_to_cpu(chip->comm_page->control_register);
 	control_reg &= E3G_CLOCK_CLEAR_MASK;
 
@@ -313,7 +299,8 @@ static int set_sample_rate(struct echoaudio *chip, u32 rate)
 
 	chip->comm_page->sample_rate = cpu_to_le32(rate);	/* ignored by the DSP */
 	chip->sample_rate = rate;
-	DE_ACT(("SetSampleRate: %d clock %x\n", rate, control_reg));
+	dev_dbg(chip->card->dev,
+		"SetSampleRate: %d clock %x\n", rate, control_reg);
 
 	/* Tell the DSP about it - DSP reads both control reg & freq reg */
 	return write_control_reg(chip, control_reg, frq_reg, 0);
@@ -326,7 +313,6 @@ static int set_input_clock(struct echoaudio *chip, u16 clock)
 {
 	u32 control_reg, clocks_from_dsp;
 
-	DE_ACT(("set_input_clock:\n"));
 
 	/* Mask off the clock select bits */
 	control_reg = le32_to_cpu(chip->comm_page->control_register) &
@@ -335,13 +321,11 @@ static int set_input_clock(struct echoaudio *chip, u16 clock)
 
 	switch (clock) {
 	case ECHO_CLOCK_INTERNAL:
-		DE_ACT(("Set Echo3G clock to INTERNAL\n"));
 		chip->input_clock = ECHO_CLOCK_INTERNAL;
 		return set_sample_rate(chip, chip->sample_rate);
 	case ECHO_CLOCK_SPDIF:
 		if (chip->digital_mode == DIGITAL_MODE_ADAT)
 			return -EAGAIN;
-		DE_ACT(("Set Echo3G clock to SPDIF\n"));
 		control_reg |= E3G_SPDIF_CLOCK;
 		if (clocks_from_dsp & E3G_CLOCK_DETECT_BIT_SPDIF96)
 			control_reg |= E3G_DOUBLE_SPEED_MODE;
@@ -351,12 +335,10 @@ static int set_input_clock(struct echoaudio *chip, u16 clock)
 	case ECHO_CLOCK_ADAT:
 		if (chip->digital_mode != DIGITAL_MODE_ADAT)
 			return -EAGAIN;
-		DE_ACT(("Set Echo3G clock to ADAT\n"));
 		control_reg |= E3G_ADAT_CLOCK;
 		control_reg &= ~E3G_DOUBLE_SPEED_MODE;
 		break;
 	case ECHO_CLOCK_WORD:
-		DE_ACT(("Set Echo3G clock to WORD\n"));
 		control_reg |= E3G_WORD_CLOCK;
 		if (clocks_from_dsp & E3G_CLOCK_DETECT_BIT_WORD96)
 			control_reg |= E3G_DOUBLE_SPEED_MODE;
@@ -364,7 +346,8 @@ static int set_input_clock(struct echoaudio *chip, u16 clock)
 			control_reg &= ~E3G_DOUBLE_SPEED_MODE;
 		break;
 	default:
-		DE_ACT(("Input clock 0x%x not supported for Echo3G\n", clock));
+		dev_err(chip->card->dev,
+			"Input clock 0x%x not supported for Echo3G\n", clock);
 		return -EINVAL;
 	}
 
@@ -380,23 +363,24 @@ static int dsp_set_digital_mode(struct echoaudio *chip, u8 mode)
 	int err, incompatible_clock;
 
 	/* Set clock to "internal" if it's not compatible with the new mode */
-	incompatible_clock = FALSE;
+	incompatible_clock = false;
 	switch (mode) {
 	case DIGITAL_MODE_SPDIF_OPTICAL:
 	case DIGITAL_MODE_SPDIF_RCA:
 		if (chip->input_clock == ECHO_CLOCK_ADAT)
-			incompatible_clock = TRUE;
+			incompatible_clock = true;
 		break;
 	case DIGITAL_MODE_ADAT:
 		if (chip->input_clock == ECHO_CLOCK_SPDIF)
-			incompatible_clock = TRUE;
+			incompatible_clock = true;
 		break;
 	default:
-		DE_ACT(("Digital mode not supported: %d\n", mode));
+		dev_err(chip->card->dev,
+			"Digital mode not supported: %d\n", mode);
 		return -EINVAL;
 	}
 
-	spin_lock_irq(&chip->lock);
+	guard(spinlock_irq)(&chip->lock);
 
 	if (incompatible_clock) {
 		chip->sample_rate = 48000;
@@ -422,11 +406,10 @@ static int dsp_set_digital_mode(struct echoaudio *chip, u8 mode)
 	}
 
 	err = write_control_reg(chip, control_reg, get_frq_reg(chip), 1);
-	spin_unlock_irq(&chip->lock);
 	if (err < 0)
 		return err;
 	chip->digital_mode = mode;
 
-	DE_ACT(("set_digital_mode(%d)\n", chip->digital_mode));
+	dev_dbg(chip->card->dev, "set_digital_mode(%d)\n", chip->digital_mode);
 	return incompatible_clock;
 }

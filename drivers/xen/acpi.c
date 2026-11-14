@@ -30,33 +30,123 @@
  * IN THE SOFTWARE.
  */
 
+#include <linux/pci.h>
 #include <xen/acpi.h>
 #include <xen/interface/platform.h>
 #include <asm/xen/hypercall.h>
 #include <asm/xen/hypervisor.h>
 
-int xen_acpi_notify_hypervisor_state(u8 sleep_state,
-				     u32 pm1a_cnt, u32 pm1b_cnt)
+static int xen_acpi_notify_hypervisor_state(u8 sleep_state,
+					    u32 val_a, u32 val_b,
+					    bool extended)
 {
+	unsigned int bits = extended ? 8 : 16;
+
 	struct xen_platform_op op = {
 		.cmd = XENPF_enter_acpi_sleep,
 		.interface_version = XENPF_INTERFACE_VERSION,
-		.u = {
-			.enter_acpi_sleep = {
-				.pm1a_cnt_val = (u16)pm1a_cnt,
-				.pm1b_cnt_val = (u16)pm1b_cnt,
-				.sleep_state = sleep_state,
-			},
+		.u.enter_acpi_sleep = {
+			.val_a = (u16)val_a,
+			.val_b = (u16)val_b,
+			.sleep_state = sleep_state,
+			.flags = extended ? XENPF_ACPI_SLEEP_EXTENDED : 0,
 		},
 	};
 
-	if ((pm1a_cnt & 0xffff0000) || (pm1b_cnt & 0xffff0000)) {
-		WARN(1, "Using more than 16bits of PM1A/B 0x%x/0x%x!"
-		     "Email xen-devel@lists.xensource.com  Thank you.\n", \
-		     pm1a_cnt, pm1b_cnt);
+	if (WARN((val_a & (~0 << bits)) || (val_b & (~0 << bits)),
+		 "Using more than %u bits of sleep control values %#x/%#x!"
+		 "Email xen-devel@lists.xen.org - Thank you.\n", \
+		 bits, val_a, val_b))
 		return -1;
-	}
 
-	HYPERVISOR_dom0_op(&op);
+	HYPERVISOR_platform_op(&op);
 	return 1;
 }
+
+int xen_acpi_notify_hypervisor_sleep(u8 sleep_state,
+				     u32 pm1a_cnt, u32 pm1b_cnt)
+{
+	return xen_acpi_notify_hypervisor_state(sleep_state, pm1a_cnt,
+						pm1b_cnt, false);
+}
+
+int xen_acpi_notify_hypervisor_extended_sleep(u8 sleep_state,
+				     u32 val_a, u32 val_b)
+{
+	return xen_acpi_notify_hypervisor_state(sleep_state, val_a,
+						val_b, true);
+}
+
+struct acpi_prt_entry {
+	struct acpi_pci_id      id;
+	u8                      pin;
+	acpi_handle             link;
+	u32                     index;
+};
+
+int xen_acpi_get_gsi_info(struct pci_dev *dev,
+						  int *gsi_out,
+						  int *trigger_out,
+						  int *polarity_out)
+{
+	u32 gsi;
+	u8 pin;
+	struct acpi_prt_entry *entry;
+	int trigger = ACPI_LEVEL_SENSITIVE;
+	int ret, polarity = acpi_irq_model == ACPI_IRQ_MODEL_GIC ?
+				      ACPI_ACTIVE_HIGH : ACPI_ACTIVE_LOW;
+
+	if (!dev || !gsi_out || !trigger_out || !polarity_out)
+		return -EINVAL;
+
+	pin = dev->pin;
+	if (!pin)
+		return -EINVAL;
+
+	entry = acpi_pci_irq_lookup(dev, pin);
+	if (entry) {
+		ret = 0;
+		if (entry->link)
+			ret = acpi_pci_link_allocate_irq(entry->link,
+							 entry->index,
+							 &trigger, &polarity,
+							 NULL, &gsi);
+		else
+			gsi = entry->index;
+	} else
+		ret = -ENODEV;
+
+	if (ret < 0)
+		return -EINVAL;
+
+	*gsi_out = gsi;
+	*trigger_out = trigger;
+	*polarity_out = polarity;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xen_acpi_get_gsi_info);
+
+static get_gsi_from_sbdf_t get_gsi_from_sbdf;
+static DEFINE_RWLOCK(get_gsi_from_sbdf_lock);
+
+void xen_acpi_register_get_gsi_func(get_gsi_from_sbdf_t func)
+{
+	write_lock(&get_gsi_from_sbdf_lock);
+	get_gsi_from_sbdf = func;
+	write_unlock(&get_gsi_from_sbdf_lock);
+}
+EXPORT_SYMBOL_GPL(xen_acpi_register_get_gsi_func);
+
+int xen_acpi_get_gsi_from_sbdf(u32 sbdf)
+{
+	int ret = -EOPNOTSUPP;
+
+	read_lock(&get_gsi_from_sbdf_lock);
+	if (get_gsi_from_sbdf)
+		ret = get_gsi_from_sbdf(sbdf);
+	read_unlock(&get_gsi_from_sbdf_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(xen_acpi_get_gsi_from_sbdf);

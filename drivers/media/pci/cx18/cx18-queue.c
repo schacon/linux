@@ -1,25 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  cx18 buffer queues
  *
  *  Derived from ivtv-queue.c
  *
- *  Copyright (C) 2007  Hans Verkuil <hverkuil@xs4all.nl>
+ *  Copyright (C) 2007  Hans Verkuil <hverkuil@kernel.org>
  *  Copyright (C) 2008  Andy Walls <awalls@md.metrocast.net>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
- *  02111-1307  USA
  */
 
 #include "cx18-driver.h"
@@ -128,7 +114,10 @@ static inline void cx18_mdl_update_bufs_for_cpu(struct cx18_stream *s,
 	if (list_is_singular(&mdl->buf_list)) {
 		buf = list_first_entry(&mdl->buf_list, struct cx18_buffer,
 				       list);
-		buf->bytesused = mdl->bytesused;
+		if (mdl->bytesused > s->buf_size)
+			buf->bytesused = s->buf_size;
+		else
+			buf->bytesused = mdl->bytesused;
 		buf->readpos = 0;
 		cx18_buf_sync_for_cpu(s, buf);
 	} else {
@@ -164,9 +153,8 @@ struct cx18_mdl *cx18_queue_get_mdl(struct cx18_stream *s, u32 id,
 			mdl->skipped++;
 			if (mdl->skipped >= atomic_read(&s->q_busy.depth)-1) {
 				/* mdl must have fallen out of rotation */
-				CX18_WARN("Skipped %s, MDL %d, %d "
-					  "times - it must have dropped out of "
-					  "rotation\n", s->name, mdl->id,
+				CX18_WARN("Skipped %s, MDL %d, %d times - it must have dropped out of rotation\n",
+					  s->name, mdl->id,
 					  mdl->skipped);
 				/* Sweep it up to put it back into rotation */
 				list_move_tail(&mdl->list, &sweep_up);
@@ -340,8 +328,8 @@ void _cx18_mdl_sync_for_device(struct cx18_stream *s, struct cx18_mdl *mdl)
 	struct cx18_buffer *buf;
 
 	list_for_each_entry(buf, &mdl->buf_list, list)
-		pci_dma_sync_single_for_device(pci_dev, buf->dma_handle,
-					       buf_size, dma);
+		dma_sync_single_for_device(&pci_dev->dev, buf->dma_handle,
+					   buf_size, dma);
 }
 
 int cx18_stream_alloc(struct cx18_stream *s)
@@ -352,8 +340,7 @@ int cx18_stream_alloc(struct cx18_stream *s)
 	if (s->buffers == 0)
 		return 0;
 
-	CX18_DEBUG_INFO("Allocate %s stream: %d x %d buffers "
-			"(%d.%02d kB total)\n",
+	CX18_DEBUG_INFO("Allocate %s stream: %d x %d buffers (%d.%02d kB total)\n",
 		s->name, s->buffers, s->buf_size,
 		s->buffers * s->buf_size / 1024,
 		(s->buffers * s->buf_size * 100 / 1024) % 100);
@@ -364,7 +351,7 @@ int cx18_stream_alloc(struct cx18_stream *s)
 					((char __iomem *)cx->scb->cpu_mdl));
 
 		CX18_ERR("Too many buffers, cannot fit in SCB area\n");
-		CX18_ERR("Max buffers = %zd\n",
+		CX18_ERR("Max buffers = %zu\n",
 			bufsz / sizeof(struct cx18_mdl_ent));
 		return -ENOMEM;
 	}
@@ -377,12 +364,11 @@ int cx18_stream_alloc(struct cx18_stream *s)
 		struct cx18_buffer *buf;
 
 		/* 1 MDL per buffer to handle the worst & also default case */
-		mdl = kzalloc(sizeof(struct cx18_mdl), GFP_KERNEL|__GFP_NOWARN);
+		mdl = kzalloc_obj(struct cx18_mdl, GFP_KERNEL | __GFP_NOWARN);
 		if (mdl == NULL)
 			break;
 
-		buf = kzalloc(sizeof(struct cx18_buffer),
-				GFP_KERNEL|__GFP_NOWARN);
+		buf = kzalloc_obj(struct cx18_buffer, GFP_KERNEL | __GFP_NOWARN);
 		if (buf == NULL) {
 			kfree(mdl);
 			break;
@@ -395,14 +381,22 @@ int cx18_stream_alloc(struct cx18_stream *s)
 			break;
 		}
 
+		buf->dma_handle = dma_map_single(&s->cx->pci_dev->dev,
+						 buf->buf, s->buf_size,
+						 s->dma);
+		if (dma_mapping_error(&s->cx->pci_dev->dev, buf->dma_handle)) {
+			kfree(buf->buf);
+			kfree(mdl);
+			kfree(buf);
+			break;
+		}
+
 		INIT_LIST_HEAD(&mdl->list);
 		INIT_LIST_HEAD(&mdl->buf_list);
 		mdl->id = s->mdl_base_idx; /* a somewhat safe value */
 		cx18_enqueue(s, mdl, &s->q_idle);
 
 		INIT_LIST_HEAD(&buf->list);
-		buf->dma_handle = pci_map_single(s->cx->pci_dev,
-				buf->buf, s->buf_size, s->dma);
 		cx18_buf_sync_for_cpu(s, buf);
 		list_add_tail(&buf->list, &s->buf_pool);
 	}
@@ -435,8 +429,8 @@ void cx18_stream_free(struct cx18_stream *s)
 		buf = list_first_entry(&s->buf_pool, struct cx18_buffer, list);
 		list_del_init(&buf->list);
 
-		pci_unmap_single(s->cx->pci_dev, buf->dma_handle,
-				s->buf_size, s->dma);
+		dma_unmap_single(&s->cx->pci_dev->dev, buf->dma_handle,
+				 s->buf_size, s->dma);
 		kfree(buf->buf);
 		kfree(buf);
 	}

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*======================================================================
 
   This driver provides a method to access memory not used by the kernel
@@ -30,7 +31,7 @@
 
 
 #include <linux/module.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
@@ -41,7 +42,7 @@
 #include <linux/fs.h>
 #include <linux/ioctl.h>
 #include <linux/init.h>
-#include <asm/io.h>
+#include <linux/io.h>
 
 #include <linux/mtd/mtd.h>
 
@@ -84,12 +85,7 @@ static int slram_erase(struct mtd_info *mtd, struct erase_info *instr)
 	slram_priv_t *priv = mtd->priv;
 
 	memset(priv->start + instr->addr, 0xff, instr->len);
-	/* This'll catch a few races. Free the thing before returning :)
-	 * I don't feel at all ashamed. This kind of thing is possible anyway
-	 * with flash, but unlikely.
-	 */
-	instr->state = MTD_ERASE_DONE;
-	mtd_erase_callback(instr);
+
 	return(0);
 }
 
@@ -133,70 +129,79 @@ static int slram_write(struct mtd_info *mtd, loff_t to, size_t len,
 static int register_device(char *name, unsigned long start, unsigned long length)
 {
 	slram_mtd_list_t **curmtd;
+	slram_mtd_list_t *new_mtd;
+	struct mtd_info *mtdinfo;
+	slram_priv_t *priv;
+	int ret = -ENOMEM;
 
 	curmtd = &slram_mtdlist;
 	while (*curmtd) {
 		curmtd = &(*curmtd)->next;
 	}
 
-	*curmtd = kmalloc(sizeof(slram_mtd_list_t), GFP_KERNEL);
-	if (!(*curmtd)) {
+	new_mtd = kmalloc_obj(slram_mtd_list_t);
+	if (!new_mtd) {
 		E("slram: Cannot allocate new MTD device.\n");
 		return(-ENOMEM);
 	}
-	(*curmtd)->mtdinfo = kzalloc(sizeof(struct mtd_info), GFP_KERNEL);
-	(*curmtd)->next = NULL;
+	new_mtd->next = NULL;
 
-	if ((*curmtd)->mtdinfo)	{
-		(*curmtd)->mtdinfo->priv =
-			kzalloc(sizeof(slram_priv_t), GFP_KERNEL);
-
-		if (!(*curmtd)->mtdinfo->priv) {
-			kfree((*curmtd)->mtdinfo);
-			(*curmtd)->mtdinfo = NULL;
-		}
-	}
-
-	if (!(*curmtd)->mtdinfo) {
+	mtdinfo = kzalloc_obj(struct mtd_info);
+	if (!mtdinfo) {
 		E("slram: Cannot allocate new MTD device.\n");
-		return(-ENOMEM);
+		goto err_free_list;
 	}
+	new_mtd->mtdinfo = mtdinfo;
 
-	if (!(((slram_priv_t *)(*curmtd)->mtdinfo->priv)->start =
-				ioremap(start, length))) {
-		E("slram: ioremap failed\n");
-		return -EIO;
+	priv = kzalloc_obj(slram_priv_t);
+	if (!priv) {
+		E("slram: Cannot allocate new MTD device.\n");
+		goto err_free_mtdinfo;
 	}
-	((slram_priv_t *)(*curmtd)->mtdinfo->priv)->end =
-		((slram_priv_t *)(*curmtd)->mtdinfo->priv)->start + length;
+	mtdinfo->priv = priv;
 
+	priv->start = memremap(start, length,
+			       MEMREMAP_WB | MEMREMAP_WT | MEMREMAP_WC);
+	if (!priv->start) {
+		E("slram: memremap failed\n");
+		ret = -EIO;
+		goto err_free_priv;
+	}
+	priv->end = priv->start + length;
 
-	(*curmtd)->mtdinfo->name = name;
-	(*curmtd)->mtdinfo->size = length;
-	(*curmtd)->mtdinfo->flags = MTD_CAP_RAM;
-	(*curmtd)->mtdinfo->_erase = slram_erase;
-	(*curmtd)->mtdinfo->_point = slram_point;
-	(*curmtd)->mtdinfo->_unpoint = slram_unpoint;
-	(*curmtd)->mtdinfo->_read = slram_read;
-	(*curmtd)->mtdinfo->_write = slram_write;
-	(*curmtd)->mtdinfo->owner = THIS_MODULE;
-	(*curmtd)->mtdinfo->type = MTD_RAM;
-	(*curmtd)->mtdinfo->erasesize = SLRAM_BLK_SZ;
-	(*curmtd)->mtdinfo->writesize = 1;
+	mtdinfo->name = name;
+	mtdinfo->size = length;
+	mtdinfo->flags = MTD_CAP_RAM;
+	mtdinfo->_erase = slram_erase;
+	mtdinfo->_point = slram_point;
+	mtdinfo->_unpoint = slram_unpoint;
+	mtdinfo->_read = slram_read;
+	mtdinfo->_write = slram_write;
+	mtdinfo->owner = THIS_MODULE;
+	mtdinfo->type = MTD_RAM;
+	mtdinfo->erasesize = SLRAM_BLK_SZ;
+	mtdinfo->writesize = 1;
 
-	if (mtd_device_register((*curmtd)->mtdinfo, NULL, 0))	{
+	if (mtd_device_register(mtdinfo, NULL, 0)) {
 		E("slram: Failed to register new device\n");
-		iounmap(((slram_priv_t *)(*curmtd)->mtdinfo->priv)->start);
-		kfree((*curmtd)->mtdinfo->priv);
-		kfree((*curmtd)->mtdinfo);
-		return(-EAGAIN);
+		ret = -EAGAIN;
+		goto err_unmap;
 	}
+	*curmtd = new_mtd;
 	T("slram: Registered device %s from %luKiB to %luKiB\n", name,
 			(start / 1024), ((start + length) / 1024));
-	T("slram: Mapped from 0x%p to 0x%p\n",
-			((slram_priv_t *)(*curmtd)->mtdinfo->priv)->start,
-			((slram_priv_t *)(*curmtd)->mtdinfo->priv)->end);
-	return(0);
+	T("slram: Mapped from 0x%p to 0x%p\n", priv->start, priv->end);
+	return 0;
+
+err_unmap:
+	memunmap(priv->start);
+err_free_priv:
+	kfree(priv);
+err_free_mtdinfo:
+	kfree(mtdinfo);
+err_free_list:
+	kfree(new_mtd);
+	return ret;
 }
 
 static void unregister_devices(void)
@@ -206,7 +211,7 @@ static void unregister_devices(void)
 	while (slram_mtdlist) {
 		nextitem = slram_mtdlist->next;
 		mtd_device_unregister(slram_mtdlist->mtdinfo);
-		iounmap(((slram_priv_t *)slram_mtdlist->mtdinfo->priv)->start);
+		memunmap(((slram_priv_t *)slram_mtdlist->mtdinfo->priv)->start);
 		kfree(slram_mtdlist->mtdinfo->priv);
 		kfree(slram_mtdlist->mtdinfo);
 		kfree(slram_mtdlist);
@@ -280,13 +285,10 @@ __setup("slram=", mtd_slram_setup);
 static int __init init_slram(void)
 {
 	char *devname;
-	int i;
 
 #ifndef MODULE
 	char *devstart;
 	char *devlength;
-
-	i = 0;
 
 	if (!map) {
 		E("slram: not enough parameters.\n");
@@ -302,10 +304,12 @@ static int __init init_slram(void)
 		T("slram: devname = %s\n", devname);
 		if ((!map) || (!(devstart = strsep(&map, ",")))) {
 			E("slram: No devicestart specified.\n");
+			break;
 		}
 		T("slram: devstart = %s\n", devstart);
 		if ((!map) || (!(devlength = strsep(&map, ",")))) {
 			E("slram: No devicelength / -end specified.\n");
+			break;
 		}
 		T("slram: devlength = %s\n", devlength);
 		if (parse_cmdline(devname, devstart, devlength) != 0) {
@@ -314,6 +318,7 @@ static int __init init_slram(void)
 	}
 #else
 	int count;
+	int i;
 
 	for (count = 0; count < SLRAM_MAX_DEVICES_PARAMS && map[count];
 			count++) {

@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for the Analog Devices digital potentiometers (SPI bus)
  *
  * Copyright (C) 2010-2011 Michael Hennerich, Analog Devices Inc.
- *
- * Licensed under the GPL-2 or later.
  */
 
 #include <linux/spi/spi.h>
@@ -15,18 +14,21 @@
 static int write8(void *client, u8 val)
 {
 	u8 data = val;
+
 	return spi_write(client, &data, 1);
 }
 
 static int write16(void *client, u8 reg, u8 val)
 {
 	u8 data[2] = {reg, val};
+
 	return spi_write(client, data, 2);
 }
 
 static int write24(void *client, u8 reg, u16 val)
 {
 	u8 data[3] = {reg, val >> 8, val};
+
 	return spi_write(client, data, 3);
 }
 
@@ -34,6 +36,7 @@ static int read8(void *client)
 {
 	int ret;
 	u8 data;
+
 	ret = spi_read(client, &data, 1);
 	if (ret < 0)
 		return ret;
@@ -87,48 +90,48 @@ static int ad_dpot_spi_probe(struct spi_device *spi)
 			     spi_get_device_id(spi)->name);
 }
 
-static int ad_dpot_spi_remove(struct spi_device *spi)
+static void ad_dpot_spi_remove(struct spi_device *spi)
 {
-	return ad_dpot_remove(&spi->dev);
+	ad_dpot_remove(&spi->dev);
 }
 
 static const struct spi_device_id ad_dpot_spi_id[] = {
-	{"ad5160", AD5160_ID},
-	{"ad5161", AD5161_ID},
-	{"ad5162", AD5162_ID},
-	{"ad5165", AD5165_ID},
-	{"ad5200", AD5200_ID},
-	{"ad5201", AD5201_ID},
-	{"ad5203", AD5203_ID},
-	{"ad5204", AD5204_ID},
-	{"ad5206", AD5206_ID},
-	{"ad5207", AD5207_ID},
-	{"ad5231", AD5231_ID},
-	{"ad5232", AD5232_ID},
-	{"ad5233", AD5233_ID},
-	{"ad5235", AD5235_ID},
-	{"ad5260", AD5260_ID},
-	{"ad5262", AD5262_ID},
-	{"ad5263", AD5263_ID},
-	{"ad5290", AD5290_ID},
-	{"ad5291", AD5291_ID},
-	{"ad5292", AD5292_ID},
-	{"ad5293", AD5293_ID},
-	{"ad7376", AD7376_ID},
-	{"ad8400", AD8400_ID},
-	{"ad8402", AD8402_ID},
-	{"ad8403", AD8403_ID},
-	{"adn2850", ADN2850_ID},
-	{"ad5270", AD5270_ID},
-	{"ad5271", AD5271_ID},
-	{}
+	{ .name = "ad5160", .driver_data = AD5160_ID },
+	{ .name = "ad5161", .driver_data = AD5161_ID },
+	{ .name = "ad5162", .driver_data = AD5162_ID },
+	{ .name = "ad5165", .driver_data = AD5165_ID },
+	{ .name = "ad5200", .driver_data = AD5200_ID },
+	{ .name = "ad5201", .driver_data = AD5201_ID },
+	{ .name = "ad5203", .driver_data = AD5203_ID },
+	{ .name = "ad5204", .driver_data = AD5204_ID },
+	{ .name = "ad5206", .driver_data = AD5206_ID },
+	{ .name = "ad5207", .driver_data = AD5207_ID },
+	{ .name = "ad5231", .driver_data = AD5231_ID },
+	{ .name = "ad5232", .driver_data = AD5232_ID },
+	{ .name = "ad5233", .driver_data = AD5233_ID },
+	{ .name = "ad5235", .driver_data = AD5235_ID },
+	{ .name = "ad5260", .driver_data = AD5260_ID },
+	{ .name = "ad5262", .driver_data = AD5262_ID },
+	{ .name = "ad5263", .driver_data = AD5263_ID },
+	{ .name = "ad5290", .driver_data = AD5290_ID },
+	{ .name = "ad5291", .driver_data = AD5291_ID },
+	{ .name = "ad5292", .driver_data = AD5292_ID },
+	{ .name = "ad5293", .driver_data = AD5293_ID },
+	{ .name = "ad7376", .driver_data = AD7376_ID },
+	{ .name = "ad8400", .driver_data = AD8400_ID },
+	{ .name = "ad8402", .driver_data = AD8402_ID },
+	{ .name = "ad8403", .driver_data = AD8403_ID },
+	{ .name = "adn2850", .driver_data = ADN2850_ID },
+	{ .name = "ad5270", .driver_data = AD5270_ID },
+	{ .name = "ad5271", .driver_data = AD5271_ID },
+	{ }
 };
 MODULE_DEVICE_TABLE(spi, ad_dpot_spi_id);
 
 static struct spi_driver ad_dpot_spi_driver = {
 	.driver = {
 		.name	= "ad_dpot",
-		.owner	= THIS_MODULE,
+		.dev_groups = ad_dpot_groups,
 	},
 	.probe		= ad_dpot_spi_probe,
 	.remove		= ad_dpot_spi_remove,
@@ -137,7 +140,7 @@ static struct spi_driver ad_dpot_spi_driver = {
 
 module_spi_driver(ad_dpot_spi_driver);
 
-MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>");
+MODULE_AUTHOR("Michael Hennerich <michael.hennerich@analog.com>");
 MODULE_DESCRIPTION("digital potentiometer SPI bus driver");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("spi:ad_dpot");

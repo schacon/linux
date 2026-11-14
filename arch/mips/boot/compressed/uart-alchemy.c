@@ -1,4 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <asm/mach-au1x00/au1000.h>
+
+#include "decompress.h"
 
 void putc(char c)
 {

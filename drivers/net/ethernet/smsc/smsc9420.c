@@ -1,23 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
  /***************************************************************************
  *
  * Copyright (C) 2007,2008  SMSC
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- *
  ***************************************************************************
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
@@ -29,15 +18,15 @@
 #include <linux/crc32.h>
 #include <linux/slab.h>
 #include <linux/module.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include "smsc9420.h"
 
 #define DRV_NAME		"smsc9420"
-#define PFX			DRV_NAME ": "
 #define DRV_MDIONAME		"smsc9420-mdio"
 #define DRV_DESCRIPTION		"SMSC LAN9420 driver"
 #define DRV_VERSION		"1.01"
 
+MODULE_DESCRIPTION("SMSC LAN9420 Ethernet driver");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(DRV_VERSION);
 
@@ -76,14 +65,12 @@ struct smsc9420_pdata {
 	bool rx_csum;
 	u32 msg_enable;
 
-	struct phy_device *phy_dev;
 	struct mii_bus *mii_bus;
-	int phy_irq[PHY_MAX_ADDR];
 	int last_duplex;
 	int last_carrier;
 };
 
-static DEFINE_PCI_DEVICE_TABLE(smsc9420_id_table) = {
+static const struct pci_device_id smsc9420_id_table[] = {
 	{ PCI_VENDOR_ID_9420, PCI_DEVICE_ID_9420, PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0, }
 };
@@ -96,21 +83,6 @@ static uint smsc_debug;
 static uint debug = -1;
 module_param(debug, uint, 0);
 MODULE_PARM_DESC(debug, "debug level");
-
-#define smsc_dbg(TYPE, f, a...) \
-do {	if ((pd)->msg_enable & NETIF_MSG_##TYPE) \
-		printk(KERN_DEBUG PFX f "\n", ## a); \
-} while (0)
-
-#define smsc_info(TYPE, f, a...) \
-do {	if ((pd)->msg_enable & NETIF_MSG_##TYPE) \
-		printk(KERN_INFO PFX f "\n", ## a); \
-} while (0)
-
-#define smsc_warn(TYPE, f, a...) \
-do {	if ((pd)->msg_enable & NETIF_MSG_##TYPE) \
-		printk(KERN_WARNING PFX f "\n", ## a); \
-} while (0)
 
 static inline u32 smsc9420_reg_read(struct smsc9420_pdata *pd, u32 offset)
 {
@@ -131,7 +103,7 @@ static inline void smsc9420_pci_flush_write(struct smsc9420_pdata *pd)
 
 static int smsc9420_mii_read(struct mii_bus *bus, int phyaddr, int regidx)
 {
-	struct smsc9420_pdata *pd = (struct smsc9420_pdata *)bus->priv;
+	struct smsc9420_pdata *pd = bus->priv;
 	unsigned long flags;
 	u32 addr;
 	int i, reg = -EIO;
@@ -140,7 +112,7 @@ static int smsc9420_mii_read(struct mii_bus *bus, int phyaddr, int regidx)
 
 	/*  confirm MII not busy */
 	if ((smsc9420_reg_read(pd, MII_ACCESS) & MII_ACCESS_MII_BUSY_)) {
-		smsc_warn(DRV, "MII is busy???");
+		netif_warn(pd, drv, pd->dev, "MII is busy???\n");
 		goto out;
 	}
 
@@ -159,7 +131,7 @@ static int smsc9420_mii_read(struct mii_bus *bus, int phyaddr, int regidx)
 		udelay(10);
 	}
 
-	smsc_warn(DRV, "MII busy timeout!");
+	netif_warn(pd, drv, pd->dev, "MII busy timeout!\n");
 
 out:
 	spin_unlock_irqrestore(&pd->phy_lock, flags);
@@ -169,7 +141,7 @@ out:
 static int smsc9420_mii_write(struct mii_bus *bus, int phyaddr, int regidx,
 			   u16 val)
 {
-	struct smsc9420_pdata *pd = (struct smsc9420_pdata *)bus->priv;
+	struct smsc9420_pdata *pd = bus->priv;
 	unsigned long flags;
 	u32 addr;
 	int i, reg = -EIO;
@@ -178,7 +150,7 @@ static int smsc9420_mii_write(struct mii_bus *bus, int phyaddr, int regidx,
 
 	/* confirm MII not busy */
 	if ((smsc9420_reg_read(pd, MII_ACCESS) & MII_ACCESS_MII_BUSY_)) {
-		smsc_warn(DRV, "MII is busy???");
+		netif_warn(pd, drv, pd->dev, "MII is busy???\n");
 		goto out;
 	}
 
@@ -200,7 +172,7 @@ static int smsc9420_mii_write(struct mii_bus *bus, int phyaddr, int regidx,
 		udelay(10);
 	}
 
-	smsc_warn(DRV, "MII busy timeout!");
+	netif_warn(pd, drv, pd->dev, "MII busy timeout!\n");
 
 out:
 	spin_unlock_irqrestore(&pd->phy_lock, flags);
@@ -222,7 +194,7 @@ static int smsc9420_eeprom_reload(struct smsc9420_pdata *pd)
 	BUG_ON(!pd);
 
 	if (smsc9420_reg_read(pd, E2P_CMD) & E2P_CMD_EPC_BUSY_) {
-		smsc_dbg(DRV, "smsc9420_eeprom_reload: Eeprom busy");
+		netif_dbg(pd, drv, pd->dev, "%s: Eeprom busy\n", __func__);
 		return -EIO;
 	}
 
@@ -235,43 +207,8 @@ static int smsc9420_eeprom_reload(struct smsc9420_pdata *pd)
 			return 0;
 	} while (timeout--);
 
-	smsc_warn(DRV, "smsc9420_eeprom_reload: Eeprom timed out");
+	netif_warn(pd, drv, pd->dev, "%s: Eeprom timed out\n", __func__);
 	return -EIO;
-}
-
-/* Standard ioctls for mii-tool */
-static int smsc9420_do_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
-{
-	struct smsc9420_pdata *pd = netdev_priv(dev);
-
-	if (!netif_running(dev) || !pd->phy_dev)
-		return -EINVAL;
-
-	return phy_mii_ioctl(pd->phy_dev, ifr, cmd);
-}
-
-static int smsc9420_ethtool_get_settings(struct net_device *dev,
-					 struct ethtool_cmd *cmd)
-{
-	struct smsc9420_pdata *pd = netdev_priv(dev);
-
-	if (!pd->phy_dev)
-		return -ENODEV;
-
-	cmd->maxtxpkt = 1;
-	cmd->maxrxpkt = 1;
-	return phy_ethtool_gset(pd->phy_dev, cmd);
-}
-
-static int smsc9420_ethtool_set_settings(struct net_device *dev,
-					 struct ethtool_cmd *cmd)
-{
-	struct smsc9420_pdata *pd = netdev_priv(dev);
-
-	if (!pd->phy_dev)
-		return -ENODEV;
-
-	return phy_ethtool_sset(pd->phy_dev, cmd);
 }
 
 static void smsc9420_ethtool_get_drvinfo(struct net_device *netdev,
@@ -279,10 +216,10 @@ static void smsc9420_ethtool_get_drvinfo(struct net_device *netdev,
 {
 	struct smsc9420_pdata *pd = netdev_priv(netdev);
 
-	strlcpy(drvinfo->driver, DRV_NAME, sizeof(drvinfo->driver));
-	strlcpy(drvinfo->bus_info, pci_name(pd->pdev),
+	strscpy(drvinfo->driver, DRV_NAME, sizeof(drvinfo->driver));
+	strscpy(drvinfo->bus_info, pci_name(pd->pdev),
 		sizeof(drvinfo->bus_info));
-	strlcpy(drvinfo->version, DRV_VERSION, sizeof(drvinfo->version));
+	strscpy(drvinfo->version, DRV_VERSION, sizeof(drvinfo->version));
 }
 
 static u32 smsc9420_ethtool_get_msglevel(struct net_device *netdev)
@@ -297,16 +234,6 @@ static void smsc9420_ethtool_set_msglevel(struct net_device *netdev, u32 data)
 	pd->msg_enable = data;
 }
 
-static int smsc9420_ethtool_nway_reset(struct net_device *netdev)
-{
-	struct smsc9420_pdata *pd = netdev_priv(netdev);
-
-	if (!pd->phy_dev)
-		return -ENODEV;
-
-	return phy_start_aneg(pd->phy_dev);
-}
-
 static int smsc9420_ethtool_getregslen(struct net_device *dev)
 {
 	/* all smsc9420 registers plus all phy registers */
@@ -318,7 +245,7 @@ smsc9420_ethtool_getregs(struct net_device *dev, struct ethtool_regs *regs,
 			 void *buf)
 {
 	struct smsc9420_pdata *pd = netdev_priv(dev);
-	struct phy_device *phy_dev = pd->phy_dev;
+	struct phy_device *phy_dev = dev->phydev;
 	unsigned int i, j = 0;
 	u32 *data = buf;
 
@@ -331,7 +258,8 @@ smsc9420_ethtool_getregs(struct net_device *dev, struct ethtool_regs *regs,
 		return;
 
 	for (i = 0; i <= 31; i++)
-		data[j++] = smsc9420_mii_read(phy_dev->bus, phy_dev->addr, i);
+		data[j++] = smsc9420_mii_read(phy_dev->mdio.bus,
+					      phy_dev->mdio.addr, i);
 }
 
 static void smsc9420_eeprom_enable_access(struct smsc9420_pdata *pd)
@@ -347,9 +275,9 @@ static int smsc9420_eeprom_send_cmd(struct smsc9420_pdata *pd, u32 op)
 	int timeout = 100;
 	u32 e2cmd;
 
-	smsc_dbg(HW, "op 0x%08x", op);
+	netif_dbg(pd, hw, pd->dev, "op 0x%08x\n", op);
 	if (smsc9420_reg_read(pd, E2P_CMD) & E2P_CMD_EPC_BUSY_) {
-		smsc_warn(HW, "Busy at start");
+		netif_warn(pd, hw, pd->dev, "Busy at start\n");
 		return -EBUSY;
 	}
 
@@ -362,12 +290,13 @@ static int smsc9420_eeprom_send_cmd(struct smsc9420_pdata *pd, u32 op)
 	} while ((e2cmd & E2P_CMD_EPC_BUSY_) && (--timeout));
 
 	if (!timeout) {
-		smsc_info(HW, "TIMED OUT");
+		netif_info(pd, hw, pd->dev, "TIMED OUT\n");
 		return -EAGAIN;
 	}
 
 	if (e2cmd & E2P_CMD_EPC_TIMEOUT_) {
-		smsc_info(HW, "Error occurred during eeprom operation");
+		netif_info(pd, hw, pd->dev,
+			   "Error occurred during eeprom operation\n");
 		return -EINVAL;
 	}
 
@@ -380,7 +309,7 @@ static int smsc9420_eeprom_read_location(struct smsc9420_pdata *pd,
 	u32 op = E2P_CMD_EPC_CMD_READ_ | address;
 	int ret;
 
-	smsc_dbg(HW, "address 0x%x", address);
+	netif_dbg(pd, hw, pd->dev, "address 0x%x\n", address);
 	ret = smsc9420_eeprom_send_cmd(pd, op);
 
 	if (!ret)
@@ -395,7 +324,7 @@ static int smsc9420_eeprom_write_location(struct smsc9420_pdata *pd,
 	u32 op = E2P_CMD_EPC_CMD_ERASE_ | address;
 	int ret;
 
-	smsc_dbg(HW, "address 0x%x, data 0x%x", address, data);
+	netif_dbg(pd, hw, pd->dev, "address 0x%x, data 0x%x\n", address, data);
 	ret = smsc9420_eeprom_send_cmd(pd, op);
 
 	if (!ret) {
@@ -457,12 +386,10 @@ static int smsc9420_ethtool_set_eeprom(struct net_device *dev,
 }
 
 static const struct ethtool_ops smsc9420_ethtool_ops = {
-	.get_settings = smsc9420_ethtool_get_settings,
-	.set_settings = smsc9420_ethtool_set_settings,
 	.get_drvinfo = smsc9420_ethtool_get_drvinfo,
 	.get_msglevel = smsc9420_ethtool_get_msglevel,
 	.set_msglevel = smsc9420_ethtool_set_msglevel,
-	.nway_reset = smsc9420_ethtool_nway_reset,
+	.nway_reset = phy_ethtool_nway_reset,
 	.get_link = ethtool_op_get_link,
 	.get_eeprom_len = smsc9420_ethtool_get_eeprom_len,
 	.get_eeprom = smsc9420_ethtool_get_eeprom,
@@ -470,13 +397,15 @@ static const struct ethtool_ops smsc9420_ethtool_ops = {
 	.get_regs_len = smsc9420_ethtool_getregslen,
 	.get_regs = smsc9420_ethtool_getregs,
 	.get_ts_info = ethtool_op_get_ts_info,
+	.get_link_ksettings = phy_ethtool_get_link_ksettings,
+	.set_link_ksettings = phy_ethtool_set_link_ksettings,
 };
 
 /* Sets the device MAC address to dev_addr */
 static void smsc9420_set_mac_address(struct net_device *dev)
 {
 	struct smsc9420_pdata *pd = netdev_priv(dev);
-	u8 *dev_addr = dev->dev_addr;
+	const u8 *dev_addr = dev->dev_addr;
 	u32 mac_high16 = (dev_addr[5] << 8) | dev_addr[4];
 	u32 mac_low32 = (dev_addr[3] << 24) | (dev_addr[2] << 16) |
 	    (dev_addr[1] << 8) | dev_addr[0];
@@ -488,31 +417,36 @@ static void smsc9420_set_mac_address(struct net_device *dev)
 static void smsc9420_check_mac_address(struct net_device *dev)
 {
 	struct smsc9420_pdata *pd = netdev_priv(dev);
+	u8 addr[ETH_ALEN];
 
 	/* Check if mac address has been specified when bringing interface up */
 	if (is_valid_ether_addr(dev->dev_addr)) {
 		smsc9420_set_mac_address(dev);
-		smsc_dbg(PROBE, "MAC Address is specified by configuration");
+		netif_dbg(pd, probe, pd->dev,
+			  "MAC Address is specified by configuration\n");
 	} else {
 		/* Try reading mac address from device. if EEPROM is present
 		 * it will already have been set */
 		u32 mac_high16 = smsc9420_reg_read(pd, ADDRH);
 		u32 mac_low32 = smsc9420_reg_read(pd, ADDRL);
-		dev->dev_addr[0] = (u8)(mac_low32);
-		dev->dev_addr[1] = (u8)(mac_low32 >> 8);
-		dev->dev_addr[2] = (u8)(mac_low32 >> 16);
-		dev->dev_addr[3] = (u8)(mac_low32 >> 24);
-		dev->dev_addr[4] = (u8)(mac_high16);
-		dev->dev_addr[5] = (u8)(mac_high16 >> 8);
+		addr[0] = (u8)(mac_low32);
+		addr[1] = (u8)(mac_low32 >> 8);
+		addr[2] = (u8)(mac_low32 >> 16);
+		addr[3] = (u8)(mac_low32 >> 24);
+		addr[4] = (u8)(mac_high16);
+		addr[5] = (u8)(mac_high16 >> 8);
 
-		if (is_valid_ether_addr(dev->dev_addr)) {
+		if (is_valid_ether_addr(addr)) {
 			/* eeprom values are valid  so use them */
-			smsc_dbg(PROBE, "Mac Address is read from EEPROM");
+			eth_hw_addr_set(dev, addr);
+			netif_dbg(pd, probe, pd->dev,
+				  "Mac Address is read from EEPROM\n");
 		} else {
 			/* eeprom values are invalid, generate random MAC */
 			eth_hw_addr_random(dev);
 			smsc9420_set_mac_address(dev);
-			smsc_dbg(PROBE, "MAC Address is set to random");
+			netif_dbg(pd, probe, pd->dev,
+				  "MAC Address is set to random\n");
 		}
 	}
 }
@@ -535,7 +469,7 @@ static void smsc9420_stop_tx(struct smsc9420_pdata *pd)
 	}
 
 	if (!timeout)
-		smsc_warn(IFDOWN, "TX DMAC failed to stop");
+		netif_warn(pd, ifdown, pd->dev, "TX DMAC failed to stop\n");
 
 	/* ACK Tx DMAC stop bit */
 	smsc9420_reg_write(pd, DMAC_STATUS, DMAC_STS_TXPS_);
@@ -566,8 +500,9 @@ static void smsc9420_free_tx_ring(struct smsc9420_pdata *pd)
 
 		if (skb) {
 			BUG_ON(!pd->tx_buffers[i].mapping);
-			pci_unmap_single(pd->pdev, pd->tx_buffers[i].mapping,
-					 skb->len, PCI_DMA_TODEVICE);
+			dma_unmap_single(&pd->pdev->dev,
+					 pd->tx_buffers[i].mapping, skb->len,
+					 DMA_TO_DEVICE);
 			dev_kfree_skb_any(skb);
 		}
 
@@ -599,8 +534,9 @@ static void smsc9420_free_rx_ring(struct smsc9420_pdata *pd)
 			dev_kfree_skb_any(pd->rx_buffers[i].skb);
 
 		if (pd->rx_buffers[i].mapping)
-			pci_unmap_single(pd->pdev, pd->rx_buffers[i].mapping,
-				PKT_BUF_SZ, PCI_DMA_FROMDEVICE);
+			dma_unmap_single(&pd->pdev->dev,
+					 pd->rx_buffers[i].mapping,
+					 PKT_BUF_SZ, DMA_FROM_DEVICE);
 
 		pd->rx_ring[i].status = 0;
 		pd->rx_ring[i].length = 0;
@@ -646,7 +582,8 @@ static void smsc9420_stop_rx(struct smsc9420_pdata *pd)
 	}
 
 	if (!timeout)
-		smsc_warn(IFDOWN, "RX DMAC did not stop! timeout.");
+		netif_warn(pd, ifdown, pd->dev,
+			   "RX DMAC did not stop! timeout\n");
 
 	/* ACK the Rx DMAC stop bit */
 	smsc9420_reg_write(pd, DMAC_STATUS, DMAC_STS_RXPS_);
@@ -736,7 +673,7 @@ static void smsc9420_dmac_soft_reset(struct smsc9420_pdata *pd)
 	smsc9420_reg_read(pd, BUS_MODE);
 	udelay(2);
 	if (smsc9420_reg_read(pd, BUS_MODE) & BUS_MODE_SWR_)
-		smsc_warn(DRV, "Software reset not cleared");
+		netif_warn(pd, drv, pd->dev, "Software reset not cleared\n");
 }
 
 static int smsc9420_stop(struct net_device *dev)
@@ -746,7 +683,7 @@ static int smsc9420_stop(struct net_device *dev)
 	ulong flags;
 
 	BUG_ON(!pd);
-	BUG_ON(!pd->phy_dev);
+	BUG_ON(!dev->phydev);
 
 	/* disable master interrupt */
 	spin_lock_irqsave(&pd->int_lock, flags);
@@ -767,10 +704,9 @@ static int smsc9420_stop(struct net_device *dev)
 
 	smsc9420_dmac_soft_reset(pd);
 
-	phy_stop(pd->phy_dev);
+	phy_stop(dev->phydev);
 
-	phy_disconnect(pd->phy_dev);
-	pd->phy_dev = NULL;
+	phy_disconnect(dev->phydev);
 	mdiobus_unregister(pd->mii_bus);
 	mdiobus_free(pd->mii_bus);
 
@@ -818,8 +754,8 @@ static void smsc9420_rx_handoff(struct smsc9420_pdata *pd, const int index,
 	dev->stats.rx_packets++;
 	dev->stats.rx_bytes += packet_length;
 
-	pci_unmap_single(pd->pdev, pd->rx_buffers[index].mapping,
-		PKT_BUF_SZ, PCI_DMA_FROMDEVICE);
+	dma_unmap_single(&pd->pdev->dev, pd->rx_buffers[index].mapping,
+			 PKT_BUF_SZ, DMA_FROM_DEVICE);
 	pd->rx_buffers[index].mapping = 0;
 
 	skb = pd->rx_buffers[index].skb;
@@ -851,11 +787,11 @@ static int smsc9420_alloc_rx_buffer(struct smsc9420_pdata *pd, int index)
 	if (unlikely(!skb))
 		return -ENOMEM;
 
-	mapping = pci_map_single(pd->pdev, skb_tail_pointer(skb),
-				 PKT_BUF_SZ, PCI_DMA_FROMDEVICE);
-	if (pci_dma_mapping_error(pd->pdev, mapping)) {
+	mapping = dma_map_single(&pd->pdev->dev, skb_tail_pointer(skb),
+				 PKT_BUF_SZ, DMA_FROM_DEVICE);
+	if (dma_mapping_error(&pd->pdev->dev, mapping)) {
 		dev_kfree_skb_any(skb);
-		smsc_warn(RX_ERR, "pci_map_single failed!");
+		netif_warn(pd, rx_err, pd->dev, "dma_map_single failed!\n");
 		return -ENOMEM;
 	}
 
@@ -909,7 +845,7 @@ static int smsc9420_rx_poll(struct napi_struct *napi, int budget)
 	smsc9420_pci_flush_write(pd);
 
 	if (work_done < budget) {
-		napi_complete(&pd->napi);
+		napi_complete_done(&pd->napi, work_done);
 
 		/* re-enable RX DMA interrupts */
 		dma_intr_ena = smsc9420_reg_read(pd, DMAC_INTR_ENA);
@@ -970,8 +906,10 @@ static void smsc9420_complete_tx(struct net_device *dev)
 		BUG_ON(!pd->tx_buffers[index].skb);
 		BUG_ON(!pd->tx_buffers[index].mapping);
 
-		pci_unmap_single(pd->pdev, pd->tx_buffers[index].mapping,
-			pd->tx_buffers[index].skb->len, PCI_DMA_TODEVICE);
+		dma_unmap_single(&pd->pdev->dev,
+				 pd->tx_buffers[index].mapping,
+				 pd->tx_buffers[index].skb->len,
+				 DMA_TO_DEVICE);
 		pd->tx_buffers[index].mapping = 0;
 
 		dev_kfree_skb_any(pd->tx_buffers[index].skb);
@@ -1001,10 +939,11 @@ static netdev_tx_t smsc9420_hard_start_xmit(struct sk_buff *skb,
 	BUG_ON(pd->tx_buffers[index].skb);
 	BUG_ON(pd->tx_buffers[index].mapping);
 
-	mapping = pci_map_single(pd->pdev, skb->data,
-				 skb->len, PCI_DMA_TODEVICE);
-	if (pci_dma_mapping_error(pd->pdev, mapping)) {
-		smsc_warn(TX_ERR, "pci_map_single failed, dropping packet");
+	mapping = dma_map_single(&pd->pdev->dev, skb->data, skb->len,
+				 DMA_TO_DEVICE);
+	if (dma_mapping_error(&pd->pdev->dev, mapping)) {
+		netif_warn(pd, tx_err, pd->dev,
+			   "dma_map_single failed, dropping packet\n");
 		return NETDEV_TX_BUSY;
 	}
 
@@ -1056,12 +995,12 @@ static void smsc9420_set_multicast_list(struct net_device *dev)
 	u32 mac_cr = smsc9420_reg_read(pd, MAC_CR);
 
 	if (dev->flags & IFF_PROMISC) {
-		smsc_dbg(HW, "Promiscuous Mode Enabled");
+		netif_dbg(pd, hw, pd->dev, "Promiscuous Mode Enabled\n");
 		mac_cr |= MAC_CR_PRMS_;
 		mac_cr &= (~MAC_CR_MCPAS_);
 		mac_cr &= (~MAC_CR_HPFILT_);
 	} else if (dev->flags & IFF_ALLMULTI) {
-		smsc_dbg(HW, "Receive all Multicast Enabled");
+		netif_dbg(pd, hw, pd->dev, "Receive all Multicast Enabled\n");
 		mac_cr &= (~MAC_CR_PRMS_);
 		mac_cr |= MAC_CR_MCPAS_;
 		mac_cr &= (~MAC_CR_HPFILT_);
@@ -1069,7 +1008,7 @@ static void smsc9420_set_multicast_list(struct net_device *dev)
 		struct netdev_hw_addr *ha;
 		u32 hash_lo = 0, hash_hi = 0;
 
-		smsc_dbg(HW, "Multicast filter enabled");
+		netif_dbg(pd, hw, pd->dev, "Multicast filter enabled\n");
 		netdev_for_each_mc_addr(ha, dev) {
 			u32 bit_num = smsc9420_hash(ha->addr);
 			u32 mask = 1 << (bit_num & 0x1F);
@@ -1087,7 +1026,7 @@ static void smsc9420_set_multicast_list(struct net_device *dev)
 		mac_cr &= (~MAC_CR_MCPAS_);
 		mac_cr |= MAC_CR_HPFILT_;
 	} else {
-		smsc_dbg(HW, "Receive own packets only.");
+		netif_dbg(pd, hw, pd->dev, "Receive own packets only\n");
 		smsc9420_reg_write(pd, HASHH, 0);
 		smsc9420_reg_write(pd, HASHL, 0);
 
@@ -1102,7 +1041,8 @@ static void smsc9420_set_multicast_list(struct net_device *dev)
 
 static void smsc9420_phy_update_flowcontrol(struct smsc9420_pdata *pd)
 {
-	struct phy_device *phy_dev = pd->phy_dev;
+	struct net_device *dev = pd->dev;
+	struct phy_device *phy_dev = dev->phydev;
 	u32 flow;
 
 	if (phy_dev->duplex == DUPLEX_FULL) {
@@ -1115,11 +1055,11 @@ static void smsc9420_phy_update_flowcontrol(struct smsc9420_pdata *pd)
 		else
 			flow = 0;
 
-		smsc_info(LINK, "rx pause %s, tx pause %s",
-			(cap & FLOW_CTRL_RX ? "enabled" : "disabled"),
-			(cap & FLOW_CTRL_TX ? "enabled" : "disabled"));
+		netif_info(pd, link, pd->dev, "rx pause %s, tx pause %s\n",
+			   cap & FLOW_CTRL_RX ? "enabled" : "disabled",
+			   cap & FLOW_CTRL_TX ? "enabled" : "disabled");
 	} else {
-		smsc_info(LINK, "half duplex");
+		netif_info(pd, link, pd->dev, "half duplex\n");
 		flow = 0;
 	}
 
@@ -1131,16 +1071,16 @@ static void smsc9420_phy_update_flowcontrol(struct smsc9420_pdata *pd)
 static void smsc9420_phy_adjust_link(struct net_device *dev)
 {
 	struct smsc9420_pdata *pd = netdev_priv(dev);
-	struct phy_device *phy_dev = pd->phy_dev;
+	struct phy_device *phy_dev = dev->phydev;
 	int carrier;
 
 	if (phy_dev->duplex != pd->last_duplex) {
 		u32 mac_cr = smsc9420_reg_read(pd, MAC_CR);
 		if (phy_dev->duplex) {
-			smsc_dbg(LINK, "full duplex mode");
+			netif_dbg(pd, link, pd->dev, "full duplex mode\n");
 			mac_cr |= MAC_CR_FDPX_;
 		} else {
-			smsc_dbg(LINK, "half duplex mode");
+			netif_dbg(pd, link, pd->dev, "half duplex mode\n");
 			mac_cr &= ~MAC_CR_FDPX_;
 		}
 		smsc9420_reg_write(pd, MAC_CR, mac_cr);
@@ -1152,9 +1092,9 @@ static void smsc9420_phy_adjust_link(struct net_device *dev)
 	carrier = netif_carrier_ok(dev);
 	if (carrier != pd->last_carrier) {
 		if (carrier)
-			smsc_dbg(LINK, "carrier OK");
+			netif_dbg(pd, link, pd->dev, "carrier OK\n");
 		else
-			smsc_dbg(LINK, "no carrier");
+			netif_dbg(pd, link, pd->dev, "no carrier\n");
 		pd->last_carrier = carrier;
 	}
 }
@@ -1164,35 +1104,30 @@ static int smsc9420_mii_probe(struct net_device *dev)
 	struct smsc9420_pdata *pd = netdev_priv(dev);
 	struct phy_device *phydev = NULL;
 
-	BUG_ON(pd->phy_dev);
+	BUG_ON(dev->phydev);
 
 	/* Device only supports internal PHY at address 1 */
-	if (!pd->mii_bus->phy_map[1]) {
-		pr_err("%s: no PHY found at address 1\n", dev->name);
+	phydev = mdiobus_get_phy(pd->mii_bus, 1);
+	if (!phydev) {
+		netdev_err(dev, "no PHY found at address 1\n");
 		return -ENODEV;
 	}
 
-	phydev = pd->mii_bus->phy_map[1];
-	smsc_info(PROBE, "PHY addr %d, phy_id 0x%08X", phydev->addr,
-		phydev->phy_id);
-
-	phydev = phy_connect(dev, dev_name(&phydev->dev),
+	phydev = phy_connect(dev, phydev_name(phydev),
 			     smsc9420_phy_adjust_link, PHY_INTERFACE_MODE_MII);
 
 	if (IS_ERR(phydev)) {
-		pr_err("%s: Could not attach to PHY\n", dev->name);
+		netdev_err(dev, "Could not attach to PHY\n");
 		return PTR_ERR(phydev);
 	}
 
-	pr_info("%s: attached PHY driver [%s] (mii_bus:phy_addr=%s, irq=%d)\n",
-		dev->name, phydev->drv->name, dev_name(&phydev->dev), phydev->irq);
+	phy_set_max_speed(phydev, SPEED_100);
 
 	/* mask with MAC supported features */
-	phydev->supported &= (PHY_BASIC_FEATURES | SUPPORTED_Pause |
-			      SUPPORTED_Asym_Pause);
-	phydev->advertising = phydev->supported;
+	phy_support_asym_pause(phydev);
 
-	pd->phy_dev = phydev;
+	phy_attached_info(phydev);
+
 	pd->last_duplex = -1;
 	pd->last_carrier = -1;
 
@@ -1202,7 +1137,7 @@ static int smsc9420_mii_probe(struct net_device *dev)
 static int smsc9420_mii_init(struct net_device *dev)
 {
 	struct smsc9420_pdata *pd = netdev_priv(dev);
-	int err = -ENXIO, i;
+	int err = -ENXIO;
 
 	pd->mii_bus = mdiobus_alloc();
 	if (!pd->mii_bus) {
@@ -1210,25 +1145,21 @@ static int smsc9420_mii_init(struct net_device *dev)
 		goto err_out_1;
 	}
 	pd->mii_bus->name = DRV_MDIONAME;
-	snprintf(pd->mii_bus->id, MII_BUS_ID_SIZE, "%x",
-		(pd->pdev->bus->number << 8) | pd->pdev->devfn);
+	snprintf(pd->mii_bus->id, MII_BUS_ID_SIZE, "%x", pci_dev_id(pd->pdev));
 	pd->mii_bus->priv = pd;
 	pd->mii_bus->read = smsc9420_mii_read;
 	pd->mii_bus->write = smsc9420_mii_write;
-	pd->mii_bus->irq = pd->phy_irq;
-	for (i = 0; i < PHY_MAX_ADDR; ++i)
-		pd->mii_bus->irq[i] = PHY_POLL;
 
 	/* Mask all PHYs except ID 1 (internal) */
 	pd->mii_bus->phy_mask = ~(1 << 1);
 
 	if (mdiobus_register(pd->mii_bus)) {
-		smsc_warn(PROBE, "Error registering mii bus");
+		netif_warn(pd, probe, pd->dev, "Error registering mii bus\n");
 		goto err_out_free_bus_2;
 	}
 
 	if (smsc9420_mii_probe(dev) < 0) {
-		smsc_warn(PROBE, "Error probing mii bus");
+		netif_warn(pd, probe, pd->dev, "Error probing mii bus\n");
 		goto err_out_unregister_bus_3;
 	}
 
@@ -1248,9 +1179,7 @@ static int smsc9420_alloc_tx_ring(struct smsc9420_pdata *pd)
 
 	BUG_ON(!pd->tx_ring);
 
-	pd->tx_buffers = kmalloc_array(TX_RING_SIZE,
-				       sizeof(struct smsc9420_ring_info),
-				       GFP_KERNEL);
+	pd->tx_buffers = kmalloc_objs(struct smsc9420_ring_info, TX_RING_SIZE);
 	if (!pd->tx_buffers)
 		return -ENOMEM;
 
@@ -1281,12 +1210,9 @@ static int smsc9420_alloc_rx_ring(struct smsc9420_pdata *pd)
 
 	BUG_ON(!pd->rx_ring);
 
-	pd->rx_buffers = kmalloc((sizeof(struct smsc9420_ring_info) *
-		RX_RING_SIZE), GFP_KERNEL);
-	if (pd->rx_buffers == NULL) {
-		smsc_warn(IFUP, "Failed to allocated rx_buffers");
+	pd->rx_buffers = kmalloc_objs(struct smsc9420_ring_info, RX_RING_SIZE);
+	if (pd->rx_buffers == NULL)
 		goto out;
-	}
 
 	/* initialize the rx ring */
 	for (i = 0; i < RX_RING_SIZE; i++) {
@@ -1301,7 +1227,8 @@ static int smsc9420_alloc_rx_ring(struct smsc9420_pdata *pd)
 	/* now allocate the entire ring of skbs */
 	for (i = 0; i < RX_RING_SIZE; i++) {
 		if (smsc9420_alloc_rx_buffer(pd, i)) {
-			smsc_warn(IFUP, "failed to allocate rx skb %d", i);
+			netif_warn(pd, ifup, pd->dev,
+				   "failed to allocate rx skb %d\n", i);
 			goto out_free_rx_skbs;
 		}
 	}
@@ -1310,13 +1237,14 @@ static int smsc9420_alloc_rx_ring(struct smsc9420_pdata *pd)
 	pd->rx_ring_tail = 0;
 
 	smsc9420_reg_write(pd, VLAN1, ETH_P_8021Q);
-	smsc_dbg(IFUP, "VLAN1 = 0x%08x", smsc9420_reg_read(pd, VLAN1));
+	netif_dbg(pd, ifup, pd->dev, "VLAN1 = 0x%08x\n",
+		  smsc9420_reg_read(pd, VLAN1));
 
 	if (pd->rx_csum) {
 		/* Enable RX COE */
 		u32 coe = smsc9420_reg_read(pd, COE_CR) | RX_COE_EN;
 		smsc9420_reg_write(pd, COE_CR, coe);
-		smsc_dbg(IFUP, "COE_CR = 0x%08x", coe);
+		netif_dbg(pd, ifup, pd->dev, "COE_CR = 0x%08x\n", coe);
 	}
 
 	smsc9420_reg_write(pd, RX_BASE_ADDR, pd->rx_dma_addr);
@@ -1339,7 +1267,8 @@ static int smsc9420_open(struct net_device *dev)
 	int result = 0, timeout;
 
 	if (!is_valid_ether_addr(dev->dev_addr)) {
-		smsc_warn(IFUP, "dev_addr is not a valid MAC address");
+		netif_warn(pd, ifup, pd->dev,
+			   "dev_addr is not a valid MAC address\n");
 		result = -EADDRNOTAVAIL;
 		goto out_0;
 	}
@@ -1356,10 +1285,9 @@ static int smsc9420_open(struct net_device *dev)
 	smsc9420_reg_write(pd, INT_STAT, 0xFFFFFFFF);
 	smsc9420_pci_flush_write(pd);
 
-	result = request_irq(irq, smsc9420_isr, IRQF_SHARED | IRQF_DISABLED,
-			     DRV_NAME, pd);
+	result = request_irq(irq, smsc9420_isr, IRQF_SHARED, DRV_NAME, pd);
 	if (result) {
-		smsc_warn(IFUP, "Unable to use IRQ = %d", irq);
+		netif_warn(pd, ifup, pd->dev, "Unable to use IRQ = %d\n", irq);
 		result = -ENODEV;
 		goto out_0;
 	}
@@ -1394,7 +1322,7 @@ static int smsc9420_open(struct net_device *dev)
 	smsc9420_pci_flush_write(pd);
 
 	/* test the IRQ connection to the ISR */
-	smsc_dbg(IFUP, "Testing ISR using IRQ %d", irq);
+	netif_dbg(pd, ifup, pd->dev, "Testing ISR using IRQ %d\n", irq);
 	pd->software_irq_signal = false;
 
 	spin_lock_irqsave(&pd->int_lock, flags);
@@ -1424,36 +1352,38 @@ static int smsc9420_open(struct net_device *dev)
 	spin_unlock_irqrestore(&pd->int_lock, flags);
 
 	if (!pd->software_irq_signal) {
-		smsc_warn(IFUP, "ISR failed signaling test");
+		netif_warn(pd, ifup, pd->dev, "ISR failed signaling test\n");
 		result = -ENODEV;
 		goto out_free_irq_1;
 	}
 
-	smsc_dbg(IFUP, "ISR passed test using IRQ %d", irq);
+	netif_dbg(pd, ifup, pd->dev, "ISR passed test using IRQ %d\n", irq);
 
 	result = smsc9420_alloc_tx_ring(pd);
 	if (result) {
-		smsc_warn(IFUP, "Failed to Initialize tx dma ring");
+		netif_warn(pd, ifup, pd->dev,
+			   "Failed to Initialize tx dma ring\n");
 		result = -ENOMEM;
 		goto out_free_irq_1;
 	}
 
 	result = smsc9420_alloc_rx_ring(pd);
 	if (result) {
-		smsc_warn(IFUP, "Failed to Initialize rx dma ring");
+		netif_warn(pd, ifup, pd->dev,
+			   "Failed to Initialize rx dma ring\n");
 		result = -ENOMEM;
 		goto out_free_tx_ring_2;
 	}
 
 	result = smsc9420_mii_init(dev);
 	if (result) {
-		smsc_warn(IFUP, "Failed to initialize Phy");
+		netif_warn(pd, ifup, pd->dev, "Failed to initialize Phy\n");
 		result = -ENODEV;
 		goto out_free_rx_ring_3;
 	}
 
 	/* Bring the PHY up */
-	phy_start(pd->phy_dev);
+	phy_start(dev->phydev);
 
 	napi_enable(&pd->napi);
 
@@ -1494,11 +1424,9 @@ out_0:
 	return result;
 }
 
-#ifdef CONFIG_PM
-
-static int smsc9420_suspend(struct pci_dev *pdev, pm_message_t state)
+static int __maybe_unused smsc9420_suspend(struct device *dev_d)
 {
-	struct net_device *dev = pci_get_drvdata(pdev);
+	struct net_device *dev = dev_get_drvdata(dev_d);
 	struct smsc9420_pdata *pd = netdev_priv(dev);
 	u32 int_cfg;
 	ulong flags;
@@ -1523,33 +1451,21 @@ static int smsc9420_suspend(struct pci_dev *pdev, pm_message_t state)
 		netif_device_detach(dev);
 	}
 
-	pci_save_state(pdev);
-	pci_enable_wake(pdev, pci_choose_state(pdev, state), 0);
-	pci_disable_device(pdev);
-	pci_set_power_state(pdev, pci_choose_state(pdev, state));
+	device_wakeup_disable(dev_d);
 
 	return 0;
 }
 
-static int smsc9420_resume(struct pci_dev *pdev)
+static int __maybe_unused smsc9420_resume(struct device *dev_d)
 {
-	struct net_device *dev = pci_get_drvdata(pdev);
-	struct smsc9420_pdata *pd = netdev_priv(dev);
+	struct net_device *dev = dev_get_drvdata(dev_d);
 	int err;
 
-	pci_set_power_state(pdev, PCI_D0);
-	pci_restore_state(pdev);
+	pci_set_master(to_pci_dev(dev_d));
 
-	err = pci_enable_device(pdev);
-	if (err)
-		return err;
+	device_wakeup_disable(dev_d);
 
-	pci_set_master(pdev);
-
-	err = pci_enable_wake(pdev, 0, 0);
-	if (err)
-		smsc_warn(IFUP, "pci_enable_wake failed: %d", err);
-
+	err = 0;
 	if (netif_running(dev)) {
 		/* FIXME: gross. It looks like ancient PM relic.*/
 		err = smsc9420_open(dev);
@@ -1558,15 +1474,13 @@ static int smsc9420_resume(struct pci_dev *pdev)
 	return err;
 }
 
-#endif /* CONFIG_PM */
-
 static const struct net_device_ops smsc9420_netdev_ops = {
 	.ndo_open		= smsc9420_open,
 	.ndo_stop		= smsc9420_stop,
 	.ndo_start_xmit		= smsc9420_hard_start_xmit,
 	.ndo_get_stats		= smsc9420_get_stats,
 	.ndo_set_rx_mode	= smsc9420_set_multicast_list,
-	.ndo_do_ioctl		= smsc9420_do_ioctl,
+	.ndo_eth_ioctl		= phy_do_ioctl_running,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address 	= eth_mac_addr,
 #ifdef CONFIG_NET_POLL_CONTROLLER
@@ -1583,12 +1497,12 @@ smsc9420_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	int result = 0;
 	u32 id_rev;
 
-	printk(KERN_INFO DRV_DESCRIPTION " version " DRV_VERSION "\n");
+	pr_info("%s version %s\n", DRV_DESCRIPTION, DRV_VERSION);
 
 	/* First do the PCI initialisation */
 	result = pci_enable_device(pdev);
 	if (unlikely(result)) {
-		printk(KERN_ERR "Cannot enable smsc9420\n");
+		pr_err("Cannot enable smsc9420\n");
 		goto out_0;
 	}
 
@@ -1601,24 +1515,24 @@ smsc9420_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	if (!(pci_resource_flags(pdev, SMSC_BAR) & IORESOURCE_MEM)) {
-		printk(KERN_ERR "Cannot find PCI device base address\n");
+		netdev_err(dev, "Cannot find PCI device base address\n");
 		goto out_free_netdev_2;
 	}
 
 	if ((pci_request_regions(pdev, DRV_NAME))) {
-		printk(KERN_ERR "Cannot obtain PCI resources, aborting.\n");
+		netdev_err(dev, "Cannot obtain PCI resources, aborting\n");
 		goto out_free_netdev_2;
 	}
 
-	if (pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) {
-		printk(KERN_ERR "No usable DMA configuration, aborting.\n");
+	if (dma_set_mask(&pdev->dev, DMA_BIT_MASK(32))) {
+		netdev_err(dev, "No usable DMA configuration, aborting\n");
 		goto out_free_regions_3;
 	}
 
 	virt_addr = ioremap(pci_resource_start(pdev, SMSC_BAR),
 		pci_resource_len(pdev, SMSC_BAR));
 	if (!virt_addr) {
-		printk(KERN_ERR "Cannot map device registers, aborting.\n");
+		netdev_err(dev, "Cannot map device registers, aborting\n");
 		goto out_free_regions_3;
 	}
 
@@ -1628,15 +1542,14 @@ smsc9420_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	pd = netdev_priv(dev);
 
 	/* pci descriptors are created in the PCI consistent area */
-	pd->rx_ring = pci_alloc_consistent(pdev,
-		sizeof(struct smsc9420_dma_desc) * RX_RING_SIZE +
-		sizeof(struct smsc9420_dma_desc) * TX_RING_SIZE,
-		&pd->rx_dma_addr);
+	pd->rx_ring = dma_alloc_coherent(&pdev->dev,
+		sizeof(struct smsc9420_dma_desc) * (RX_RING_SIZE + TX_RING_SIZE),
+		&pd->rx_dma_addr, GFP_KERNEL);
 
 	if (!pd->rx_ring)
 		goto out_free_io_4;
 
-	/* descriptors are aligned due to the nature of pci_alloc_consistent */
+	/* descriptors are aligned due to the nature of dma_alloc_coherent */
 	pd->tx_ring = (pd->rx_ring + RX_RING_SIZE);
 	pd->tx_dma_addr = pd->rx_dma_addr +
 	    sizeof(struct smsc9420_dma_desc) * RX_RING_SIZE;
@@ -1647,16 +1560,17 @@ smsc9420_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	pd->msg_enable = smsc_debug;
 	pd->rx_csum = true;
 
-	smsc_dbg(PROBE, "lan_base=0x%08lx", (ulong)virt_addr);
+	netif_dbg(pd, probe, pd->dev, "lan_base=0x%08lx\n", (ulong)virt_addr);
 
 	id_rev = smsc9420_reg_read(pd, ID_REV);
 	switch (id_rev & 0xFFFF0000) {
 	case 0x94200000:
-		smsc_info(PROBE, "LAN9420 identified, ID_REV=0x%08X", id_rev);
+		netif_info(pd, probe, pd->dev,
+			   "LAN9420 identified, ID_REV=0x%08X\n", id_rev);
 		break;
 	default:
-		smsc_warn(PROBE, "LAN9420 NOT identified");
-		smsc_warn(PROBE, "ID_REV=0x%08X", id_rev);
+		netif_warn(pd, probe, pd->dev, "LAN9420 NOT identified\n");
+		netif_warn(pd, probe, pd->dev, "ID_REV=0x%08X\n", id_rev);
 		goto out_free_dmadesc_5;
 	}
 
@@ -1667,11 +1581,12 @@ smsc9420_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	dev->netdev_ops = &smsc9420_netdev_ops;
 	dev->ethtool_ops = &smsc9420_ethtool_ops;
 
-	netif_napi_add(dev, &pd->napi, smsc9420_rx_poll, NAPI_WEIGHT);
+	netif_napi_add(dev, &pd->napi, smsc9420_rx_poll);
 
 	result = register_netdev(dev);
 	if (result) {
-		smsc_warn(PROBE, "error %i registering device", result);
+		netif_warn(pd, probe, pd->dev, "error %i registering device\n",
+			   result);
 		goto out_free_dmadesc_5;
 	}
 
@@ -1685,8 +1600,9 @@ smsc9420_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	return 0;
 
 out_free_dmadesc_5:
-	pci_free_consistent(pdev, sizeof(struct smsc9420_dma_desc) *
-		(RX_RING_SIZE + TX_RING_SIZE), pd->rx_ring, pd->rx_dma_addr);
+	dma_free_coherent(&pdev->dev,
+			  sizeof(struct smsc9420_dma_desc) * (RX_RING_SIZE + TX_RING_SIZE),
+			  pd->rx_ring, pd->rx_dma_addr);
 out_free_io_4:
 	iounmap(virt_addr - LAN9420_CPSR_ENDIAN_OFFSET);
 out_free_regions_3:
@@ -1708,8 +1624,6 @@ static void smsc9420_remove(struct pci_dev *pdev)
 	if (!dev)
 		return;
 
-	pci_set_drvdata(pdev, NULL);
-
 	pd = netdev_priv(dev);
 	unregister_netdev(dev);
 
@@ -1720,8 +1634,9 @@ static void smsc9420_remove(struct pci_dev *pdev)
 	BUG_ON(!pd->tx_ring);
 	BUG_ON(!pd->rx_ring);
 
-	pci_free_consistent(pdev, sizeof(struct smsc9420_dma_desc) *
-		(RX_RING_SIZE + TX_RING_SIZE), pd->rx_ring, pd->rx_dma_addr);
+	dma_free_coherent(&pdev->dev,
+			  sizeof(struct smsc9420_dma_desc) * (RX_RING_SIZE + TX_RING_SIZE),
+			  pd->rx_ring, pd->rx_dma_addr);
 
 	iounmap(pd->ioaddr - LAN9420_CPSR_ENDIAN_OFFSET);
 	pci_release_regions(pdev);
@@ -1729,15 +1644,14 @@ static void smsc9420_remove(struct pci_dev *pdev)
 	pci_disable_device(pdev);
 }
 
+static SIMPLE_DEV_PM_OPS(smsc9420_pm_ops, smsc9420_suspend, smsc9420_resume);
+
 static struct pci_driver smsc9420_driver = {
 	.name = DRV_NAME,
 	.id_table = smsc9420_id_table,
 	.probe = smsc9420_probe,
 	.remove = smsc9420_remove,
-#ifdef CONFIG_PM
-	.suspend = smsc9420_suspend,
-	.resume = smsc9420_resume,
-#endif /* CONFIG_PM */
+	.driver.pm = &smsc9420_pm_ops,
 };
 
 static int __init smsc9420_init_module(void)

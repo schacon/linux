@@ -1,21 +1,18 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  linux/arch/arm/mm/arm946.S: utility functions for ARM946E-S
  *
  *  Copyright (C) 2004-2006 Hyok S. Choi (hyok.choi@samsung.com)
  *
  *  (Many of cache codes are from proc-arm926.S)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/cfi_types.h>
+#include <linux/pgtable.h>
 #include <asm/assembler.h>
 #include <asm/hwcap.h>
 #include <asm/pgtable-hwdef.h>
-#include <asm/pgtable.h>
 #include <asm/ptrace.h>
 #include "proc-macros.S"
 
@@ -36,19 +33,24 @@
  *
  * These are not required.
  */
-ENTRY(cpu_arm946_proc_init)
-ENTRY(cpu_arm946_switch_mm)
-	mov	pc, lr
+SYM_TYPED_FUNC_START(cpu_arm946_proc_init)
+	ret	lr
+SYM_FUNC_END(cpu_arm946_proc_init)
+
+SYM_TYPED_FUNC_START(cpu_arm946_switch_mm)
+	ret	lr
+SYM_FUNC_END(cpu_arm946_switch_mm)
 
 /*
  * cpu_arm946_proc_fin()
  */
-ENTRY(cpu_arm946_proc_fin)
+SYM_TYPED_FUNC_START(cpu_arm946_proc_fin)
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
 	bic	r0, r0, #0x00001000		@ i-cache
 	bic	r0, r0, #0x00000004		@ d-cache
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
-	mov	pc, lr
+	ret	lr
+SYM_FUNC_END(cpu_arm946_proc_fin)
 
 /*
  * cpu_arm946_reset(loc)
@@ -56,7 +58,7 @@ ENTRY(cpu_arm946_proc_fin)
  * Notes   : This sets up everything for a reset
  */
 	.pushsection	.idmap.text, "ax"
-ENTRY(cpu_arm946_reset)
+SYM_TYPED_FUNC_START(cpu_arm946_reset)
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c5, 0		@ flush I cache
 	mcr	p15, 0, ip, c7, c6, 0		@ flush D cache
@@ -65,41 +67,41 @@ ENTRY(cpu_arm946_reset)
 	bic	ip, ip, #0x00000005		@ .............c.p
 	bic	ip, ip, #0x00001000		@ i-cache
 	mcr	p15, 0, ip, c1, c0, 0		@ ctrl register
-	mov	pc, r0
-ENDPROC(cpu_arm946_reset)
+	ret	r0
+SYM_FUNC_END(cpu_arm946_reset)
 	.popsection
 
 /*
  * cpu_arm946_do_idle()
  */
 	.align	5
-ENTRY(cpu_arm946_do_idle)
+SYM_TYPED_FUNC_START(cpu_arm946_do_idle)
 	mcr	p15, 0, r0, c7, c0, 4		@ Wait for interrupt
-	mov	pc, lr
+	ret	lr
+SYM_FUNC_END(cpu_arm946_do_idle)
 
 /*
  *	flush_icache_all()
  *
  *	Unconditionally clean and invalidate the entire icache.
  */
-ENTRY(arm946_flush_icache_all)
+SYM_TYPED_FUNC_START(arm946_flush_icache_all)
 	mov	r0, #0
 	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
-	mov	pc, lr
-ENDPROC(arm946_flush_icache_all)
+	ret	lr
+SYM_FUNC_END(arm946_flush_icache_all)
 
 /*
  *	flush_user_cache_all()
  */
-ENTRY(arm946_flush_user_cache_all)
-	/* FALLTHROUGH */
+SYM_FUNC_ALIAS(arm946_flush_user_cache_all, arm946_flush_kern_cache_all)
 
 /*
  *	flush_kern_cache_all()
  *
  *	Clean and invalidate the entire cache.
  */
-ENTRY(arm946_flush_kern_cache_all)
+SYM_TYPED_FUNC_START(arm946_flush_kern_cache_all)
 	mov	r2, #VM_EXEC
 	mov	ip, #0
 __flush_whole_cache:
@@ -117,7 +119,8 @@ __flush_whole_cache:
 	tst	r2, #VM_EXEC
 	mcrne	p15, 0, ip, c7, c5, 0		@ flush I cache
 	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
+SYM_FUNC_END(arm946_flush_kern_cache_all)
 
 /*
  *	flush_user_cache_range(start, end, flags)
@@ -130,7 +133,7 @@ __flush_whole_cache:
  *	- flags	- vm_flags describing address space
  * (same as arm926)
  */
-ENTRY(arm946_flush_user_cache_range)
+SYM_TYPED_FUNC_START(arm946_flush_user_cache_range)
 	mov	ip, #0
 	sub	r3, r1, r0			@ calculate total size
 	cmp	r3, #CACHE_DLIMIT
@@ -156,7 +159,8 @@ ENTRY(arm946_flush_user_cache_range)
 	blo	1b
 	tst	r2, #VM_EXEC
 	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
+SYM_FUNC_END(arm946_flush_user_cache_range)
 
 /*
  *	coherent_kern_range(start, end)
@@ -168,8 +172,11 @@ ENTRY(arm946_flush_user_cache_range)
  *	- start	- virtual start address
  *	- end	- virtual end address
  */
-ENTRY(arm946_coherent_kern_range)
-	/* FALLTHROUGH */
+SYM_TYPED_FUNC_START(arm946_coherent_kern_range)
+#ifdef CONFIG_CFI /* Fallthrough if !CFI */
+	b	arm946_coherent_user_range
+#endif
+SYM_FUNC_END(arm946_coherent_kern_range)
 
 /*
  *	coherent_user_range(start, end)
@@ -182,7 +189,7 @@ ENTRY(arm946_coherent_kern_range)
  *	- end	- virtual end address
  * (same as arm926)
  */
-ENTRY(arm946_coherent_user_range)
+SYM_TYPED_FUNC_START(arm946_coherent_user_range)
 	bic	r0, r0, #CACHE_DLINESIZE - 1
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c5, 1		@ invalidate I entry
@@ -191,7 +198,8 @@ ENTRY(arm946_coherent_user_range)
 	blo	1b
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mov	r0, #0
-	mov	pc, lr
+	ret	lr
+SYM_FUNC_END(arm946_coherent_user_range)
 
 /*
  *	flush_kern_dcache_area(void *addr, size_t size)
@@ -203,7 +211,7 @@ ENTRY(arm946_coherent_user_range)
  *	- size	- region size
  * (same as arm926)
  */
-ENTRY(arm946_flush_kern_dcache_area)
+SYM_TYPED_FUNC_START(arm946_flush_kern_dcache_area)
 	add	r1, r0, r1
 1:	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
 	add	r0, r0, #CACHE_DLINESIZE
@@ -212,7 +220,8 @@ ENTRY(arm946_flush_kern_dcache_area)
 	mov	r0, #0
 	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
+SYM_FUNC_END(arm946_flush_kern_dcache_area)
 
 /*
  *	dma_inv_range(start, end)
@@ -239,7 +248,7 @@ arm946_dma_inv_range:
 	cmp	r0, r1
 	blo	1b
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
 
 /*
  *	dma_clean_range(start, end)
@@ -260,7 +269,7 @@ arm946_dma_clean_range:
 	blo	1b
 #endif
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
 
 /*
  *	dma_flush_range(start, end)
@@ -272,7 +281,7 @@ arm946_dma_clean_range:
  *
  * (same as arm926)
  */
-ENTRY(arm946_dma_flush_range)
+SYM_TYPED_FUNC_START(arm946_dma_flush_range)
 	bic	r0, r0, #CACHE_DLINESIZE - 1
 1:
 #ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
@@ -284,7 +293,8 @@ ENTRY(arm946_dma_flush_range)
 	cmp	r0, r1
 	blo	1b
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mov	pc, lr
+	ret	lr
+SYM_FUNC_END(arm946_dma_flush_range)
 
 /*
  *	dma_map_area(start, size, dir)
@@ -292,13 +302,13 @@ ENTRY(arm946_dma_flush_range)
  *	- size	- size of region
  *	- dir	- DMA direction
  */
-ENTRY(arm946_dma_map_area)
+SYM_TYPED_FUNC_START(arm946_dma_map_area)
 	add	r1, r1, r0
 	cmp	r2, #DMA_TO_DEVICE
 	beq	arm946_dma_clean_range
 	bcs	arm946_dma_inv_range
 	b	arm946_dma_flush_range
-ENDPROC(arm946_dma_map_area)
+SYM_FUNC_END(arm946_dma_map_area)
 
 /*
  *	dma_unmap_area(start, size, dir)
@@ -306,17 +316,11 @@ ENDPROC(arm946_dma_map_area)
  *	- size	- size of region
  *	- dir	- DMA direction
  */
-ENTRY(arm946_dma_unmap_area)
-	mov	pc, lr
-ENDPROC(arm946_dma_unmap_area)
+SYM_TYPED_FUNC_START(arm946_dma_unmap_area)
+	ret	lr
+SYM_FUNC_END(arm946_dma_unmap_area)
 
-	.globl	arm946_flush_kern_cache_louis
-	.equ	arm946_flush_kern_cache_louis, arm946_flush_kern_cache_all
-
-	@ define struct cpu_cache_fns (see <asm/cacheflush.h> and proc-macros.S)
-	define_cache_functions arm946
-
-ENTRY(cpu_arm946_dcache_clean_area)
+SYM_TYPED_FUNC_START(cpu_arm946_dcache_clean_area)
 #ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	add	r0, r0, #CACHE_DLINESIZE
@@ -324,9 +328,8 @@ ENTRY(cpu_arm946_dcache_clean_area)
 	bhi	1b
 #endif
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mov	pc, lr
-
-	__CPUINIT
+	ret	lr
+SYM_FUNC_END(cpu_arm946_dcache_clean_area)
 
 	.type	__arm946_setup, #function
 __arm946_setup:
@@ -345,24 +348,14 @@ __arm946_setup:
 	mcr	p15, 0, r0, c6,	c0, 0		@ set region 0, default
 
 	ldr	r0, =(CONFIG_DRAM_BASE & 0xFFFFF000) @ base[31:12] of RAM
-	ldr	r1, =(CONFIG_DRAM_SIZE >> 12)	@ size of RAM (must be >= 4KB)
-	mov	r2, #10				@ 11 is the minimum (4KB)
-1:	add	r2, r2, #1			@ area size *= 2
-	mov	r1, r1, lsr #1
-	bne	1b				@ count not zero r-shift
-	orr	r0, r0, r2, lsl #1		@ the region register value
-	orr	r0, r0, #1			@ set enable bit
-	mcr	p15, 0, r0, c6,	c1, 0		@ set region 1, RAM
+	ldr	r7, =CONFIG_DRAM_SIZE		@ size of RAM (must be >= 4KB)
+	pr_val	r3, r0, r7, #1
+	mcr	p15, 0, r3, c6, c1, 0
 
 	ldr	r0, =(CONFIG_FLASH_MEM_BASE & 0xFFFFF000) @ base[31:12] of FLASH
-	ldr	r1, =(CONFIG_FLASH_SIZE >> 12)	@ size of FLASH (must be >= 4KB)
-	mov	r2, #10				@ 11 is the minimum (4KB)
-1:	add	r2, r2, #1			@ area size *= 2
-	mov	r1, r1, lsr #1
-	bne	1b				@ count not zero r-shift
-	orr	r0, r0, r2, lsl #1		@ the region register value
-	orr	r0, r0, #1			@ set enable bit
-	mcr	p15, 0, r0, c6,	c2, 0		@ set region 2, ROM/FLASH
+	ldr	r7, =CONFIG_FLASH_SIZE		@ size of FLASH (must be >= 4KB)
+	pr_val	r3, r0, r7, #1
+	mcr	p15, 0, r3, c6, c2, 0
 
 	mov	r0, #0x06
 	mcr	p15, 0, r0, c2, c0, 0		@ region 1,2 d-cacheable
@@ -394,7 +387,7 @@ __arm946_setup:
 #ifdef CONFIG_CPU_CACHE_ROUND_ROBIN
 	orr	r0, r0, #0x00004000		@ .1.. .... .... ....
 #endif
-	mov	pc, lr
+	ret	lr
 
 	.size	__arm946_setup, . - __arm946_setup
 
@@ -411,14 +404,14 @@ __arm946_setup:
 
 	.align
 
-	.section ".proc.info.init", #alloc, #execinstr
+	.section ".proc.info.init", "a"
 	.type	__arm946_proc_info,#object
 __arm946_proc_info:
 	.long	0x41009460
 	.long	0xff00fff0
 	.long	0
 	.long	0
-	b	__arm946_setup
+	initfn	__arm946_setup, __arm946_proc_info
 	.long	cpu_arch_name
 	.long	cpu_elf_name
 	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB

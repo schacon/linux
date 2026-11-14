@@ -1,17 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ON pin driver for Dialog DA9055 PMICs
  *
  * Copyright(c) 2012 Dialog Semiconductor Ltd.
  *
  * Author: David Dajun Chen <dchen@diasemi.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
-#include <linux/init.h>
 #include <linux/input.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -36,7 +31,7 @@ static void da9055_onkey_query(struct da9055_onkey *onkey)
 	} else {
 		key_stat &= DA9055_NOKEY_STS;
 		/*
-		 * Onkey status bit is cleared when onkey button is relased.
+		 * Onkey status bit is cleared when onkey button is released.
 		 */
 		if (!key_stat) {
 			input_report_key(onkey->input, KEY_POWER, 0);
@@ -81,13 +76,10 @@ static int da9055_onkey_probe(struct platform_device *pdev)
 	int irq, err;
 
 	irq = platform_get_irq_byname(pdev, "ONKEY");
-	if (irq < 0) {
-		dev_err(&pdev->dev,
-			"Failed to get an IRQ for input device, %d\n", irq);
+	if (irq < 0)
 		return -EINVAL;
-	}
 
-	onkey = devm_kzalloc(&pdev->dev, sizeof(*onkey), GFP_KERNEL);
+	onkey = devm_kzalloc_obj(&pdev->dev, *onkey);
 	if (!onkey) {
 		dev_err(&pdev->dev, "Failed to allocate memory\n");
 		return -ENOMEM;
@@ -110,7 +102,6 @@ static int da9055_onkey_probe(struct platform_device *pdev)
 
 	INIT_DELAYED_WORK(&onkey->work, da9055_onkey_work);
 
-	irq = regmap_irq_get_virq(da9055->irq_data, irq);
 	err = request_threaded_irq(irq, NULL, da9055_onkey_irq,
 				   IRQF_TRIGGER_HIGH | IRQF_ONESHOT,
 				   "ONKEY", onkey);
@@ -141,7 +132,7 @@ err_free_input:
 	return err;
 }
 
-static int da9055_onkey_remove(struct platform_device *pdev)
+static void da9055_onkey_remove(struct platform_device *pdev)
 {
 	struct da9055_onkey *onkey = platform_get_drvdata(pdev);
 	int irq = platform_get_irq_byname(pdev, "ONKEY");
@@ -150,16 +141,13 @@ static int da9055_onkey_remove(struct platform_device *pdev)
 	free_irq(irq, onkey);
 	cancel_delayed_work_sync(&onkey->work);
 	input_unregister_device(onkey->input);
-
-	return 0;
 }
 
 static struct platform_driver da9055_onkey_driver = {
 	.probe	= da9055_onkey_probe,
 	.remove	= da9055_onkey_remove,
-	.driver = {
+	.driver	= {
 		.name	= "da9055-onkey",
-		.owner	= THIS_MODULE,
 	},
 };
 

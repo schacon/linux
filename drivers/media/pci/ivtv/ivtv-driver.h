@@ -1,32 +1,20 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
     ivtv driver internal defines and structures
     Copyright (C) 2003-2004  Kevin Thayer <nufan_wfk at yahoo.com>
     Copyright (C) 2004  Chris Kennedy <c@groovy.org>
-    Copyright (C) 2005-2007  Hans Verkuil <hverkuil@xs4all.nl>
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+    Copyright (C) 2005-2007  Hans Verkuil <hverkuil@kernel.org>
  */
 
 #ifndef IVTV_DRIVER_H
 #define IVTV_DRIVER_H
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 /* Internal header for ivtv project:
  * Driver for the cx23415/6 chip.
  * Author: Kevin Thayer (nufan_wfk at yahoo.com)
  * License: GPL
- * http://www.ivtvdriver.org
  *
  * -----
  * MPG600/MPG160 support by  T.Adachi <tadachi@tadachi-net.com>
@@ -39,7 +27,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/delay.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/fs.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
@@ -53,19 +41,17 @@
 #include <linux/kthread.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/byteorder.h>
 
-#include <linux/dvb/video.h>
-#include <linux/dvb/audio.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-fh.h>
 #include <media/tuner.h>
-#include <media/cx2341x.h>
-#include <media/ir-kbd-i2c.h>
+#include <media/drv-intf/cx2341x.h>
+#include <media/i2c/ir-kbd-i2c.h>
 
 #include <linux/ivtv.h>
 
@@ -74,7 +60,7 @@
 #define IVTV_ENCODER_SIZE	0x00800000	/* Total size is 0x01000000, but only first half is used */
 #define IVTV_DECODER_OFFSET	0x01000000
 #define IVTV_DECODER_SIZE	0x00800000	/* Total size is 0x01000000, but only first half is used */
-#define IVTV_REG_OFFSET 	0x02000000
+#define IVTV_REG_OFFSET		0x02000000
 #define IVTV_REG_SIZE		0x00010000
 
 /* Maximum ivtv driver instances. Some people have a huge number of
@@ -95,26 +81,26 @@
 #define IVTV_DMA_SG_OSD_ENT	(2883584/PAGE_SIZE)	/* sg entities */
 
 /* DMA Registers */
-#define IVTV_REG_DMAXFER 	(0x0000)
-#define IVTV_REG_DMASTATUS 	(0x0004)
-#define IVTV_REG_DECDMAADDR 	(0x0008)
-#define IVTV_REG_ENCDMAADDR 	(0x000c)
-#define IVTV_REG_DMACONTROL 	(0x0010)
-#define IVTV_REG_IRQSTATUS 	(0x0040)
-#define IVTV_REG_IRQMASK 	(0x0048)
+#define IVTV_REG_DMAXFER	(0x0000)
+#define IVTV_REG_DMASTATUS	(0x0004)
+#define IVTV_REG_DECDMAADDR	(0x0008)
+#define IVTV_REG_ENCDMAADDR	(0x000c)
+#define IVTV_REG_DMACONTROL	(0x0010)
+#define IVTV_REG_IRQSTATUS	(0x0040)
+#define IVTV_REG_IRQMASK	(0x0048)
 
 /* Setup Registers */
-#define IVTV_REG_ENC_SDRAM_REFRESH 	(0x07F8)
-#define IVTV_REG_ENC_SDRAM_PRECHARGE 	(0x07FC)
-#define IVTV_REG_DEC_SDRAM_REFRESH 	(0x08F8)
-#define IVTV_REG_DEC_SDRAM_PRECHARGE 	(0x08FC)
-#define IVTV_REG_VDM 			(0x2800)
-#define IVTV_REG_AO 			(0x2D00)
-#define IVTV_REG_BYTEFLUSH 		(0x2D24)
-#define IVTV_REG_SPU 			(0x9050)
-#define IVTV_REG_HW_BLOCKS 		(0x9054)
-#define IVTV_REG_VPU 			(0x9058)
-#define IVTV_REG_APU 			(0xA064)
+#define IVTV_REG_ENC_SDRAM_REFRESH	(0x07F8)
+#define IVTV_REG_ENC_SDRAM_PRECHARGE	(0x07FC)
+#define IVTV_REG_DEC_SDRAM_REFRESH	(0x08F8)
+#define IVTV_REG_DEC_SDRAM_PRECHARGE	(0x08FC)
+#define IVTV_REG_VDM			(0x2800)
+#define IVTV_REG_AO			(0x2D00)
+#define IVTV_REG_BYTEFLUSH		(0x2D24)
+#define IVTV_REG_SPU			(0x9050)
+#define IVTV_REG_HW_BLOCKS		(0x9054)
+#define IVTV_REG_VPU			(0x9058)
+#define IVTV_REG_APU			(0xA064)
 
 /* Other registers */
 #define IVTV_REG_DEC_LINE_FIELD		(0x28C0)
@@ -156,7 +142,7 @@ extern int ivtv_fw_debug;
 
 #define IVTV_DEBUG_HIGH_VOL(x, type, fmt, args...) \
 	do { \
-		if (((x) & ivtv_debug) && (ivtv_debug & IVTV_DBGFLG_HIGHVOL)) 	\
+		if (((x) & ivtv_debug) && (ivtv_debug & IVTV_DBGFLG_HIGHVOL))	\
 			v4l2_info(&itv->v4l2_dev, " " type ": " fmt , ##args);	\
 	} while (0)
 #define IVTV_DEBUG_HI_WARN(fmt, args...)  IVTV_DEBUG_HIGH_VOL(IVTV_DBGFLG_WARN,  "warn",  fmt , ## args)
@@ -224,9 +210,9 @@ struct ivtv_mailbox_data {
 /* per-stream, s_flags */
 #define IVTV_F_S_DMA_PENDING	0	/* this stream has pending DMA */
 #define IVTV_F_S_DMA_HAS_VBI	1       /* the current DMA request also requests VBI data */
-#define IVTV_F_S_NEEDS_DATA	2 	/* this decoding stream needs more data */
+#define IVTV_F_S_NEEDS_DATA	2	/* this decoding stream needs more data */
 
-#define IVTV_F_S_CLAIMED 	3	/* this stream is claimed */
+#define IVTV_F_S_CLAIMED	3	/* this stream is claimed */
 #define IVTV_F_S_STREAMING      4	/* the fw is decoding/encoding this stream */
 #define IVTV_F_S_INTERNAL_USE	5	/* this stream is used internally (sliced VBI processing) */
 #define IVTV_F_S_PASSTHROUGH	6	/* this stream is in passthrough mode */
@@ -237,35 +223,35 @@ struct ivtv_mailbox_data {
 #define IVTV_F_S_PIO_HAS_VBI	1       /* the current PIO request also requests VBI data */
 
 /* per-ivtv, i_flags */
-#define IVTV_F_I_DMA		   0 	/* DMA in progress */
-#define IVTV_F_I_UDMA		   1 	/* UDMA in progress */
-#define IVTV_F_I_UDMA_PENDING	   2 	/* UDMA pending */
-#define IVTV_F_I_SPEED_CHANGE	   3 	/* a speed change is in progress */
-#define IVTV_F_I_EOS		   4 	/* end of encoder stream reached */
-#define IVTV_F_I_RADIO_USER	   5 	/* the radio tuner is selected */
-#define IVTV_F_I_DIG_RST	   6 	/* reset digitizer */
-#define IVTV_F_I_DEC_YUV	   7 	/* YUV instead of MPG is being decoded */
-#define IVTV_F_I_UPDATE_CC	   9  	/* CC should be updated */
-#define IVTV_F_I_UPDATE_WSS	   10 	/* WSS should be updated */
-#define IVTV_F_I_UPDATE_VPS	   11 	/* VPS should be updated */
-#define IVTV_F_I_DECODING_YUV	   12 	/* this stream is YUV frame decoding */
-#define IVTV_F_I_ENC_PAUSED	   13 	/* the encoder is paused */
-#define IVTV_F_I_VALID_DEC_TIMINGS 14 	/* last_dec_timing is valid */
-#define IVTV_F_I_HAVE_WORK  	   15	/* used in the interrupt handler: there is work to be done */
+#define IVTV_F_I_DMA		   0	/* DMA in progress */
+#define IVTV_F_I_UDMA		   1	/* UDMA in progress */
+#define IVTV_F_I_UDMA_PENDING	   2	/* UDMA pending */
+#define IVTV_F_I_SPEED_CHANGE	   3	/* a speed change is in progress */
+#define IVTV_F_I_EOS		   4	/* end of encoder stream reached */
+#define IVTV_F_I_RADIO_USER	   5	/* the radio tuner is selected */
+#define IVTV_F_I_DIG_RST	   6	/* reset digitizer */
+#define IVTV_F_I_DEC_YUV	   7	/* YUV instead of MPG is being decoded */
+#define IVTV_F_I_UPDATE_CC	   9	/* CC should be updated */
+#define IVTV_F_I_UPDATE_WSS	   10	/* WSS should be updated */
+#define IVTV_F_I_UPDATE_VPS	   11	/* VPS should be updated */
+#define IVTV_F_I_DECODING_YUV	   12	/* this stream is YUV frame decoding */
+#define IVTV_F_I_ENC_PAUSED	   13	/* the encoder is paused */
+#define IVTV_F_I_VALID_DEC_TIMINGS 14	/* last_dec_timing is valid */
+#define IVTV_F_I_HAVE_WORK	   15	/* used in the interrupt handler: there is work to be done */
 #define IVTV_F_I_WORK_HANDLER_VBI  16	/* there is work to be done for VBI */
 #define IVTV_F_I_WORK_HANDLER_YUV  17	/* there is work to be done for YUV */
 #define IVTV_F_I_WORK_HANDLER_PIO  18	/* there is work to be done for PIO */
 #define IVTV_F_I_PIO		   19	/* PIO in progress */
-#define IVTV_F_I_DEC_PAUSED	   20 	/* the decoder is paused */
-#define IVTV_F_I_INITED		   21 	/* set after first open */
-#define IVTV_F_I_FAILED		   22 	/* set if first open failed */
+#define IVTV_F_I_DEC_PAUSED	   20	/* the decoder is paused */
+#define IVTV_F_I_INITED		   21	/* set after first open */
+#define IVTV_F_I_FAILED		   22	/* set if first open failed */
 #define IVTV_F_I_WORK_HANDLER_PCM  23	/* there is work to be done for PCM */
 
 /* Event notifications */
 #define IVTV_F_I_EV_DEC_STOPPED	   28	/* decoder stopped event */
-#define IVTV_F_I_EV_VSYNC	   29 	/* VSYNC event */
-#define IVTV_F_I_EV_VSYNC_FIELD    30 	/* VSYNC event field (0 = first, 1 = second field) */
-#define IVTV_F_I_EV_VSYNC_ENABLED  31 	/* VSYNC event enabled */
+#define IVTV_F_I_EV_VSYNC	   29	/* VSYNC event */
+#define IVTV_F_I_EV_VSYNC_FIELD    30	/* VSYNC event field (0 = first, 1 = second field) */
+#define IVTV_F_I_EV_VSYNC_ENABLED  31	/* VSYNC event enabled */
 
 /* Scatter-Gather array element, used in DMA transfers */
 struct ivtv_sg_element {
@@ -323,18 +309,18 @@ struct ivtv_queue {
 };
 
 struct ivtv;				/* forward reference */
+struct ivtv_open_id;
 
 struct ivtv_stream {
 	/* These first four fields are always set, even if the stream
 	   is not actually created. */
-	struct video_device *vdev;	/* NULL when stream not created */
-	struct ivtv *itv; 		/* for ease of use */
+	struct video_device vdev;	/* vdev.v4l2_dev is NULL if there is no device */
+	struct ivtv *itv;		/* for ease of use */
 	const char *name;		/* name of the stream */
 	int type;			/* stream type */
-	u32 caps;			/* V4L2 capabilities */
 
-	struct v4l2_fh *fh;		/* pointer to the streaming filehandle */
-	spinlock_t qlock; 		/* locks access to the queues */
+	struct ivtv_open_id *id;	/* pointer to the streaming ivtv_open_id */
+	spinlock_t qlock;		/* locks access to the queues */
 	unsigned long s_flags;		/* status flags, see above */
 	int dma;			/* can be PCI_DMA_TODEVICE, PCI_DMA_FROMDEVICE or PCI_DMA_NONE */
 	u32 pending_offset;
@@ -385,9 +371,9 @@ struct ivtv_open_id {
 	struct ivtv *itv;
 };
 
-static inline struct ivtv_open_id *fh2id(struct v4l2_fh *fh)
+static inline struct ivtv_open_id *file2id(struct file *filp)
 {
-	return container_of(fh, struct ivtv_open_id, fh);
+	return container_of(file_to_v4l2_fh(filp), struct ivtv_open_id, fh);
 }
 
 struct yuv_frame_info
@@ -562,7 +548,7 @@ struct vbi_info {
 
 	/* Raw VBI compatibility hack */
 
-	u32 frame; 				/* frame counter hack needed for backwards compatibility
+	u32 frame;				/* frame counter hack needed for backwards compatibility
 						   of old VBI software */
 
 	/* Sliced VBI output data */
@@ -618,16 +604,17 @@ struct ivtv {
 	u8 nof_inputs;			/* number of video inputs */
 	u8 nof_audio_inputs;		/* number of audio inputs */
 	u32 v4l2_cap;			/* V4L2 capabilities of card */
-	u32 hw_flags; 			/* hardware description of the board */
+	u32 hw_flags;			/* hardware description of the board */
 	v4l2_std_id tuner_std;		/* the norm of the card's tuner (fixed) */
 	struct v4l2_subdev *sd_video;	/* controlling video decoder subdev */
+	bool sd_video_is_streaming;	/* is video already streaming? */
 	struct v4l2_subdev *sd_audio;	/* controlling audio subdev */
 	struct v4l2_subdev *sd_muxer;	/* controlling audio muxer subdev */
 	resource_size_t base_addr;      /* PCI resource base address */
 	volatile void __iomem *enc_mem; /* pointer to mapped encoder memory */
 	volatile void __iomem *dec_mem; /* pointer to mapped decoder memory */
 	volatile void __iomem *reg_mem; /* pointer to mapped registers */
-	struct ivtv_options options; 	/* user options */
+	struct ivtv_options options;	/* user options */
 
 	struct v4l2_device v4l2_dev;
 	struct cx2341x_handler cxhdl;
@@ -666,7 +653,7 @@ struct ivtv {
 
 	/* Streams */
 	int stream_buf_size[IVTV_MAX_STREAMS];          /* stream buffer size */
-	struct ivtv_stream streams[IVTV_MAX_STREAMS]; 	/* stream data */
+	struct ivtv_stream streams[IVTV_MAX_STREAMS];	/* stream data */
 	atomic_t capturing;		/* count number of active capture streams */
 	atomic_t decoding;		/* count number of active decoding streams */
 
@@ -702,7 +689,7 @@ struct ivtv {
 	/* Mailbox */
 	struct ivtv_mailbox_data enc_mbox;              /* encoder mailboxes */
 	struct ivtv_mailbox_data dec_mbox;              /* decoder mailboxes */
-	struct ivtv_api_cache api_cache[256]; 		/* cached API commands */
+	struct ivtv_api_cache api_cache[256];		/* cached API commands */
 
 
 	/* I2C */
@@ -826,12 +813,8 @@ static inline int ivtv_raw_vbi(const struct ivtv *itv)
 
 /* Call the specified callback for all subdevs matching hw (if 0, then
    match them all). Ignore any errors. */
-#define ivtv_call_hw(itv, hw, o, f, args...) 				\
-	do {								\
-		struct v4l2_subdev *__sd;				\
-		__v4l2_device_call_subdevs_p(&(itv)->v4l2_dev, __sd,	\
-			!(hw) || (__sd->grp_id & (hw)), o, f , ##args);	\
-	} while (0)
+#define ivtv_call_hw(itv, hw, o, f, args...)				\
+	v4l2_device_mask_call_all(&(itv)->v4l2_dev, hw, o, f, ##args)
 
 #define ivtv_call_all(itv, o, f, args...) ivtv_call_hw(itv, 0, o, f , ##args)
 
@@ -839,11 +822,7 @@ static inline int ivtv_raw_vbi(const struct ivtv *itv)
    match them all). If the callback returns an error other than 0 or
    -ENOIOCTLCMD, then return with that error code. */
 #define ivtv_call_hw_err(itv, hw, o, f, args...)			\
-({									\
-	struct v4l2_subdev *__sd;					\
-	__v4l2_device_call_subdevs_until_err_p(&(itv)->v4l2_dev, __sd,	\
-		!(hw) || (__sd->grp_id & (hw)), o, f , ##args);		\
-})
+	v4l2_device_mask_call_until_err(&(itv)->v4l2_dev, hw, o, f, ##args)
 
 #define ivtv_call_all_err(itv, o, f, args...) ivtv_call_hw_err(itv, 0, o, f , ##args)
 

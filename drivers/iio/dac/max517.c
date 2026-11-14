@@ -1,25 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  max517.c - Support for Maxim MAX517, MAX518 and MAX519
  *
  *  Copyright (C) 2010, 2011 Roland Stigge <stigge@antcom.de>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/jiffies.h>
 #include <linux/i2c.h>
@@ -28,8 +14,6 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 #include <linux/iio/dac/max517.h>
-
-#define MAX517_DRV_NAME	"max517"
 
 /* Commands */
 #define COMMAND_CHANNEL0	0x00
@@ -40,11 +24,13 @@ enum max517_device_ids {
 	ID_MAX517,
 	ID_MAX518,
 	ID_MAX519,
+	ID_MAX520,
+	ID_MAX521,
 };
 
 struct max517_data {
 	struct i2c_client	*client;
-	unsigned short		vref_mv[2];
+	unsigned short		vref_mv[8];
 };
 
 /*
@@ -82,15 +68,13 @@ static int max517_read_raw(struct iio_dev *indio_dev,
 			   long m)
 {
 	struct max517_data *data = iio_priv(indio_dev);
-	unsigned int scale_uv;
 
 	switch (m) {
 	case IIO_CHAN_INFO_SCALE:
 		/* Corresponds to Vref / 2^(bits) */
-		scale_uv = (data->vref_mv[chan->channel] * 1000) >> 8;
-		*val =  scale_uv / 1000000;
-		*val2 = scale_uv % 1000000;
-		return IIO_VAL_INT_PLUS_MICRO;
+		*val = data->vref_mv[chan->channel];
+		*val2 = 8;
+		return IIO_VAL_FRACTIONAL_LOG2;
 	default:
 		break;
 	}
@@ -114,7 +98,6 @@ static int max517_write_raw(struct iio_dev *indio_dev,
 	return ret;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int max517_suspend(struct device *dev)
 {
 	u8 outbuf = COMMAND_PD;
@@ -129,16 +112,11 @@ static int max517_resume(struct device *dev)
 	return i2c_master_send(to_i2c_client(dev), &outbuf, 1);
 }
 
-static SIMPLE_DEV_PM_OPS(max517_pm_ops, max517_suspend, max517_resume);
-#define MAX517_PM_OPS (&max517_pm_ops)
-#else
-#define MAX517_PM_OPS NULL
-#endif
+static DEFINE_SIMPLE_DEV_PM_OPS(max517_pm_ops, max517_suspend, max517_resume);
 
 static const struct iio_info max517_info = {
 	.read_raw = max517_read_raw,
 	.write_raw = max517_write_raw,
-	.driver_module = THIS_MODULE,
 };
 
 #define MAX517_CHANNEL(chan) {				\
@@ -148,39 +126,48 @@ static const struct iio_info max517_info = {
 	.channel = (chan),				\
 	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW) |	\
 	BIT(IIO_CHAN_INFO_SCALE),			\
-	.scan_type = IIO_ST('u', 8, 8, 0),		\
 }
 
 static const struct iio_chan_spec max517_channels[] = {
 	MAX517_CHANNEL(0),
-	MAX517_CHANNEL(1)
+	MAX517_CHANNEL(1),
+	MAX517_CHANNEL(2),
+	MAX517_CHANNEL(3),
+	MAX517_CHANNEL(4),
+	MAX517_CHANNEL(5),
+	MAX517_CHANNEL(6),
+	MAX517_CHANNEL(7),
 };
 
-static int max517_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int max517_probe(struct i2c_client *client)
 {
+	const struct max517_platform_data *platform_data = dev_get_platdata(&client->dev);
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct max517_data *data;
 	struct iio_dev *indio_dev;
-	struct max517_platform_data *platform_data = client->dev.platform_data;
-	int err;
+	int chan;
 
-	indio_dev = iio_device_alloc(sizeof(*data));
-	if (indio_dev == NULL) {
-		err = -ENOMEM;
-		goto exit;
-	}
+	indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
+	if (!indio_dev)
+		return -ENOMEM;
 	data = iio_priv(indio_dev);
-	i2c_set_clientdata(client, indio_dev);
 	data->client = client;
 
-	/* establish that the iio_dev is a child of the i2c device */
-	indio_dev->dev.parent = &client->dev;
-
-	/* reduced channel set for MAX517 */
-	if (id->driver_data == ID_MAX517)
-		indio_dev->num_channels = 1;
-	else
+	switch (id->driver_data) {
+	case ID_MAX521:
+		indio_dev->num_channels = 8;
+		break;
+	case ID_MAX520:
+		indio_dev->num_channels = 4;
+		break;
+	case ID_MAX519:
+	case ID_MAX518:
 		indio_dev->num_channels = 2;
+		break;
+	default:  /* single channel for MAX517 */
+		indio_dev->num_channels = 1;
+		break;
+	}
 	indio_dev->channels = max517_channels;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = &max517_info;
@@ -189,54 +176,36 @@ static int max517_probe(struct i2c_client *client,
 	 * Reference voltage on MAX518 and default is 5V, else take vref_mv
 	 * from platform_data
 	 */
-	if (id->driver_data == ID_MAX518 || !platform_data) {
-		data->vref_mv[0] = data->vref_mv[1] = 5000; /* mV */
-	} else {
-		data->vref_mv[0] = platform_data->vref_mv[0];
-		data->vref_mv[1] = platform_data->vref_mv[1];
+	for (chan = 0; chan < indio_dev->num_channels; chan++) {
+		if (id->driver_data == ID_MAX518 || !platform_data)
+			data->vref_mv[chan] = 5000; /* mV */
+		else
+			data->vref_mv[chan] = platform_data->vref_mv[chan];
 	}
 
-	err = iio_device_register(indio_dev);
-	if (err)
-		goto exit_free_device;
-
-	dev_info(&client->dev, "DAC registered\n");
-
-	return 0;
-
-exit_free_device:
-	iio_device_free(indio_dev);
-exit:
-	return err;
-}
-
-static int max517_remove(struct i2c_client *client)
-{
-	iio_device_unregister(i2c_get_clientdata(client));
-	iio_device_free(i2c_get_clientdata(client));
-
-	return 0;
+	return devm_iio_device_register(&client->dev, indio_dev);
 }
 
 static const struct i2c_device_id max517_id[] = {
-	{ "max517", ID_MAX517 },
-	{ "max518", ID_MAX518 },
-	{ "max519", ID_MAX519 },
+	{ .name = "max517", .driver_data = ID_MAX517 },
+	{ .name = "max518", .driver_data = ID_MAX518 },
+	{ .name = "max519", .driver_data = ID_MAX519 },
+	{ .name = "max520", .driver_data = ID_MAX520 },
+	{ .name = "max521", .driver_data = ID_MAX521 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max517_id);
 
 static struct i2c_driver max517_driver = {
 	.driver = {
-		.name	= MAX517_DRV_NAME,
-		.pm		= MAX517_PM_OPS,
+		.name	= "max517",
+		.pm	= pm_sleep_ptr(&max517_pm_ops),
 	},
 	.probe		= max517_probe,
-	.remove		= max517_remove,
 	.id_table	= max517_id,
 };
 module_i2c_driver(max517_driver);
 
 MODULE_AUTHOR("Roland Stigge <stigge@antcom.de>");
-MODULE_DESCRIPTION("MAX517/MAX518/MAX519 8-bit DAC");
+MODULE_DESCRIPTION("MAX517/518/519/520/521 8-bit DAC");
 MODULE_LICENSE("GPL");

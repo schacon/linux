@@ -290,7 +290,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_iso8859_4(void)
@@ -306,4 +305,5 @@ static void __exit exit_nls_iso8859_4(void)
 module_init(init_nls_iso8859_4)
 module_exit(exit_nls_iso8859_4)
 
+MODULE_DESCRIPTION("NLS ISO 8859-4 (Latin 4; old Baltic charset)");
 MODULE_LICENSE("Dual BSD/GPL");

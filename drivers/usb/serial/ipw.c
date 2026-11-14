@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * IPWireless 3G UMTS TDD Modem driver (USB connected)
  *
  *   Copyright (C) 2004 Roelf Diedericks <roelfd@inet.co.za>
  *   Copyright (C) 2004 Greg Kroah-Hartman <greg@kroah.com>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
  *
  * All information about the device was acquired using SnoopyPro
  * on MSFT's O/S, and examing the MSFT drivers' debug output
@@ -38,15 +34,12 @@
 
 #include <linux/kernel.h>
 #include <linux/errno.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/tty.h>
-#include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
-#include <linux/uaccess.h>
 #include "usb-wwan.h"
 
 #define DRIVER_AUTHOR	"Roelf Diedericks"
@@ -203,7 +196,7 @@ static int ipw_attach(struct usb_serial *serial)
 {
 	struct usb_wwan_intf_private *data;
 
-	data = kzalloc(sizeof(struct usb_wwan_intf_private), GFP_KERNEL);
+	data = kzalloc_obj(struct usb_wwan_intf_private);
 	if (!data)
 		return -ENOMEM;
 
@@ -290,7 +283,6 @@ static void ipw_close(struct usb_serial_port *port)
 
 static struct usb_serial_driver ipw_device = {
 	.driver = {
-		.owner =	THIS_MODULE,
 		.name =		"ipw",
 	},
 	.description =		"IPWireless converter",

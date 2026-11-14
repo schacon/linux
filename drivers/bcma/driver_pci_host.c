@@ -3,7 +3,7 @@
  * PCI Core in hostmode
  *
  * Copyright 2005 - 2011, Broadcom Corporation
- * Copyright 2006, 2007, Michael Buesch <m@bues.ch>
+ * Copyright 2006, 2007, Michael Buesch
  * Copyright 2011, 2012, Hauke Mehrtens <hauke@hauke-m.de>
  *
  * Licensed under the GNU/GPL. See COPYING for details.
@@ -11,6 +11,7 @@
 
 #include "bcma_private.h"
 #include <linux/pci.h>
+#include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/bcma/bcma.h>
 #include <asm/paccess.h>
@@ -60,7 +61,7 @@ static u32 bcma_get_cfgspace_addr(struct bcma_drv_pci *pc, unsigned int dev,
 {
 	u32 addr = 0;
 
-	/* Issue config commands only when the data link is up (atleast
+	/* Issue config commands only when the data link is up (at least
 	 * one external pcie device is present).
 	 */
 	if (dev >= 2 || !(bcma_pcie_read(pc, BCMA_CORE_PCI_DLLP_LSREG)
@@ -114,7 +115,7 @@ static int bcma_extpci_read_config(struct bcma_drv_pci *pc, unsigned int dev,
 		if (unlikely(!addr))
 			goto out;
 		err = -ENOMEM;
-		mmio = ioremap_nocache(addr, sizeof(val));
+		mmio = ioremap(addr, sizeof(val));
 		if (!mmio)
 			goto out;
 
@@ -179,7 +180,7 @@ static int bcma_extpci_write_config(struct bcma_drv_pci *pc, unsigned int dev,
 		if (unlikely(!addr))
 			goto out;
 		err = -ENOMEM;
-		mmio = ioremap_nocache(addr, sizeof(val));
+		mmio = ioremap(addr, sizeof(val));
 		if (!mmio)
 			goto out;
 
@@ -279,7 +280,7 @@ static u8 bcma_find_pci_capability(struct bcma_drv_pci *pc, unsigned int dev,
 	/* check for Header type 0 */
 	bcma_extpci_read_config(pc, dev, func, PCI_HEADER_TYPE, &byte_val,
 				sizeof(u8));
-	if ((byte_val & 0x7F) != PCI_HEADER_TYPE_NORMAL)
+	if ((byte_val & PCI_HEADER_TYPE_MASK) != PCI_HEADER_TYPE_NORMAL)
 		return cap_ptr;
 
 	/* check if the capability pointer field exists */
@@ -294,7 +295,7 @@ static u8 bcma_find_pci_capability(struct bcma_drv_pci *pc, unsigned int dev,
 	if (cap_ptr == 0x00)
 		return cap_ptr;
 
-	/* loop thr'u the capability list and see if the requested capabilty
+	/* loop through the capability list and see if the requested capability
 	 * exists */
 	bcma_extpci_read_config(pc, dev, func, cap_ptr, &cap_id, sizeof(u8));
 	while (cap_id != req_cap_id) {
@@ -316,7 +317,7 @@ static u8 bcma_find_pci_capability(struct bcma_drv_pci *pc, unsigned int dev,
 
 		*buflen = 0;
 
-		/* copy the cpability data excluding cap ID and next ptr */
+		/* copy the capability data excluding cap ID and next ptr */
 		cap_data = cap_ptr + 2;
 		if ((bufsize + cap_data)  > PCI_CONFIG_SPACE_SIZE)
 			bufsize = PCI_CONFIG_SPACE_SIZE - cap_data;
@@ -333,7 +334,7 @@ static u8 bcma_find_pci_capability(struct bcma_drv_pci *pc, unsigned int dev,
 }
 
 /* If the root port is capable of returning Config Request
- * Retry Status (CRS) Completion Status to software then
+ * Retry Status (RRS) Completion Status to software then
  * enable the feature.
  */
 static void bcma_core_pci_enable_crs(struct bcma_drv_pci *pc)
@@ -347,10 +348,10 @@ static void bcma_core_pci_enable_crs(struct bcma_drv_pci *pc)
 					   NULL);
 	root_cap = cap_ptr + PCI_EXP_RTCAP;
 	bcma_extpci_read_config(pc, 0, 0, root_cap, &val16, sizeof(u16));
-	if (val16 & BCMA_CORE_PCI_RC_CRS_VISIBILITY) {
-		/* Enable CRS software visibility */
+	if (val16 & BCMA_CORE_PCI_RC_RRS_VISIBILITY) {
+		/* Enable Configuration RRS Software Visibility */
 		root_ctrl = cap_ptr + PCI_EXP_RTCTL;
-		val16 = PCI_EXP_RTCTL_CRSSVE;
+		val16 = PCI_EXP_RTCTL_RRS_SVE;
 		bcma_extpci_read_config(pc, 0, 0, root_ctrl, &val16,
 					sizeof(u16));
 
@@ -359,7 +360,7 @@ static void bcma_core_pci_enable_crs(struct bcma_drv_pci *pc)
 		 * 100 ms wait time from the end of Reset. If the device is
 		 * not done with its internal initialization, it must at
 		 * least return a completion TLP, with a completion status
-		 * of "Configuration Request Retry Status (CRS)". The root
+		 * of "Configuration Request Retry Status (RRS)". The root
 		 * complex must complete the request to the host by returning
 		 * a read-data value of 0001h for the Vendor ID field and
 		 * all 1s for any additional bytes included in the request.
@@ -398,7 +399,7 @@ void bcma_core_pci_hostmode_init(struct bcma_drv_pci *pc)
 		return;
 	}
 
-	pc_host = kzalloc(sizeof(*pc_host), GFP_KERNEL);
+	pc_host = kzalloc_obj(*pc_host);
 	if (!pc_host)  {
 		bcma_err(bus, "can not allocate memory");
 		return;
@@ -418,12 +419,12 @@ void bcma_core_pci_hostmode_init(struct bcma_drv_pci *pc)
 	pc_host->pci_ops.read = bcma_core_pci_hostmode_read_config;
 	pc_host->pci_ops.write = bcma_core_pci_hostmode_write_config;
 
-	pc_host->mem_resource.name = "BCMA PCIcore external memory",
+	pc_host->mem_resource.name = "BCMA PCIcore external memory";
 	pc_host->mem_resource.start = BCMA_SOC_PCI_DMA;
 	pc_host->mem_resource.end = BCMA_SOC_PCI_DMA + BCMA_SOC_PCI_DMA_SZ - 1;
 	pc_host->mem_resource.flags = IORESOURCE_MEM | IORESOURCE_PCI_FIXED;
 
-	pc_host->io_resource.name = "BCMA PCIcore external I/O",
+	pc_host->io_resource.name = "BCMA PCIcore external I/O";
 	pc_host->io_resource.start = 0x100;
 	pc_host->io_resource.end = 0x7FF;
 	pc_host->io_resource.flags = IORESOURCE_IO | IORESOURCE_PCI_FIXED;
@@ -514,7 +515,7 @@ void bcma_core_pci_hostmode_init(struct bcma_drv_pci *pc)
 	/* Ok, ready to run, register it to the system.
 	 * The following needs change, if we want to port hostmode
 	 * to non-MIPS platform. */
-	io_map_base = (unsigned long)ioremap_nocache(pc_host->mem_resource.start,
+	io_map_base = (unsigned long)ioremap(pc_host->mem_resource.start,
 						     resource_size(&pc_host->mem_resource));
 	pc_host->pci_controller.io_map_base = io_map_base;
 	set_io_port_base(pc_host->pci_controller.io_map_base);
@@ -581,6 +582,7 @@ DECLARE_PCI_FIXUP_HEADER(PCI_ANY_ID, PCI_ANY_ID, bcma_core_pci_fixup_addresses);
 int bcma_core_pci_plat_dev_init(struct pci_dev *dev)
 {
 	struct bcma_drv_pci_host *pc_host;
+	int readrq;
 
 	if (dev->bus->ops->read != bcma_core_pci_hostmode_read_config) {
 		/* This is not a device on the PCI-core bridge. */
@@ -592,9 +594,14 @@ int bcma_core_pci_plat_dev_init(struct pci_dev *dev)
 	pr_info("PCI: Fixing up device %s\n", pci_name(dev));
 
 	/* Fix up interrupt lines */
-	dev->irq = bcma_core_irq(pc_host->pdev->core);
+	dev->irq = bcma_core_irq(pc_host->pdev->core, 0);
 	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, dev->irq);
 
+	readrq = pcie_get_readrq(dev);
+	if (readrq > 128) {
+		pr_info("change PCIe max read request size from %i to 128\n", readrq);
+		pcie_set_readrq(dev, 128);
+	}
 	return 0;
 }
 EXPORT_SYMBOL(bcma_core_pci_plat_dev_init);
@@ -611,6 +618,6 @@ int bcma_core_pci_pcibios_map_irq(const struct pci_dev *dev)
 
 	pc_host = container_of(dev->bus->ops, struct bcma_drv_pci_host,
 			       pci_ops);
-	return bcma_core_irq(pc_host->pdev->core);
+	return bcma_core_irq(pc_host->pdev->core, 0);
 }
 EXPORT_SYMBOL(bcma_core_pci_pcibios_map_irq);

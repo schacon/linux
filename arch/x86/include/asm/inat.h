@@ -1,26 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef _ASM_X86_INAT_H
 #define _ASM_X86_INAT_H
 /*
  * x86 instruction attributes
  *
  * Written by Masami Hiramatsu <mhiramat@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
- *
  */
-#include <asm/inat_types.h>
+#include <asm/inat_types.h> /* __ignore_sync_check__ */
 
 /*
  * Internal bits. Don't use bitmasks directly, because these bits are
@@ -48,6 +34,11 @@
 /* AVX VEX prefixes */
 #define INAT_PFX_VEX2	13	/* 2-bytes VEX prefix */
 #define INAT_PFX_VEX3	14	/* 3-bytes VEX prefix */
+#define INAT_PFX_EVEX	15	/* EVEX prefix */
+/* x86-64 REX2 prefix */
+#define INAT_PFX_REX2	16	/* 0xD5 */
+/* AMD XOP prefix */
+#define INAT_PFX_XOP	17	/* 0x8F */
 
 #define INAT_LSTPFX_MAX	3
 #define INAT_LGCPFX_MAX	11
@@ -63,7 +54,7 @@
 
 /* Legacy prefix */
 #define INAT_PFX_OFFS	0
-#define INAT_PFX_BITS	4
+#define INAT_PFX_BITS	5
 #define INAT_PFX_MAX    ((1 << INAT_PFX_BITS) - 1)
 #define INAT_PFX_MASK	(INAT_PFX_MAX << INAT_PFX_OFFS)
 /* Escape opcodes */
@@ -88,12 +79,28 @@
 #define INAT_MOFFSET	(1 << (INAT_FLAG_OFFS + 3))
 #define INAT_VARIANT	(1 << (INAT_FLAG_OFFS + 4))
 #define INAT_VEXOK	(1 << (INAT_FLAG_OFFS + 5))
+#define INAT_XOPOK	INAT_VEXOK
 #define INAT_VEXONLY	(1 << (INAT_FLAG_OFFS + 6))
+#define INAT_EVEXONLY	(1 << (INAT_FLAG_OFFS + 7))
+#define INAT_NO_REX2	(1 << (INAT_FLAG_OFFS + 8))
+#define INAT_REX2_VARIANT	(1 << (INAT_FLAG_OFFS + 9))
+#define INAT_EVEX_SCALABLE	(1 << (INAT_FLAG_OFFS + 10))
+#define INAT_INV64	(1 << (INAT_FLAG_OFFS + 11))
 /* Attribute making macros for attribute tables */
 #define INAT_MAKE_PREFIX(pfx)	(pfx << INAT_PFX_OFFS)
 #define INAT_MAKE_ESCAPE(esc)	(esc << INAT_ESC_OFFS)
 #define INAT_MAKE_GROUP(grp)	((grp << INAT_GRP_OFFS) | INAT_MODRM)
 #define INAT_MAKE_IMM(imm)	(imm << INAT_IMM_OFFS)
+
+/* Identifiers for segment registers */
+#define INAT_SEG_REG_IGNORE	0
+#define INAT_SEG_REG_DEFAULT	1
+#define INAT_SEG_REG_CS		2
+#define INAT_SEG_REG_SS		3
+#define INAT_SEG_REG_DS		4
+#define INAT_SEG_REG_ES		5
+#define INAT_SEG_REG_FS		6
+#define INAT_SEG_REG_GS		7
 
 /* Attribute search APIs */
 extern insn_attr_t inat_get_opcode_attribute(insn_byte_t opcode);
@@ -107,6 +114,8 @@ extern insn_attr_t inat_get_group_attribute(insn_byte_t modrm,
 extern insn_attr_t inat_get_avx_attribute(insn_byte_t opcode,
 					  insn_byte_t vex_m,
 					  insn_byte_t vex_pp);
+extern insn_attr_t inat_get_xop_attribute(insn_byte_t opcode,
+					  insn_byte_t map_select);
 
 /* Attribute checking functions */
 static inline int inat_is_legacy_prefix(insn_attr_t attr)
@@ -130,6 +139,11 @@ static inline int inat_is_rex_prefix(insn_attr_t attr)
 	return (attr & INAT_PFX_MASK) == INAT_PFX_REX;
 }
 
+static inline int inat_is_rex2_prefix(insn_attr_t attr)
+{
+	return (attr & INAT_PFX_MASK) == INAT_PFX_REX2;
+}
+
 static inline int inat_last_prefix_id(insn_attr_t attr)
 {
 	if ((attr & INAT_PFX_MASK) > INAT_LSTPFX_MAX)
@@ -141,12 +155,23 @@ static inline int inat_last_prefix_id(insn_attr_t attr)
 static inline int inat_is_vex_prefix(insn_attr_t attr)
 {
 	attr &= INAT_PFX_MASK;
-	return attr == INAT_PFX_VEX2 || attr == INAT_PFX_VEX3;
+	return attr == INAT_PFX_VEX2 || attr == INAT_PFX_VEX3 ||
+	       attr == INAT_PFX_EVEX;
+}
+
+static inline int inat_is_evex_prefix(insn_attr_t attr)
+{
+	return (attr & INAT_PFX_MASK) == INAT_PFX_EVEX;
 }
 
 static inline int inat_is_vex3_prefix(insn_attr_t attr)
 {
 	return (attr & INAT_PFX_MASK) == INAT_PFX_VEX3;
+}
+
+static inline int inat_is_xop_prefix(insn_attr_t attr)
+{
+	return (attr & INAT_PFX_MASK) == INAT_PFX_XOP;
 }
 
 static inline int inat_is_escape(insn_attr_t attr)
@@ -214,8 +239,28 @@ static inline int inat_accept_vex(insn_attr_t attr)
 	return attr & INAT_VEXOK;
 }
 
+static inline int inat_accept_xop(insn_attr_t attr)
+{
+	return attr & INAT_XOPOK;
+}
+
 static inline int inat_must_vex(insn_attr_t attr)
 {
-	return attr & INAT_VEXONLY;
+	return attr & (INAT_VEXONLY | INAT_EVEXONLY);
+}
+
+static inline int inat_must_evex(insn_attr_t attr)
+{
+	return attr & INAT_EVEXONLY;
+}
+
+static inline int inat_evex_scalable(insn_attr_t attr)
+{
+	return attr & INAT_EVEX_SCALABLE;
+}
+
+static inline int inat_is_invalid64(insn_attr_t attr)
+{
+	return attr & INAT_INV64;
 }
 #endif

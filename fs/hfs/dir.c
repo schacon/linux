@@ -31,29 +31,23 @@ static struct dentry *hfs_lookup(struct inode *dir, struct dentry *dentry,
 	hfs_cat_build_key(dir->i_sb, fd.search_key, dir->i_ino, &dentry->d_name);
 	res = hfs_brec_read(&fd, &rec, sizeof(rec));
 	if (res) {
-		hfs_find_exit(&fd);
-		if (res == -ENOENT) {
-			/* No such entry */
-			inode = NULL;
-			goto done;
-		}
-		return ERR_PTR(res);
+		if (res != -ENOENT)
+			inode = ERR_PTR(res);
+	} else {
+		inode = hfs_iget(dir->i_sb, &fd.search_key->cat, &rec);
+		if (!inode)
+			inode = ERR_PTR(-EACCES);
 	}
-	inode = hfs_iget(dir->i_sb, &fd.search_key->cat, &rec);
 	hfs_find_exit(&fd);
-	if (!inode)
-		return ERR_PTR(-EACCES);
-done:
-	d_add(dentry, inode);
-	return NULL;
+	return d_splice_alias(inode, dentry);
 }
 
 /*
  * hfs_readdir
  */
-static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
+static int hfs_readdir(struct file *file, struct dir_context *ctx)
 {
-	struct inode *inode = file_inode(filp);
+	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
 	int len, err;
 	char strbuf[HFS_MAX_NAMELEN];
@@ -62,7 +56,7 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	struct hfs_readdir_data *rd;
 	u16 type;
 
-	if (filp->f_pos >= inode->i_size)
+	if (ctx->pos >= inode->i_size)
 		return 0;
 
 	err = hfs_find_init(HFS_SB(sb)->cat_tree, &fd);
@@ -73,14 +67,13 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	if (err)
 		goto out;
 
-	switch ((u32)filp->f_pos) {
-	case 0:
+	if (ctx->pos == 0) {
 		/* This is completely artificial... */
-		if (filldir(dirent, ".", 1, 0, inode->i_ino, DT_DIR))
+		if (!dir_emit_dot(file, ctx))
 			goto out;
-		filp->f_pos++;
-		/* fall through */
-	case 1:
+		ctx->pos = 1;
+	}
+	if (ctx->pos == 1) {
 		if (fd.entrylength > sizeof(entry) || fd.entrylength < 0) {
 			err = -EIO;
 			goto out;
@@ -97,18 +90,24 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		//	err = -EIO;
 		//	goto out;
 		//}
-		if (filldir(dirent, "..", 2, 1,
+		if (!dir_emit(ctx, "..", 2,
 			    be32_to_cpu(entry.thread.ParID), DT_DIR))
 			goto out;
-		filp->f_pos++;
-		/* fall through */
-	default:
-		if (filp->f_pos >= inode->i_size)
-			goto out;
-		err = hfs_brec_goto(&fd, filp->f_pos - 1);
-		if (err)
-			goto out;
+		ctx->pos = 2;
 	}
+	if (ctx->pos >= inode->i_size)
+		goto out;
+	rd = file->private_data;
+	if (rd && rd->pos == ctx->pos) {
+		memcpy(fd.search_key, &rd->key, sizeof(struct hfs_cat_key));
+		err = hfs_brec_find(&fd);
+		if (err == -ENOENT)
+			err = hfs_brec_goto(&fd, 1);
+	} else {
+		err = hfs_brec_goto(&fd, ctx->pos - 1);
+	}
+	if (err)
+		goto out;
 
 	for (;;) {
 		if (be32_to_cpu(fd.key->cat.ParID) != inode->i_ino) {
@@ -131,7 +130,7 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 				err = -EIO;
 				goto out;
 			}
-			if (filldir(dirent, strbuf, len, filp->f_pos,
+			if (!dir_emit(ctx, strbuf, len,
 				    be32_to_cpu(entry.dir.DirID), DT_DIR))
 				break;
 		} else if (type == HFS_CDR_FIL) {
@@ -140,7 +139,7 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 				err = -EIO;
 				goto out;
 			}
-			if (filldir(dirent, strbuf, len, filp->f_pos,
+			if (!dir_emit(ctx, strbuf, len,
 				    be32_to_cpu(entry.file.FlNum), DT_REG))
 				break;
 		} else {
@@ -148,25 +147,23 @@ static int hfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 			err = -EIO;
 			goto out;
 		}
-		filp->f_pos++;
-		if (filp->f_pos >= inode->i_size)
+		ctx->pos++;
+		if (ctx->pos >= inode->i_size)
 			goto out;
 		err = hfs_brec_goto(&fd, 1);
 		if (err)
 			goto out;
 	}
-	rd = filp->private_data;
 	if (!rd) {
-		rd = kmalloc(sizeof(struct hfs_readdir_data), GFP_KERNEL);
+		rd = kmalloc_obj(struct hfs_readdir_data);
 		if (!rd) {
 			err = -ENOMEM;
 			goto out;
 		}
-		filp->private_data = rd;
-		rd->file = filp;
-		list_add(&rd->list, &HFS_I(inode)->open_dir_list);
+		file->private_data = rd;
 	}
-	memcpy(&rd->key, &fd.key, sizeof(struct hfs_cat_key));
+	rd->pos = ctx->pos;
+	memcpy(&rd->key, &fd.key->cat, sizeof(struct hfs_cat_key));
 out:
 	hfs_find_exit(&fd);
 	return err;
@@ -174,13 +171,7 @@ out:
 
 static int hfs_dir_release(struct inode *inode, struct file *file)
 {
-	struct hfs_readdir_data *rd = file->private_data;
-	if (rd) {
-		mutex_lock(&inode->i_mutex);
-		list_del(&rd->list);
-		mutex_unlock(&inode->i_mutex);
-		kfree(rd);
-	}
+	kfree(file->private_data);
 	return 0;
 }
 
@@ -192,15 +183,15 @@ static int hfs_dir_release(struct inode *inode, struct file *file)
  * a directory and return a corresponding inode, given the inode for
  * the directory and the name (and its length) of the new file.
  */
-static int hfs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
-		      bool excl)
+static int hfs_create(const struct mnt_idmap *idmap, struct inode *dir,
+		      struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode;
 	int res;
 
 	inode = hfs_new_inode(dir, &dentry->d_name, mode);
-	if (!inode)
-		return -ENOSPC;
+	if (IS_ERR(inode))
+		return PTR_ERR(inode);
 
 	res = hfs_cat_create(inode->i_ino, dir, &dentry->d_name, inode);
 	if (res) {
@@ -222,25 +213,26 @@ static int hfs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
  * in a directory, given the inode for the parent directory and the
  * name (and its length) of the new directory.
  */
-static int hfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
+static struct dentry *hfs_mkdir(const struct mnt_idmap *idmap, struct inode *dir,
+				struct dentry *dentry, umode_t mode)
 {
 	struct inode *inode;
 	int res;
 
-	inode = hfs_new_inode(dir, &dentry->d_name, S_IFDIR | mode);
-	if (!inode)
-		return -ENOSPC;
+	inode = hfs_new_inode(dir, &dentry->d_name, mode);
+	if (IS_ERR(inode))
+		return ERR_CAST(inode);
 
 	res = hfs_cat_create(inode->i_ino, dir, &dentry->d_name, inode);
 	if (res) {
 		clear_nlink(inode);
 		hfs_delete_inode(inode);
 		iput(inode);
-		return res;
+		return ERR_PTR(res);
 	}
 	d_instantiate(dentry, inode);
 	mark_inode_dirty(inode);
-	return 0;
+	return NULL;
 }
 
 /*
@@ -256,16 +248,23 @@ static int hfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
  */
 static int hfs_remove(struct inode *dir, struct dentry *dentry)
 {
-	struct inode *inode = dentry->d_inode;
+	struct super_block *sb = dir->i_sb;
+	struct inode *inode = d_inode(dentry);
 	int res;
 
 	if (S_ISDIR(inode->i_mode) && inode->i_size != 2)
 		return -ENOTEMPTY;
+
+	if (unlikely(!is_hfs_cnid_counts_valid(sb))) {
+	    pr_err("cannot remove file/folder\n");
+	    return -ERANGE;
+	}
+
 	res = hfs_cat_delete(inode->i_ino, dir, &dentry->d_name);
 	if (res)
 		return res;
 	clear_nlink(inode);
-	inode->i_ctime = CURRENT_TIME_SEC;
+	inode_set_ctime_current(inode);
 	hfs_delete_inode(inode);
 	mark_inode_dirty(inode);
 	return 0;
@@ -282,31 +281,40 @@ static int hfs_remove(struct inode *dir, struct dentry *dentry)
  * new file/directory.
  * XXX: how do you handle must_be dir?
  */
-static int hfs_rename(struct inode *old_dir, struct dentry *old_dentry,
-		      struct inode *new_dir, struct dentry *new_dentry)
+static int hfs_rename(const struct mnt_idmap *idmap, struct inode *old_dir,
+		      struct dentry *old_dentry, struct inode *new_dir,
+		      struct dentry *new_dentry, unsigned int flags)
 {
 	int res;
 
+	if (flags & ~RENAME_NOREPLACE)
+		return -EINVAL;
+
 	/* Unlink destination if it already exists */
-	if (new_dentry->d_inode) {
+	if (d_really_is_positive(new_dentry)) {
 		res = hfs_remove(new_dir, new_dentry);
 		if (res)
 			return res;
 	}
 
-	res = hfs_cat_move(old_dentry->d_inode->i_ino,
+	res = hfs_cat_move(d_inode(old_dentry)->i_ino,
 			   old_dir, &old_dentry->d_name,
 			   new_dir, &new_dentry->d_name);
-	if (!res)
+	if (!res) {
+		struct inode *inode = d_inode(old_dentry);
+
 		hfs_cat_build_key(old_dir->i_sb,
-				  (btree_key *)&HFS_I(old_dentry->d_inode)->cat_key,
+				  (btree_key *)&HFS_I(inode)->cat_key,
 				  new_dir->i_ino, &new_dentry->d_name);
+		inode_set_ctime_current(inode);
+		mark_inode_dirty(inode);
+	}
 	return res;
 }
 
 const struct file_operations hfs_dir_operations = {
 	.read		= generic_read_dir,
-	.readdir	= hfs_readdir,
+	.iterate_shared	= hfs_readdir,
 	.llseek		= generic_file_llseek,
 	.release	= hfs_dir_release,
 };
@@ -319,4 +327,5 @@ const struct inode_operations hfs_dir_inode_operations = {
 	.rmdir		= hfs_remove,
 	.rename		= hfs_rename,
 	.setattr	= hfs_inode_setattr,
+	.fileattr_get	= hfs_fileattr_get,
 };

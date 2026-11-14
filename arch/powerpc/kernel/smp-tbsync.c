@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Smp timebase synchronization for ppc.
  *
@@ -9,7 +10,6 @@
 #include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/unistd.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/atomic.h>
 #include <asm/smp.h>
@@ -117,7 +117,7 @@ void smp_generic_give_timebase(void)
 	pr_debug("Software timebase sync\n");
 
 	/* if this fails then this kernel won't work anyway... */
-	tbsync = kzalloc( sizeof(*tbsync), GFP_KERNEL );
+	tbsync = kzalloc_obj(*tbsync);
 	mb();
 	running = 1;
 

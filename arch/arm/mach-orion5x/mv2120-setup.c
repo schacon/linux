@@ -7,7 +7,8 @@
  * published by the Free Software Foundation; either version 2 of the
  * License, or (at your option) any later version.
  */
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
+#include <linux/gpio/machine.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
@@ -21,9 +22,9 @@
 #include <linux/ata_platform.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
-#include <mach/orion5x.h>
 #include "common.h"
 #include "mpp.h"
+#include "orion5x.h"
 
 #define MV2120_NOR_BOOT_BASE	0xf4000000
 #define MV2120_NOR_BOOT_SIZE	SZ_512K
@@ -139,32 +140,43 @@ static struct i2c_board_info __initdata mv2120_i2c_rtc = {
 static struct gpio_led mv2120_led_pins[] = {
 	{
 		.name			= "mv2120:blue:health",
-		.gpio			= 0,
 	},
 	{
 		.name			= "mv2120:red:health",
-		.gpio			= 1,
 	},
 	{
 		.name			= "mv2120:led:bright",
-		.gpio			= 4,
 		.default_trigger	= "default-on",
 	},
 	{
 		.name			= "mv2120:led:dimmed",
-		.gpio			= 5,
 	},
 	{
 		.name			= "mv2120:red:sata0",
-		.gpio			= 8,
-		.active_low		= 1,
 	},
 	{
 		.name			= "mv2120:red:sata1",
-		.gpio			= 9,
-		.active_low		= 1,
 	},
 
+};
+
+static struct gpiod_lookup_table mv2120_leds_gpio_table = {
+	.dev_id = "leds-gpio",
+	.table = {
+		GPIO_LOOKUP_IDX("orion_gpio0", 0, NULL,
+				0, GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP_IDX("orion_gpio0", 1, NULL,
+				1, GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP_IDX("orion_gpio0", 4, NULL,
+				2, GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP_IDX("orion_gpio0", 5, NULL,
+				3, GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP_IDX("orion_gpio0", 8, NULL,
+				4, GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP_IDX("orion_gpio0", 9, NULL,
+				5, GPIO_ACTIVE_LOW),
+		{ },
+	},
 };
 
 static struct gpio_led_platform_data mv2120_led_data = {
@@ -204,8 +216,10 @@ static void __init mv2120_init(void)
 	orion5x_uart0_init();
 	orion5x_xor_init();
 
-	mvebu_mbus_add_window("devbus-boot", MV2120_NOR_BOOT_BASE,
-			      MV2120_NOR_BOOT_SIZE);
+	mvebu_mbus_add_window_by_id(ORION_MBUS_DEVBUS_BOOT_TARGET,
+				    ORION_MBUS_DEVBUS_BOOT_ATTR,
+				    MV2120_NOR_BOOT_BASE,
+				    MV2120_NOR_BOOT_SIZE);
 	platform_device_register(&mv2120_nor_flash);
 
 	platform_device_register(&mv2120_button_device);
@@ -217,19 +231,21 @@ static void __init mv2120_init(void)
 			gpio_free(MV2120_GPIO_RTC_IRQ);
 	}
 	i2c_register_board_info(0, &mv2120_i2c_rtc, 1);
+	gpiod_add_lookup_table(&mv2120_leds_gpio_table);
 	platform_device_register(&mv2120_leds);
 
 	/* register mv2120 specific power-off method */
 	if (gpio_request(MV2120_GPIO_POWER_OFF, "POWEROFF") != 0 ||
 	    gpio_direction_output(MV2120_GPIO_POWER_OFF, 1) != 0)
 		pr_err("mv2120: failed to setup power-off GPIO\n");
-	pm_power_off = mv2120_power_off;
+	register_platform_power_off(mv2120_power_off);
 }
 
 /* Warning: HP uses a wrong mach-type (=526) in their bootloader */
 MACHINE_START(MV2120, "HP Media Vault mv2120")
 	/* Maintainer: Martin Michlmayr <tbm@cyrius.com> */
 	.atag_offset	= 0x100,
+	.nr_irqs	= ORION5X_NR_IRQS,
 	.init_machine	= mv2120_init,
 	.map_io		= orion5x_map_io,
 	.init_early	= orion5x_init_early,

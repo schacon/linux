@@ -2,7 +2,7 @@
  * Ricoh RS5C313 RTC device/driver
  *  Copyright (C) 2007 Nobuhiro Iwamatsu
  *
- *  2005-09-19 modifed by kogiidena
+ *  2005-09-19 modified by kogiidena
  *
  * Based on the old drivers/char/rs5c313_rtc.c  by:
  *  Copyright (C) 2000 Philipp Rumpf <prumpf@tux.org>
@@ -36,7 +36,7 @@
  *      1.11a   Daniele Bellucci: Audit create_proc_read_entry in rtc_init
  *	1.12	Venkatesh Pallipadi: Hooks for emulating rtc on HPET base-timer
  *		CONFIG_HPET_EMULATE_RTC
- *	1.13	Nobuhiro Iwamatsu: Updata driver.
+ *	1.13	Nobuhiro Iwamatsu: Update driver.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -47,10 +47,9 @@
 #include <linux/platform_device.h>
 #include <linux/bcd.h>
 #include <linux/delay.h>
-#include <asm/io.h>
+#include <linux/io.h>
 
 #define DRV_NAME	"rs5c313"
-#define DRV_VERSION 	"1.13"
 
 #ifdef CONFIG_SH_LANDISK
 /*****************************************************/
@@ -281,7 +280,7 @@ static int rs5c313_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	while (1) {
 		RS5C313_CEENABLE;	/* CE:H */
 
-		/* Initiatlize control reg. 24 hour */
+		/* Initialize control reg. 24 hour */
 		rs5c313_write_cntreg(0x04);
 
 		if (!(rs5c313_read_cntreg() & RS5C313_CNTREG_ADJ_BSY))
@@ -301,7 +300,7 @@ static int rs5c313_rtc_set_time(struct device *dev, struct rtc_time *tm)
 	rs5c313_write_reg(RS5C313_ADDR_SEC10, (data >> 4));
 
 	data = bin2bcd(tm->tm_min);
-	rs5c313_write_reg(RS5C313_ADDR_MIN, data );
+	rs5c313_write_reg(RS5C313_ADDR_MIN, data);
 	rs5c313_write_reg(RS5C313_ADDR_MIN10, (data >> 4));
 
 	data = bin2bcd(tm->tm_hour);
@@ -310,7 +309,7 @@ static int rs5c313_rtc_set_time(struct device *dev, struct rtc_time *tm)
 
 	data = bin2bcd(tm->tm_mday);
 	rs5c313_write_reg(RS5C313_ADDR_DAY, data);
-	rs5c313_write_reg(RS5C313_ADDR_DAY10, (data>> 4));
+	rs5c313_write_reg(RS5C313_ADDR_DAY10, (data >> 4));
 
 	data = bin2bcd(tm->tm_mon + 1);
 	rs5c313_write_reg(RS5C313_ADDR_MON, data);
@@ -349,9 +348,9 @@ static void rs5c313_check_xstp_bit(void)
 		}
 
 		memset(&tm, 0, sizeof(struct rtc_time));
-		tm.tm_mday 	= 1;
-		tm.tm_mon 	= 1 - 1;
-		tm.tm_year 	= 2000 - 1900;
+		tm.tm_mday	= 1;
+		tm.tm_mon	= 1 - 1;
+		tm.tm_year	= 2000 - 1900;
 
 		rs5c313_rtc_set_time(NULL, &tm);
 		pr_err("invalid value, resetting to 1 Jan 2000\n");
@@ -367,54 +366,26 @@ static const struct rtc_class_ops rs5c313_rtc_ops = {
 
 static int rs5c313_rtc_probe(struct platform_device *pdev)
 {
-	struct rtc_device *rtc = devm_rtc_device_register(&pdev->dev, "rs5c313",
-				&rs5c313_rtc_ops, THIS_MODULE);
+	struct rtc_device *rtc;
 
-	if (IS_ERR(rtc))
-		return PTR_ERR(rtc);
+	rs5c313_init_port();
+	rs5c313_check_xstp_bit();
 
-	platform_set_drvdata(pdev, rtc);
+	rtc = devm_rtc_device_register(&pdev->dev, "rs5c313", &rs5c313_rtc_ops,
+				       THIS_MODULE);
 
-	return 0;
-}
-
-static int rs5c313_rtc_remove(struct platform_device *pdev)
-{
-	return 0;
+	return PTR_ERR_OR_ZERO(rtc);
 }
 
 static struct platform_driver rs5c313_rtc_platform_driver = {
 	.driver         = {
 		.name   = DRV_NAME,
-		.owner  = THIS_MODULE,
 	},
-	.probe 	= rs5c313_rtc_probe,
-	.remove = rs5c313_rtc_remove,
+	.probe	= rs5c313_rtc_probe,
 };
 
-static int __init rs5c313_rtc_init(void)
-{
-	int err;
+module_platform_driver(rs5c313_rtc_platform_driver);
 
-	err = platform_driver_register(&rs5c313_rtc_platform_driver);
-	if (err)
-		return err;
-
-	rs5c313_init_port();
-	rs5c313_check_xstp_bit();
-
-	return 0;
-}
-
-static void __exit rs5c313_rtc_exit(void)
-{
-	platform_driver_unregister( &rs5c313_rtc_platform_driver );
-}
-
-module_init(rs5c313_rtc_init);
-module_exit(rs5c313_rtc_exit);
-
-MODULE_VERSION(DRV_VERSION);
 MODULE_AUTHOR("kogiidena , Nobuhiro Iwamatsu <iwamatsu@nigauri.org>");
 MODULE_DESCRIPTION("Ricoh RS5C313 RTC device driver");
 MODULE_LICENSE("GPL");

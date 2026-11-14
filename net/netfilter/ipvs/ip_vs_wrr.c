@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IPVS:        Weighted Round-Robin Scheduling module
  *
  * Authors:     Wensong Zhang <wensong@linuxvirtualserver.org>
- *
- *              This program is free software; you can redistribute it and/or
- *              modify it under the terms of the GNU General Public License
- *              as published by the Free Software Foundation; either version
- *              2 of the License, or (at your option) any later version.
  *
  * Changes:
  *     Wensong Zhang            :     changed the ip_vs_wrr_schedule to return dest
@@ -15,11 +11,9 @@
  *     Wensong Zhang            :     added the ip_vs_wrr_update_svc
  *     Julian Anastasov         :     fixed the bug of returning destination
  *                                    with weight 0 when all weights are zero
- *
  */
 
-#define KMSG_COMPONENT "IPVS"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "IPVS: " fmt
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -115,7 +109,7 @@ static int ip_vs_wrr_init_svc(struct ip_vs_service *svc)
 	/*
 	 *    Allocate the mark variable for WRR scheduling
 	 */
-	mark = kmalloc(sizeof(struct ip_vs_wrr_mark), GFP_KERNEL);
+	mark = kmalloc_obj(struct ip_vs_wrr_mark);
 	if (mark == NULL)
 		return -ENOMEM;
 
@@ -162,7 +156,8 @@ static int ip_vs_wrr_dest_changed(struct ip_vs_service *svc,
  *    Weighted Round-Robin Scheduling
  */
 static struct ip_vs_dest *
-ip_vs_wrr_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
+ip_vs_wrr_schedule(struct ip_vs_service *svc, const struct sk_buff *skb,
+		   struct ip_vs_iphdr *iph)
 {
 	struct ip_vs_dest *dest, *last, *stop = NULL;
 	struct ip_vs_wrr_mark *mark = svc->sched_data;
@@ -181,7 +176,7 @@ ip_vs_wrr_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 		list_for_each_entry_continue_rcu(dest,
 						 &svc->destinations,
 						 n_list) {
-			if (!(dest->flags & IP_VS_DEST_F_OVERLOAD) &&
+			if (!ip_vs_dest_is_overloaded(dest) &&
 			    atomic_read(&dest->weight) >= mark->cw)
 				goto found;
 			if (dest == stop)
@@ -215,9 +210,9 @@ ip_vs_wrr_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 found:
 	IP_VS_DBG_BUF(6, "WRR: server %s:%u "
 		      "activeconns %d refcnt %d weight %d\n",
-		      IP_VS_DBG_ADDR(svc->af, &dest->addr), ntohs(dest->port),
+		      IP_VS_DBG_ADDR(dest->af, &dest->addr), ntohs(dest->port),
 		      atomic_read(&dest->activeconns),
-		      atomic_read(&dest->refcnt),
+		      refcount_read(&dest->refcnt),
 		      atomic_read(&dest->weight));
 	mark->cl = dest;
 
@@ -267,3 +262,4 @@ static void __exit ip_vs_wrr_cleanup(void)
 module_init(ip_vs_wrr_init);
 module_exit(ip_vs_wrr_cleanup);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("ipvs weighted round-robin scheduler");

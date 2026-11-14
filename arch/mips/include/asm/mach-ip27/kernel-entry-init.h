@@ -10,17 +10,54 @@
 #define __ASM_MACH_IP27_KERNEL_ENTRY_H
 
 #include <asm/sn/addrs.h>
-#include <asm/sn/sn0/hubni.h>
+#include <asm/sn/agent.h>
 #include <asm/sn/klkernvars.h>
 
 /*
- * Returns the local nasid into res.
+ * TLB bits
  */
-	.macro GET_NASID_ASM res
-	dli	\res, LOCAL_HUB_ADDR(NI_STATUS_REV_ID)
-	ld	\res, (\res)
-	and	\res, NSRI_NODEID_MASK
-	dsrl	\res, NSRI_NODEID_SHFT
+#define PAGE_GLOBAL		(1 << 6)
+#define PAGE_VALID		(1 << 7)
+#define PAGE_DIRTY		(1 << 8)
+#define CACHE_CACHABLE_COW	(5 << 9)
+
+	/*
+	 * inputs are the text nasid in t1, data nasid in t2.
+	 */
+	.macro MAPPED_KERNEL_SETUP_TLB
+#ifdef CONFIG_MAPPED_KERNEL
+	/*
+	 * This needs to read the nasid - assume 0 for now.
+	 * Drop in 0xffffffffc0000000 in tlbhi, 0+VG in tlblo_0,
+	 * 0+DVG in tlblo_1.
+	 */
+	dli	t0, 0xffffffffc0000000
+	dmtc0	t0, CP0_ENTRYHI
+	li	t0, 0x1c000		# Offset of text into node memory
+	dsll	t1, NASID_SHFT		# Shift text nasid into place
+	dsll	t2, NASID_SHFT		# Same for data nasid
+	or	t1, t1, t0		# Physical load address of kernel text
+	or	t2, t2, t0		# Physical load address of kernel data
+	dsrl	t1, 12			# 4K pfn
+	dsrl	t2, 12			# 4K pfn
+	dsll	t1, 6			# Get pfn into place
+	dsll	t2, 6			# Get pfn into place
+	li	t0, ((PAGE_GLOBAL | PAGE_VALID | CACHE_CACHABLE_COW) >> 6)
+	or	t0, t0, t1
+	mtc0	t0, CP0_ENTRYLO0	# physaddr, VG, cach exlwr
+	li	t0, ((PAGE_GLOBAL | PAGE_VALID |  PAGE_DIRTY | CACHE_CACHABLE_COW) >> 6)
+	or	t0, t0, t2
+	mtc0	t0, CP0_ENTRYLO1	# physaddr, DVG, cach exlwr
+	li	t0, 0x1ffe000		# MAPPED_KERN_TLBMASK, TLBPGMASK_16M
+	mtc0	t0, CP0_PAGEMASK
+	li	t0, 0			# KMAP_INX
+	mtc0	t0, CP0_INDEX
+	li	t0, 1
+	mtc0	t0, CP0_WIRED
+	tlbwi
+#else
+	mtc0	zero, CP0_WIRED
+#endif
 	.endm
 
 /*
@@ -34,7 +71,7 @@
 	.endm
 
 /*
- * Do SMP slave processor setup necessary before we can savely execute C code.
+ * Do SMP slave processor setup necessary before we can safely execute C code.
  */
 	.macro	smp_slave_setup
 	GET_NASID_ASM	t1

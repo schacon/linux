@@ -1,26 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*******************************************************************************
  * This file contains the main functions related to Initiator Node Attributes.
  *
- * \u00a9 Copyright 2007-2011 RisingTide Systems LLC.
- *
- * Licensed to the Linux Foundation under the General Public License (GPL) version 2.
+ * (c) Copyright 2007-2013 Datera, Inc.
  *
  * Author: Nicholas A. Bellinger <nab@linux-iscsi.org>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  ******************************************************************************/
 
 #include <target/target_core_base.h>
 
-#include "iscsi_target_core.h"
+#include <target/iscsi/iscsi_target_core.h>
 #include "iscsi_target_device.h"
 #include "iscsi_target_tpg.h"
 #include "iscsi_target_util.h"
@@ -35,10 +25,12 @@ static inline char *iscsit_na_get_initiatorname(
 }
 
 void iscsit_set_default_node_attribues(
-	struct iscsi_node_acl *acl)
+	struct iscsi_node_acl *acl,
+	struct iscsi_portal_group *tpg)
 {
 	struct iscsi_node_attrib *a = &acl->node_attrib;
 
+	a->authentication = NA_AUTHENTICATION_INHERITED;
 	a->dataout_timeout = NA_DATAOUT_TIMEOUT;
 	a->dataout_timeout_retries = NA_DATAOUT_TIMEOUT_RETRIES;
 	a->nopin_timeout = NA_NOPIN_TIMEOUT;
@@ -46,7 +38,7 @@ void iscsit_set_default_node_attribues(
 	a->random_datain_pdu_offsets = NA_RANDOM_DATAIN_PDU_OFFSETS;
 	a->random_datain_seq_offsets = NA_RANDOM_DATAIN_SEQ_OFFSETS;
 	a->random_r2t_offsets = NA_RANDOM_R2T_OFFSETS;
-	a->default_erl = NA_DEFAULT_ERL;
+	a->default_erl = tpg->tpg_attrib.default_erl;
 }
 
 int iscsit_na_dataout_timeout(
@@ -105,8 +97,8 @@ int iscsit_na_nopin_timeout(
 	u32 nopin_timeout)
 {
 	struct iscsi_node_attrib *a = &acl->node_attrib;
-	struct iscsi_session *sess;
-	struct iscsi_conn *conn;
+	struct iscsit_session *sess;
+	struct iscsit_conn *conn;
 	struct se_node_acl *se_nacl = &a->nacl->se_node_acl;
 	struct se_session *se_sess;
 	u32 orig_nopin_timeout = a->nopin_timeout;

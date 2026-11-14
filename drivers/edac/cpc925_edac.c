@@ -1,22 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * cpc925_edac.c, EDAC driver for IBM CPC925 Bridge and Memory Controller.
  *
  * Copyright (c) 2008 Wind River Systems, Inc.
  *
  * Authors:	Cao Qingtao <qingtao.cao@windriver.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/module.h>
@@ -27,7 +15,6 @@
 #include <linux/platform_device.h>
 #include <linux/gfp.h>
 
-#include "edac_core.h"
 #include "edac_module.h"
 
 #define CPC925_EDAC_REVISION	" Ver: 1.0.0"
@@ -562,7 +549,7 @@ static void cpc925_mc_check(struct mem_ctl_info *mci)
 
 	if (apiexcp & UECC_EXCP_DETECTED) {
 		cpc925_mc_printk(mci, KERN_INFO, "DRAM UECC Fault\n");
-		edac_mc_handle_error(HW_EVENT_ERR_CORRECTED, mci, 1,
+		edac_mc_handle_error(HW_EVENT_ERR_UNCORRECTED, mci, 1,
 				     pfn, offset, 0,
 				     csrow, -1, -1,
 				     mci->ctl_name, "");
@@ -594,8 +581,7 @@ static void cpc925_mc_check(struct mem_ctl_info *mci)
 /******************** CPU err device********************************/
 static u32 cpc925_cpu_mask_disabled(void)
 {
-	struct device_node *cpus;
-	struct device_node *cpunode = NULL;
+	struct device_node *cpunode;
 	static u32 mask = 0;
 
 	/* use cached value if available */
@@ -604,22 +590,10 @@ static u32 cpc925_cpu_mask_disabled(void)
 
 	mask = APIMASK_ADI0 | APIMASK_ADI1;
 
-	cpus = of_find_node_by_path("/cpus");
-	if (cpus == NULL) {
-		cpc925_printk(KERN_DEBUG, "No /cpus node !\n");
-		return 0;
-	}
-
-	while ((cpunode = of_get_next_child(cpus, cpunode)) != NULL) {
+	for_each_of_cpu_node(cpunode) {
 		const u32 *reg = of_get_property(cpunode, "reg", NULL);
-
-		if (strcmp(cpunode->type, "cpu")) {
-			cpc925_printk(KERN_ERR, "Not a cpu node in /cpus: %s\n", cpunode->name);
-			continue;
-		}
-
 		if (reg == NULL || *reg > 2) {
-			cpc925_printk(KERN_ERR, "Bad reg value at %s\n", cpunode->full_name);
+			cpc925_printk(KERN_ERR, "Bad reg value at %pOF\n", cpunode);
 			continue;
 		}
 
@@ -633,9 +607,6 @@ static u32 cpc925_cpu_mask_disabled(void)
 		cpc925_printk(KERN_WARNING,
 				"Assuming PI id is equal to CPU MPIC id!\n");
 	}
-
-	of_node_put(cpunode);
-	of_node_put(cpus);
 
 	return mask;
 }
@@ -789,7 +760,7 @@ static struct cpc925_dev_info cpc925_devs[] = {
 	.exit = cpc925_htlink_exit,
 	.check = cpc925_htlink_check,
 	},
-	{0}, /* Terminated by NULL */
+	{ }
 };
 
 /*
@@ -826,7 +797,7 @@ static void cpc925_add_edac_devices(void __iomem *vbase)
 		dev_info->edac_idx = edac_device_alloc_index();
 		dev_info->edac_dev =
 			edac_device_alloc_ctl_info(0, dev_info->ctl_name,
-				1, NULL, 0, 0, NULL, 0, dev_info->edac_idx);
+				1, NULL, 0, 0, dev_info->edac_idx);
 		if (!dev_info->edac_dev) {
 			cpc925_printk(KERN_ERR, "No memory for edac device\n");
 			goto err1;
@@ -1000,7 +971,6 @@ static int cpc925_probe(struct platform_device *pdev)
 	mci->edac_ctl_cap = EDAC_FLAG_NONE | EDAC_FLAG_SECDED;
 	mci->edac_cap = EDAC_FLAG_SECDED;
 	mci->mod_name = CPC925_EDAC_MOD_STR;
-	mci->mod_ver = CPC925_EDAC_REVISION;
 	mci->ctl_name = pdev->name;
 
 	if (edac_op_state == EDAC_OPSTATE_POLL)
@@ -1040,7 +1010,7 @@ out:
 	return res;
 }
 
-static int cpc925_remove(struct platform_device *pdev)
+static void cpc925_remove(struct platform_device *pdev)
 {
 	struct mem_ctl_info *mci = platform_get_drvdata(pdev);
 
@@ -1053,8 +1023,6 @@ static int cpc925_remove(struct platform_device *pdev)
 
 	edac_mc_del_mc(&pdev->dev);
 	edac_mc_free(mci);
-
-	return 0;
 }
 
 static struct platform_driver cpc925_edac_driver = {

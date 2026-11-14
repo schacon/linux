@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * sis5595.c - Part of lm_sensors, Linux kernel modules
  *	       for hardware monitoring
@@ -6,21 +7,7 @@
  *			     Kyösti Mälkki <kmalkki@cc.hut.fi>, and
  *			     Mark D. Studebaker <mdsxyz123@yahoo.com>
  * Ported to Linux 2.6 by Aurelien Jarno <aurelien@aurel32.net> with
- * the help of Jean Delvare <khali@linux-fr.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * the help of Jean Delvare <jdelvare@suse.de>
  */
 
 /*
@@ -50,6 +37,7 @@
  *	 735		0008		0735
  */
 
+#define DRIVER_NAME "sis5595"
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
@@ -66,7 +54,6 @@
 #include <linux/sysfs.h>
 #include <linux/acpi.h>
 #include <linux/io.h>
-
 
 /*
  * If force_addr is set to anything different from 0, we forcibly enable
@@ -141,6 +128,8 @@ static inline u8 FAN_TO_REG(long rpm, int div)
 {
 	if (rpm <= 0)
 		return 255;
+	if (rpm > 1350000)
+		return 1;
 	return clamp_val((1350000 + rpm * div / 2) / (rpm * div), 1, 254);
 }
 
@@ -157,20 +146,16 @@ static inline int TEMP_FROM_REG(s8 val)
 {
 	return val * 830 + 52120;
 }
-static inline s8 TEMP_TO_REG(int val)
+static inline s8 TEMP_TO_REG(long val)
 {
 	int nval = clamp_val(val, -54120, 157530) ;
 	return nval < 0 ? (nval - 5212 - 415) / 830 : (nval - 5212 + 415) / 830;
 }
 
 /*
- * FAN DIV: 1, 2, 4, or 8 (defaults to 2)
- * REG: 0, 1, 2, or 3 (respectively) (defaults to 1)
+ * FAN DIV: 1, 2, 4, or 8
+ * REG: 0, 1, 2, or 3 (respectively)
  */
-static inline u8 DIV_TO_REG(int val)
-{
-	return val == 8 ? 3 : val == 4 ? 2 : val == 1 ? 0 : 1;
-}
 #define DIV_FROM_REG(val) (1 << (val))
 
 /*
@@ -184,7 +169,7 @@ struct sis5595_data {
 	struct mutex lock;
 
 	struct mutex update_lock;
-	char valid;		/* !=0 if following fields are valid */
+	bool valid;		/* true if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
 	char maxins;		/* == 3 if temp enabled, otherwise == 4 */
 	u8 revision;		/* Reg. value */
@@ -203,25 +188,78 @@ struct sis5595_data {
 
 static struct pci_dev *s_bridge;	/* pointer to the (only) sis5595 */
 
-static int sis5595_probe(struct platform_device *pdev);
-static int sis5595_remove(struct platform_device *pdev);
+/* ISA access must be locked explicitly. */
+static int sis5595_read_value(struct sis5595_data *data, u8 reg)
+{
+	int res;
 
-static int sis5595_read_value(struct sis5595_data *data, u8 reg);
-static void sis5595_write_value(struct sis5595_data *data, u8 reg, u8 value);
-static struct sis5595_data *sis5595_update_device(struct device *dev);
-static void sis5595_init_device(struct sis5595_data *data);
+	mutex_lock(&data->lock);
+	outb_p(reg, data->addr + SIS5595_ADDR_REG_OFFSET);
+	res = inb_p(data->addr + SIS5595_DATA_REG_OFFSET);
+	mutex_unlock(&data->lock);
+	return res;
+}
 
-static struct platform_driver sis5595_driver = {
-	.driver = {
-		.owner	= THIS_MODULE,
-		.name	= "sis5595",
-	},
-	.probe		= sis5595_probe,
-	.remove		= sis5595_remove,
-};
+static void sis5595_write_value(struct sis5595_data *data, u8 reg, u8 value)
+{
+	mutex_lock(&data->lock);
+	outb_p(reg, data->addr + SIS5595_ADDR_REG_OFFSET);
+	outb_p(value, data->addr + SIS5595_DATA_REG_OFFSET);
+	mutex_unlock(&data->lock);
+}
+
+static struct sis5595_data *sis5595_update_device(struct device *dev)
+{
+	struct sis5595_data *data = dev_get_drvdata(dev);
+	int i;
+
+	mutex_lock(&data->update_lock);
+
+	if (time_after(jiffies, data->last_updated + HZ + HZ / 2)
+	    || !data->valid) {
+
+		for (i = 0; i <= data->maxins; i++) {
+			data->in[i] =
+			    sis5595_read_value(data, SIS5595_REG_IN(i));
+			data->in_min[i] =
+			    sis5595_read_value(data,
+					       SIS5595_REG_IN_MIN(i));
+			data->in_max[i] =
+			    sis5595_read_value(data,
+					       SIS5595_REG_IN_MAX(i));
+		}
+		for (i = 0; i < 2; i++) {
+			data->fan[i] =
+			    sis5595_read_value(data, SIS5595_REG_FAN(i));
+			data->fan_min[i] =
+			    sis5595_read_value(data,
+					       SIS5595_REG_FAN_MIN(i));
+		}
+		if (data->maxins == 3) {
+			data->temp =
+			    sis5595_read_value(data, SIS5595_REG_TEMP);
+			data->temp_over =
+			    sis5595_read_value(data, SIS5595_REG_TEMP_OVER);
+			data->temp_hyst =
+			    sis5595_read_value(data, SIS5595_REG_TEMP_HYST);
+		}
+		i = sis5595_read_value(data, SIS5595_REG_FANDIV);
+		data->fan_div[0] = (i >> 4) & 0x03;
+		data->fan_div[1] = i >> 6;
+		data->alarms =
+		    sis5595_read_value(data, SIS5595_REG_ALARM1) |
+		    (sis5595_read_value(data, SIS5595_REG_ALARM2) << 8);
+		data->last_updated = jiffies;
+		data->valid = true;
+	}
+
+	mutex_unlock(&data->update_lock);
+
+	return data;
+}
 
 /* 4 Voltages */
-static ssize_t show_in(struct device *dev, struct device_attribute *da,
+static ssize_t in_show(struct device *dev, struct device_attribute *da,
 		       char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
@@ -230,7 +268,7 @@ static ssize_t show_in(struct device *dev, struct device_attribute *da,
 	return sprintf(buf, "%d\n", IN_FROM_REG(data->in[nr]));
 }
 
-static ssize_t show_in_min(struct device *dev, struct device_attribute *da,
+static ssize_t in_min_show(struct device *dev, struct device_attribute *da,
 			   char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
@@ -239,7 +277,7 @@ static ssize_t show_in_min(struct device *dev, struct device_attribute *da,
 	return sprintf(buf, "%d\n", IN_FROM_REG(data->in_min[nr]));
 }
 
-static ssize_t show_in_max(struct device *dev, struct device_attribute *da,
+static ssize_t in_max_show(struct device *dev, struct device_attribute *da,
 			   char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
@@ -248,8 +286,8 @@ static ssize_t show_in_max(struct device *dev, struct device_attribute *da,
 	return sprintf(buf, "%d\n", IN_FROM_REG(data->in_max[nr]));
 }
 
-static ssize_t set_in_min(struct device *dev, struct device_attribute *da,
-			  const char *buf, size_t count)
+static ssize_t in_min_store(struct device *dev, struct device_attribute *da,
+			    const char *buf, size_t count)
 {
 	struct sis5595_data *data = dev_get_drvdata(dev);
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
@@ -268,8 +306,8 @@ static ssize_t set_in_min(struct device *dev, struct device_attribute *da,
 	return count;
 }
 
-static ssize_t set_in_max(struct device *dev, struct device_attribute *da,
-			  const char *buf, size_t count)
+static ssize_t in_max_store(struct device *dev, struct device_attribute *da,
+			    const char *buf, size_t count)
 {
 	struct sis5595_data *data = dev_get_drvdata(dev);
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
@@ -288,37 +326,40 @@ static ssize_t set_in_max(struct device *dev, struct device_attribute *da,
 	return count;
 }
 
-#define show_in_offset(offset)					\
-static SENSOR_DEVICE_ATTR(in##offset##_input, S_IRUGO,		\
-		show_in, NULL, offset);				\
-static SENSOR_DEVICE_ATTR(in##offset##_min, S_IRUGO | S_IWUSR,	\
-		show_in_min, set_in_min, offset);		\
-static SENSOR_DEVICE_ATTR(in##offset##_max, S_IRUGO | S_IWUSR,	\
-		show_in_max, set_in_max, offset);
-
-show_in_offset(0);
-show_in_offset(1);
-show_in_offset(2);
-show_in_offset(3);
-show_in_offset(4);
+static SENSOR_DEVICE_ATTR_RO(in0_input, in, 0);
+static SENSOR_DEVICE_ATTR_RW(in0_min, in_min, 0);
+static SENSOR_DEVICE_ATTR_RW(in0_max, in_max, 0);
+static SENSOR_DEVICE_ATTR_RO(in1_input, in, 1);
+static SENSOR_DEVICE_ATTR_RW(in1_min, in_min, 1);
+static SENSOR_DEVICE_ATTR_RW(in1_max, in_max, 1);
+static SENSOR_DEVICE_ATTR_RO(in2_input, in, 2);
+static SENSOR_DEVICE_ATTR_RW(in2_min, in_min, 2);
+static SENSOR_DEVICE_ATTR_RW(in2_max, in_max, 2);
+static SENSOR_DEVICE_ATTR_RO(in3_input, in, 3);
+static SENSOR_DEVICE_ATTR_RW(in3_min, in_min, 3);
+static SENSOR_DEVICE_ATTR_RW(in3_max, in_max, 3);
+static SENSOR_DEVICE_ATTR_RO(in4_input, in, 4);
+static SENSOR_DEVICE_ATTR_RW(in4_min, in_min, 4);
+static SENSOR_DEVICE_ATTR_RW(in4_max, in_max, 4);
 
 /* Temperature */
-static ssize_t show_temp(struct device *dev, struct device_attribute *attr,
-			 char *buf)
+static ssize_t temp1_input_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
 	return sprintf(buf, "%d\n", TEMP_FROM_REG(data->temp));
 }
 
-static ssize_t show_temp_over(struct device *dev, struct device_attribute *attr,
+static ssize_t temp1_max_show(struct device *dev, struct device_attribute *attr,
 			      char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
 	return sprintf(buf, "%d\n", TEMP_FROM_REG(data->temp_over));
 }
 
-static ssize_t set_temp_over(struct device *dev, struct device_attribute *attr,
-			     const char *buf, size_t count)
+static ssize_t temp1_max_store(struct device *dev,
+			       struct device_attribute *attr, const char *buf,
+			       size_t count)
 {
 	struct sis5595_data *data = dev_get_drvdata(dev);
 	long val;
@@ -335,15 +376,16 @@ static ssize_t set_temp_over(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
-static ssize_t show_temp_hyst(struct device *dev, struct device_attribute *attr,
-			      char *buf)
+static ssize_t temp1_max_hyst_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
 	return sprintf(buf, "%d\n", TEMP_FROM_REG(data->temp_hyst));
 }
 
-static ssize_t set_temp_hyst(struct device *dev, struct device_attribute *attr,
-			     const char *buf, size_t count)
+static ssize_t temp1_max_hyst_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
 {
 	struct sis5595_data *data = dev_get_drvdata(dev);
 	long val;
@@ -360,14 +402,12 @@ static ssize_t set_temp_hyst(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
-static DEVICE_ATTR(temp1_input, S_IRUGO, show_temp, NULL);
-static DEVICE_ATTR(temp1_max, S_IRUGO | S_IWUSR,
-		show_temp_over, set_temp_over);
-static DEVICE_ATTR(temp1_max_hyst, S_IRUGO | S_IWUSR,
-		show_temp_hyst, set_temp_hyst);
+static DEVICE_ATTR_RO(temp1_input);
+static DEVICE_ATTR_RW(temp1_max);
+static DEVICE_ATTR_RW(temp1_max_hyst);
 
 /* 2 Fans */
-static ssize_t show_fan(struct device *dev, struct device_attribute *da,
+static ssize_t fan_show(struct device *dev, struct device_attribute *da,
 			char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
@@ -377,7 +417,7 @@ static ssize_t show_fan(struct device *dev, struct device_attribute *da,
 		DIV_FROM_REG(data->fan_div[nr])));
 }
 
-static ssize_t show_fan_min(struct device *dev, struct device_attribute *da,
+static ssize_t fan_min_show(struct device *dev, struct device_attribute *da,
 			    char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
@@ -387,8 +427,8 @@ static ssize_t show_fan_min(struct device *dev, struct device_attribute *da,
 		DIV_FROM_REG(data->fan_div[nr])));
 }
 
-static ssize_t set_fan_min(struct device *dev, struct device_attribute *da,
-			   const char *buf, size_t count)
+static ssize_t fan_min_store(struct device *dev, struct device_attribute *da,
+			     const char *buf, size_t count)
 {
 	struct sis5595_data *data = dev_get_drvdata(dev);
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
@@ -407,7 +447,7 @@ static ssize_t set_fan_min(struct device *dev, struct device_attribute *da,
 	return count;
 }
 
-static ssize_t show_fan_div(struct device *dev, struct device_attribute *da,
+static ssize_t fan_div_show(struct device *dev, struct device_attribute *da,
 			    char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
@@ -422,8 +462,8 @@ static ssize_t show_fan_div(struct device *dev, struct device_attribute *da,
  * least surprise; the user doesn't expect the fan minimum to change just
  * because the divisor changed.
  */
-static ssize_t set_fan_div(struct device *dev, struct device_attribute *da,
-			   const char *buf, size_t count)
+static ssize_t fan_div_store(struct device *dev, struct device_attribute *da,
+			     const char *buf, size_t count)
 {
 	struct sis5595_data *data = dev_get_drvdata(dev);
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
@@ -479,49 +519,45 @@ static ssize_t set_fan_div(struct device *dev, struct device_attribute *da,
 	return count;
 }
 
-#define show_fan_offset(offset)						\
-static SENSOR_DEVICE_ATTR(fan##offset##_input, S_IRUGO,			\
-		show_fan, NULL, offset - 1);				\
-static SENSOR_DEVICE_ATTR(fan##offset##_min, S_IRUGO | S_IWUSR,		\
-		show_fan_min, set_fan_min, offset - 1);			\
-static SENSOR_DEVICE_ATTR(fan##offset##_div, S_IRUGO | S_IWUSR,		\
-		show_fan_div, set_fan_div, offset - 1);
-
-show_fan_offset(1);
-show_fan_offset(2);
+static SENSOR_DEVICE_ATTR_RO(fan1_input, fan, 0);
+static SENSOR_DEVICE_ATTR_RW(fan1_min, fan_min, 0);
+static SENSOR_DEVICE_ATTR_RW(fan1_div, fan_div, 0);
+static SENSOR_DEVICE_ATTR_RO(fan2_input, fan, 1);
+static SENSOR_DEVICE_ATTR_RW(fan2_min, fan_min, 1);
+static SENSOR_DEVICE_ATTR_RW(fan2_div, fan_div, 1);
 
 /* Alarms */
-static ssize_t show_alarms(struct device *dev, struct device_attribute *attr,
+static ssize_t alarms_show(struct device *dev, struct device_attribute *attr,
 			   char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
 	return sprintf(buf, "%d\n", data->alarms);
 }
-static DEVICE_ATTR(alarms, S_IRUGO, show_alarms, NULL);
+static DEVICE_ATTR_RO(alarms);
 
-static ssize_t show_alarm(struct device *dev, struct device_attribute *da,
+static ssize_t alarm_show(struct device *dev, struct device_attribute *da,
 			  char *buf)
 {
 	struct sis5595_data *data = sis5595_update_device(dev);
 	int nr = to_sensor_dev_attr(da)->index;
 	return sprintf(buf, "%u\n", (data->alarms >> nr) & 1);
 }
-static SENSOR_DEVICE_ATTR(in0_alarm, S_IRUGO, show_alarm, NULL, 0);
-static SENSOR_DEVICE_ATTR(in1_alarm, S_IRUGO, show_alarm, NULL, 1);
-static SENSOR_DEVICE_ATTR(in2_alarm, S_IRUGO, show_alarm, NULL, 2);
-static SENSOR_DEVICE_ATTR(in3_alarm, S_IRUGO, show_alarm, NULL, 3);
-static SENSOR_DEVICE_ATTR(in4_alarm, S_IRUGO, show_alarm, NULL, 15);
-static SENSOR_DEVICE_ATTR(fan1_alarm, S_IRUGO, show_alarm, NULL, 6);
-static SENSOR_DEVICE_ATTR(fan2_alarm, S_IRUGO, show_alarm, NULL, 7);
-static SENSOR_DEVICE_ATTR(temp1_alarm, S_IRUGO, show_alarm, NULL, 15);
+static SENSOR_DEVICE_ATTR_RO(in0_alarm, alarm, 0);
+static SENSOR_DEVICE_ATTR_RO(in1_alarm, alarm, 1);
+static SENSOR_DEVICE_ATTR_RO(in2_alarm, alarm, 2);
+static SENSOR_DEVICE_ATTR_RO(in3_alarm, alarm, 3);
+static SENSOR_DEVICE_ATTR_RO(in4_alarm, alarm, 15);
+static SENSOR_DEVICE_ATTR_RO(fan1_alarm, alarm, 6);
+static SENSOR_DEVICE_ATTR_RO(fan2_alarm, alarm, 7);
+static SENSOR_DEVICE_ATTR_RO(temp1_alarm, alarm, 15);
 
-static ssize_t show_name(struct device *dev, struct device_attribute *attr,
+static ssize_t name_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
 	struct sis5595_data *data = dev_get_drvdata(dev);
 	return sprintf(buf, "%s\n", data->name);
 }
-static DEVICE_ATTR(name, S_IRUGO, show_name, NULL);
+static DEVICE_ATTR_RO(name);
 
 static struct attribute *sis5595_attributes[] = {
 	&sensor_dev_attr_in0_input.dev_attr.attr,
@@ -583,6 +619,15 @@ static const struct attribute_group sis5595_group_temp1 = {
 	.attrs = sis5595_attributes_temp1,
 };
 
+/* Called when we have found a new SIS5595. */
+static void sis5595_init_device(struct sis5595_data *data)
+{
+	u8 config = sis5595_read_value(data, SIS5595_REG_CONFIG);
+	if (!(config & 0x01))
+		sis5595_write_value(data, SIS5595_REG_CONFIG,
+				(config & 0xf7) | 0x01);
+}
+
 /* This is called when the module is loaded */
 static int sis5595_probe(struct platform_device *pdev)
 {
@@ -595,18 +640,17 @@ static int sis5595_probe(struct platform_device *pdev)
 	/* Reserve the ISA region */
 	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
 	if (!devm_request_region(&pdev->dev, res->start, SIS5595_EXTENT,
-				 sis5595_driver.driver.name))
+				 DRIVER_NAME))
 		return -EBUSY;
 
-	data = devm_kzalloc(&pdev->dev, sizeof(struct sis5595_data),
-			    GFP_KERNEL);
+	data = devm_kzalloc_obj(&pdev->dev, struct sis5595_data);
 	if (!data)
 		return -ENOMEM;
 
 	mutex_init(&data->lock);
 	mutex_init(&data->update_lock);
 	data->addr = res->start;
-	data->name = "sis5595";
+	data->name = DRIVER_NAME;
 	platform_set_drvdata(pdev, data);
 
 	/*
@@ -660,7 +704,7 @@ exit_remove_files:
 	return err;
 }
 
-static int sis5595_remove(struct platform_device *pdev)
+static void sis5595_remove(struct platform_device *pdev)
 {
 	struct sis5595_data *data = platform_get_drvdata(pdev);
 
@@ -668,91 +712,9 @@ static int sis5595_remove(struct platform_device *pdev)
 	sysfs_remove_group(&pdev->dev.kobj, &sis5595_group);
 	sysfs_remove_group(&pdev->dev.kobj, &sis5595_group_in4);
 	sysfs_remove_group(&pdev->dev.kobj, &sis5595_group_temp1);
-
-	return 0;
 }
 
-
-/* ISA access must be locked explicitly. */
-static int sis5595_read_value(struct sis5595_data *data, u8 reg)
-{
-	int res;
-
-	mutex_lock(&data->lock);
-	outb_p(reg, data->addr + SIS5595_ADDR_REG_OFFSET);
-	res = inb_p(data->addr + SIS5595_DATA_REG_OFFSET);
-	mutex_unlock(&data->lock);
-	return res;
-}
-
-static void sis5595_write_value(struct sis5595_data *data, u8 reg, u8 value)
-{
-	mutex_lock(&data->lock);
-	outb_p(reg, data->addr + SIS5595_ADDR_REG_OFFSET);
-	outb_p(value, data->addr + SIS5595_DATA_REG_OFFSET);
-	mutex_unlock(&data->lock);
-}
-
-/* Called when we have found a new SIS5595. */
-static void sis5595_init_device(struct sis5595_data *data)
-{
-	u8 config = sis5595_read_value(data, SIS5595_REG_CONFIG);
-	if (!(config & 0x01))
-		sis5595_write_value(data, SIS5595_REG_CONFIG,
-				(config & 0xf7) | 0x01);
-}
-
-static struct sis5595_data *sis5595_update_device(struct device *dev)
-{
-	struct sis5595_data *data = dev_get_drvdata(dev);
-	int i;
-
-	mutex_lock(&data->update_lock);
-
-	if (time_after(jiffies, data->last_updated + HZ + HZ / 2)
-	    || !data->valid) {
-
-		for (i = 0; i <= data->maxins; i++) {
-			data->in[i] =
-			    sis5595_read_value(data, SIS5595_REG_IN(i));
-			data->in_min[i] =
-			    sis5595_read_value(data,
-					       SIS5595_REG_IN_MIN(i));
-			data->in_max[i] =
-			    sis5595_read_value(data,
-					       SIS5595_REG_IN_MAX(i));
-		}
-		for (i = 0; i < 2; i++) {
-			data->fan[i] =
-			    sis5595_read_value(data, SIS5595_REG_FAN(i));
-			data->fan_min[i] =
-			    sis5595_read_value(data,
-					       SIS5595_REG_FAN_MIN(i));
-		}
-		if (data->maxins == 3) {
-			data->temp =
-			    sis5595_read_value(data, SIS5595_REG_TEMP);
-			data->temp_over =
-			    sis5595_read_value(data, SIS5595_REG_TEMP_OVER);
-			data->temp_hyst =
-			    sis5595_read_value(data, SIS5595_REG_TEMP_HYST);
-		}
-		i = sis5595_read_value(data, SIS5595_REG_FANDIV);
-		data->fan_div[0] = (i >> 4) & 0x03;
-		data->fan_div[1] = i >> 6;
-		data->alarms =
-		    sis5595_read_value(data, SIS5595_REG_ALARM1) |
-		    (sis5595_read_value(data, SIS5595_REG_ALARM2) << 8);
-		data->last_updated = jiffies;
-		data->valid = 1;
-	}
-
-	mutex_unlock(&data->update_lock);
-
-	return data;
-}
-
-static DEFINE_PCI_DEVICE_TABLE(sis5595_pci_ids) = {
+static const struct pci_device_id sis5595_pci_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_503) },
 	{ 0, }
 };
@@ -780,7 +742,7 @@ static int sis5595_device_add(unsigned short address)
 	struct resource res = {
 		.start	= address,
 		.end	= address + SIS5595_EXTENT - 1,
-		.name	= "sis5595",
+		.name	= DRIVER_NAME,
 		.flags	= IORESOURCE_IO,
 	};
 	int err;
@@ -789,7 +751,7 @@ static int sis5595_device_add(unsigned short address)
 	if (err)
 		goto exit;
 
-	pdev = platform_device_alloc("sis5595", address);
+	pdev = platform_device_alloc(DRIVER_NAME, address);
 	if (!pdev) {
 		err = -ENOMEM;
 		pr_err("Device allocation failed\n");
@@ -816,12 +778,20 @@ exit:
 	return err;
 }
 
+static struct platform_driver sis5595_driver = {
+	.driver = {
+		.name	= DRIVER_NAME,
+	},
+	.probe		= sis5595_probe,
+	.remove		= sis5595_remove,
+};
+
 static int sis5595_pci_probe(struct pci_dev *dev,
 				       const struct pci_device_id *id)
 {
 	u16 address;
 	u8 enable;
-	int *i;
+	int *i, err;
 
 	for (i = blacklist; *i != 0; i++) {
 		struct pci_dev *d;
@@ -841,8 +811,8 @@ static int sis5595_pci_probe(struct pci_dev *dev,
 		pci_write_config_word(dev, SIS5595_BASE_REG, force_addr);
 	}
 
-	if (PCIBIOS_SUCCESSFUL !=
-	    pci_read_config_word(dev, SIS5595_BASE_REG, &address)) {
+	err = pci_read_config_word(dev, SIS5595_BASE_REG, &address);
+	if (err != PCIBIOS_SUCCESSFUL) {
 		dev_err(&dev->dev, "Failed to read ISA address\n");
 		return -ENODEV;
 	}
@@ -859,22 +829,23 @@ static int sis5595_pci_probe(struct pci_dev *dev,
 		return -ENODEV;
 	}
 
-	if (PCIBIOS_SUCCESSFUL !=
-	    pci_read_config_byte(dev, SIS5595_ENABLE_REG, &enable)) {
+	err = pci_read_config_byte(dev, SIS5595_ENABLE_REG, &enable);
+	if (err != PCIBIOS_SUCCESSFUL) {
 		dev_err(&dev->dev, "Failed to read enable register\n");
 		return -ENODEV;
 	}
 	if (!(enable & 0x80)) {
-		if ((PCIBIOS_SUCCESSFUL !=
-		     pci_write_config_byte(dev, SIS5595_ENABLE_REG,
-					   enable | 0x80))
-		 || (PCIBIOS_SUCCESSFUL !=
-		     pci_read_config_byte(dev, SIS5595_ENABLE_REG, &enable))
-		 || (!(enable & 0x80))) {
-			/* doesn't work for some chips! */
-			dev_err(&dev->dev, "Failed to enable HWM device\n");
-			return -ENODEV;
-		}
+		err = pci_write_config_byte(dev, SIS5595_ENABLE_REG, enable | 0x80);
+		if (err != PCIBIOS_SUCCESSFUL)
+			goto enable_fail;
+
+		err = pci_read_config_byte(dev, SIS5595_ENABLE_REG, &enable);
+		if (err != PCIBIOS_SUCCESSFUL)
+			goto enable_fail;
+
+		/* doesn't work for some chips! */
+		if (!(enable & 0x80))
+			goto enable_fail;
 	}
 
 	if (platform_driver_register(&sis5595_driver)) {
@@ -894,6 +865,10 @@ static int sis5595_pci_probe(struct pci_dev *dev,
 	 */
 	return -ENODEV;
 
+enable_fail:
+	dev_err(&dev->dev, "Failed to enable HWM device\n");
+	goto exit;
+
 exit_unregister:
 	pci_dev_put(dev);
 	platform_driver_unregister(&sis5595_driver);
@@ -902,7 +877,7 @@ exit:
 }
 
 static struct pci_driver sis5595_pci_driver = {
-	.name            = "sis5595",
+	.name            = DRIVER_NAME,
 	.id_table        = sis5595_pci_ids,
 	.probe           = sis5595_pci_probe,
 };

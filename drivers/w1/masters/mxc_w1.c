@@ -1,52 +1,32 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2005-2008 Freescale Semiconductor, Inc. All Rights Reserved.
  * Copyright 2008 Luotao Fu, kernel@pengutronix.de
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
- *
  */
 
-#include <linux/module.h>
-#include <linux/interrupt.h>
-#include <linux/platform_device.h>
 #include <linux/clk.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/ktime.h>
+#include <linux/module.h>
+#include <linux/platform_device.h>
 
-#include "../w1.h"
-#include "../w1_int.h"
-#include "../w1_log.h"
-
-/* According to the mx27 Datasheet the reset procedure should take up to about
- * 1350us. We set the timeout to 500*100us = 50ms for sure */
-#define MXC_W1_RESET_TIMEOUT 500
+#include <linux/w1.h>
 
 /*
  * MXC W1 Register offsets
  */
-#define MXC_W1_CONTROL          0x00
-#define MXC_W1_TIME_DIVIDER     0x02
-#define MXC_W1_RESET            0x04
-#define MXC_W1_COMMAND          0x06
-#define MXC_W1_TXRX             0x08
-#define MXC_W1_INTERRUPT        0x0A
-#define MXC_W1_INTERRUPT_EN     0x0C
+#define MXC_W1_CONTROL		0x00
+# define MXC_W1_CONTROL_RDST	BIT(3)
+# define MXC_W1_CONTROL_WR(x)	BIT(5 - (x))
+# define MXC_W1_CONTROL_PST	BIT(6)
+# define MXC_W1_CONTROL_RPP	BIT(7)
+#define MXC_W1_TIME_DIVIDER	0x02
+#define MXC_W1_RESET		0x04
+# define MXC_W1_RESET_RST	BIT(0)
 
 struct mxc_w1_device {
 	void __iomem *regs;
-	unsigned int clkdiv;
 	struct clk *clk;
 	struct w1_bus_master bus_master;
 };
@@ -58,24 +38,25 @@ struct mxc_w1_device {
  */
 static u8 mxc_w1_ds2_reset_bus(void *data)
 {
-	u8 reg_val;
-	unsigned int timeout_cnt = 0;
 	struct mxc_w1_device *dev = data;
+	ktime_t timeout;
 
-	__raw_writeb(0x80, (dev->regs + MXC_W1_CONTROL));
+	writeb(MXC_W1_CONTROL_RPP, dev->regs + MXC_W1_CONTROL);
 
-	while (1) {
-		reg_val = __raw_readb(dev->regs + MXC_W1_CONTROL);
+	/* Wait for reset sequence 511+512us, use 1500us for sure */
+	timeout = ktime_add_us(ktime_get(), 1500);
 
-		if (((reg_val >> 7) & 0x1) == 0 ||
-		    timeout_cnt > MXC_W1_RESET_TIMEOUT)
-			break;
-		else
-			timeout_cnt++;
+	udelay(511 + 512);
 
-		udelay(100);
-	}
-	return (reg_val >> 7) & 0x1;
+	do {
+		u8 ctrl = readb(dev->regs + MXC_W1_CONTROL);
+
+		/* PST bit is valid after the RPP bit is self-cleared */
+		if (!(ctrl & MXC_W1_CONTROL_RPP))
+			return !(ctrl & MXC_W1_CONTROL_PST);
+	} while (ktime_before(ktime_get(), timeout));
+
+	return 1;
 }
 
 /*
@@ -85,32 +66,35 @@ static u8 mxc_w1_ds2_reset_bus(void *data)
  */
 static u8 mxc_w1_ds2_touch_bit(void *data, u8 bit)
 {
-	struct mxc_w1_device *mdev = data;
-	void __iomem *ctrl_addr = mdev->regs + MXC_W1_CONTROL;
-	unsigned int timeout_cnt = 400; /* Takes max. 120us according to
-					 * datasheet.
-					 */
+	struct mxc_w1_device *dev = data;
+	ktime_t timeout;
 
-	__raw_writeb((1 << (5 - bit)), ctrl_addr);
+	writeb(MXC_W1_CONTROL_WR(bit), dev->regs + MXC_W1_CONTROL);
 
-	while (timeout_cnt--) {
-		if (!((__raw_readb(ctrl_addr) >> (5 - bit)) & 0x1))
-			break;
+	/* Wait for read/write bit (60us, Max 120us), use 200us for sure */
+	timeout = ktime_add_us(ktime_get(), 200);
 
-		udelay(1);
-	}
+	udelay(60);
 
-	return ((__raw_readb(ctrl_addr)) >> 3) & 0x1;
+	do {
+		u8 ctrl = readb(dev->regs + MXC_W1_CONTROL);
+
+		/* RDST bit is valid after the WR1/RD bit is self-cleared */
+		if (!(ctrl & MXC_W1_CONTROL_WR(bit)))
+			return !!(ctrl & MXC_W1_CONTROL_RDST);
+	} while (ktime_before(ktime_get(), timeout));
+
+	return 0;
 }
 
 static int mxc_w1_probe(struct platform_device *pdev)
 {
 	struct mxc_w1_device *mdev;
-	struct resource *res;
-	int err = 0;
+	unsigned long clkrate;
+	unsigned int clkdiv;
+	int err;
 
-	mdev = devm_kzalloc(&pdev->dev, sizeof(struct mxc_w1_device),
-			    GFP_KERNEL);
+	mdev = devm_kzalloc_obj(&pdev->dev, struct mxc_w1_device);
 	if (!mdev)
 		return -ENOMEM;
 
@@ -118,46 +102,63 @@ static int mxc_w1_probe(struct platform_device *pdev)
 	if (IS_ERR(mdev->clk))
 		return PTR_ERR(mdev->clk);
 
-	mdev->clkdiv = (clk_get_rate(mdev->clk) / 1000000) - 1;
+	err = clk_prepare_enable(mdev->clk);
+	if (err)
+		return err;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	mdev->regs = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(mdev->regs))
-		return PTR_ERR(mdev->regs);
+	clkrate = clk_get_rate(mdev->clk);
+	if (clkrate < 10000000)
+		dev_warn(&pdev->dev,
+			 "Low clock frequency causes improper function\n");
 
-	clk_prepare_enable(mdev->clk);
-	__raw_writeb(mdev->clkdiv, mdev->regs + MXC_W1_TIME_DIVIDER);
+	clkdiv = DIV_ROUND_CLOSEST(clkrate, 1000000);
+	clkrate /= clkdiv;
+	if ((clkrate < 980000) || (clkrate > 1020000))
+		dev_warn(&pdev->dev,
+			 "Incorrect time base frequency %lu Hz\n", clkrate);
+
+	mdev->regs = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(mdev->regs)) {
+		err = PTR_ERR(mdev->regs);
+		goto out_disable_clk;
+	}
+
+	/* Software reset 1-Wire module */
+	writeb(MXC_W1_RESET_RST, mdev->regs + MXC_W1_RESET);
+	writeb(0, mdev->regs + MXC_W1_RESET);
+
+	writeb(clkdiv - 1, mdev->regs + MXC_W1_TIME_DIVIDER);
 
 	mdev->bus_master.data = mdev;
 	mdev->bus_master.reset_bus = mxc_w1_ds2_reset_bus;
 	mdev->bus_master.touch_bit = mxc_w1_ds2_touch_bit;
 
-	err = w1_add_master_device(&mdev->bus_master);
-
-	if (err)
-		return err;
-
 	platform_set_drvdata(pdev, mdev);
+
+	err = w1_add_master_device(&mdev->bus_master);
+	if (err)
+		goto out_disable_clk;
+
 	return 0;
+
+out_disable_clk:
+	clk_disable_unprepare(mdev->clk);
+	return err;
 }
 
 /*
  * disassociate the w1 device from the driver
  */
-static int mxc_w1_remove(struct platform_device *pdev)
+static void mxc_w1_remove(struct platform_device *pdev)
 {
 	struct mxc_w1_device *mdev = platform_get_drvdata(pdev);
 
 	w1_remove_master_device(&mdev->bus_master);
 
 	clk_disable_unprepare(mdev->clk);
-
-	platform_set_drvdata(pdev, NULL);
-
-	return 0;
 }
 
-static struct of_device_id mxc_w1_dt_ids[] = {
+static const struct of_device_id mxc_w1_dt_ids[] = {
 	{ .compatible = "fsl,imx21-owire" },
 	{ /* sentinel */ }
 };

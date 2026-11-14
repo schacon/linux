@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * support.c - standard functions for the use of pnp protocol drivers
  *
@@ -8,6 +9,7 @@
 
 #include <linux/module.h>
 #include <linux/ctype.h>
+#include <linux/hex.h>
 #include <linux/pnp.h>
 #include "base.h"
 
@@ -29,7 +31,6 @@ int pnp_is_active(struct pnp_dev *dev)
 	else
 		return 1;
 }
-
 EXPORT_SYMBOL(pnp_is_active);
 
 /*

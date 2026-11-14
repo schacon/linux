@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* drivers/rtc/rtc-max6902.c
  *
  * Copyright (C) 2006 8D Technologies inc.
  * Copyright (C) 2004 Compulab Ltd.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  * Driver for MAX6902 spi RTC
- *
  */
 
 #include <linux/module.h>
@@ -85,7 +81,7 @@ static int max6902_read_time(struct device *dev, struct rtc_time *dt)
 	dt->tm_year += century;
 	dt->tm_year -= 1900;
 
-	return rtc_valid_tm(dt);
+	return 0;
 }
 
 static int max6902_set_time(struct device *dev, struct rtc_time *dt)
@@ -143,23 +139,16 @@ static int max6902_probe(struct spi_device *spi)
 	return 0;
 }
 
-static int max6902_remove(struct spi_device *spi)
-{
-	return 0;
-}
-
 static struct spi_driver max6902_driver = {
 	.driver = {
 		.name	= "rtc-max6902",
-		.owner	= THIS_MODULE,
 	},
 	.probe	= max6902_probe,
-	.remove = max6902_remove,
 };
 
 module_spi_driver(max6902_driver);
 
-MODULE_DESCRIPTION ("max6902 spi RTC driver");
-MODULE_AUTHOR ("Raphael Assenat");
-MODULE_LICENSE ("GPL");
+MODULE_DESCRIPTION("max6902 spi RTC driver");
+MODULE_AUTHOR("Raphael Assenat");
+MODULE_LICENSE("GPL");
 MODULE_ALIAS("spi:rtc-max6902");

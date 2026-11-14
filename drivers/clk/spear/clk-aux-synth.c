@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 ST Microelectronics
- * Viresh Kumar <viresh.linux@gmail.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
+ * Viresh Kumar <vireshk@kernel.org>
  *
  * Auxiliary Synthesizer clock implementation
  */
@@ -29,7 +26,7 @@
 
 #define to_clk_aux(_hw) container_of(_hw, struct clk_aux, hw)
 
-static struct aux_clk_masks default_aux_masks = {
+static const  struct aux_clk_masks default_aux_masks = {
 	.eq_sel_mask = AUX_EQ_SEL_MASK,
 	.eq_sel_shift = AUX_EQ_SEL_SHIFT,
 	.eq1_mask = AUX_EQ1_SEL,
@@ -52,14 +49,16 @@ static unsigned long aux_calc_rate(struct clk_hw *hw, unsigned long prate,
 			(rtbl[index].yscale * eq)) * 10000;
 }
 
-static long clk_aux_round_rate(struct clk_hw *hw, unsigned long drate,
-		unsigned long *prate)
+static int clk_aux_determine_rate(struct clk_hw *hw,
+				  struct clk_rate_request *req)
 {
 	struct clk_aux *aux = to_clk_aux(hw);
 	int unused;
 
-	return clk_round_rate_index(hw, drate, *prate, aux_calc_rate,
-			aux->rtbl_cnt, &unused);
+	req->rate = clk_round_rate_index(hw, req->rate, req->best_parent_rate,
+					 aux_calc_rate, aux->rtbl_cnt, &unused);
+
+	return 0;
 }
 
 static unsigned long clk_aux_recalc_rate(struct clk_hw *hw,
@@ -128,19 +127,19 @@ static int clk_aux_set_rate(struct clk_hw *hw, unsigned long drate,
 	return 0;
 }
 
-static struct clk_ops clk_aux_ops = {
+static const struct clk_ops clk_aux_ops = {
 	.recalc_rate = clk_aux_recalc_rate,
-	.round_rate = clk_aux_round_rate,
+	.determine_rate = clk_aux_determine_rate,
 	.set_rate = clk_aux_set_rate,
 };
 
 struct clk *clk_register_aux(const char *aux_name, const char *gate_name,
 		const char *parent_name, unsigned long flags, void __iomem *reg,
-		struct aux_clk_masks *masks, struct aux_rate_tbl *rtbl,
+	        const struct aux_clk_masks *masks, struct aux_rate_tbl *rtbl,
 		u8 rtbl_cnt, spinlock_t *lock, struct clk **gate_clk)
 {
+	struct clk_init_data init = {};
 	struct clk_aux *aux;
-	struct clk_init_data init;
 	struct clk *clk;
 
 	if (!aux_name || !parent_name || !reg || !rtbl || !rtbl_cnt) {
@@ -148,11 +147,9 @@ struct clk *clk_register_aux(const char *aux_name, const char *gate_name,
 		return ERR_PTR(-EINVAL);
 	}
 
-	aux = kzalloc(sizeof(*aux), GFP_KERNEL);
-	if (!aux) {
-		pr_err("could not allocate aux clk\n");
+	aux = kzalloc_obj(*aux);
+	if (!aux)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	/* struct clk_aux assignments */
 	if (!masks)

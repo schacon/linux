@@ -1,4 +1,5 @@
-/*
+/* SPDX-License-Identifier: GPL-2.0
+ *
  * Dmaengine driver base library for DMA controllers, found on SH-based SoCs
  *
  * extracted from shdma.c and headers
@@ -7,10 +8,6 @@
  * Copyright (C) 2009 Nobuhiro Iwamatsu <iwamatsu.nobuhiro@renesas.com>
  * Copyright (C) 2009 Renesas Solutions, Inc. All rights reserved.
  * Copyright (C) 2007 Freescale Semiconductor, Inc. All rights reserved.
- *
- * This is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
  */
 
 #ifndef SHDMA_BASE_H
@@ -22,11 +19,11 @@
 #include <linux/types.h>
 
 /**
- * shdma_pm_state - DMA channel PM state
- * SHDMA_PM_ESTABLISHED:	either idle or during data transfer
- * SHDMA_PM_BUSY:		during the transfer preparation, when we have to
+ * enum shdma_pm_state - DMA channel PM state
+ * @SHDMA_PM_ESTABLISHED:	either idle or during data transfer
+ * @SHDMA_PM_BUSY:		during the transfer preparation, when we have to
  *				drop the lock temporarily
- * SHDMA_PM_PENDING:	transfers pending
+ * @SHDMA_PM_PENDING:	transfers pending
  */
 enum shdma_pm_state {
 	SHDMA_PM_ESTABLISHED,
@@ -54,6 +51,7 @@ struct shdma_desc {
 	dma_cookie_t cookie;
 	int chunks;
 	int mark;
+	bool cyclic;			/* used as cyclic transfer */
 };
 
 struct shdma_chan {
@@ -68,23 +66,26 @@ struct shdma_chan {
 	int id;				/* Raw id of this channel */
 	int irq;			/* Channel IRQ */
 	int slave_id;			/* Client ID for slave DMA */
+	int real_slave_id;		/* argument passed to filter function */
+	int hw_req;			/* DMA request line for slave DMA - same
+					 * as MID/RID, used with DT */
 	enum shdma_pm_state pm_state;
 };
 
 /**
  * struct shdma_ops - simple DMA driver operations
- * desc_completed:	return true, if this is the descriptor, that just has
+ * @desc_completed:	return true, if this is the descriptor, that just has
  *			completed (atomic)
- * halt_channel:	stop DMA channel operation (atomic)
- * channel_busy:	return true, if the channel is busy (atomic)
- * slave_addr:		return slave DMA address
- * desc_setup:		set up the hardware specific descriptor portion (atomic)
- * set_slave:		bind channel to a slave
- * setup_xfer:		configure channel hardware for operation (atomic)
- * start_xfer:		start the DMA transfer (atomic)
- * embedded_desc:	return Nth struct shdma_desc pointer from the
+ * @halt_channel:	stop DMA channel operation (atomic)
+ * @channel_busy:	return true, if the channel is busy (atomic)
+ * @slave_addr:		return slave DMA address
+ * @desc_setup:		set up the hardware specific descriptor portion (atomic)
+ * @set_slave:		bind channel to a slave
+ * @setup_xfer:		configure channel hardware for operation (atomic)
+ * @start_xfer:		start the DMA transfer (atomic)
+ * @embedded_desc:	return Nth struct shdma_desc pointer from the
  *			descriptor array
- * chan_irq:		process channel IRQ, return true if a transfer has
+ * @chan_irq:		process channel IRQ, return true if a transfer has
  *			completed (atomic)
  */
 struct shdma_ops {
@@ -94,8 +95,8 @@ struct shdma_ops {
 	dma_addr_t (*slave_addr)(struct shdma_chan *);
 	int (*desc_setup)(struct shdma_chan *, struct shdma_desc *,
 			  dma_addr_t, dma_addr_t, size_t *);
-	int (*set_slave)(struct shdma_chan *, int, bool);
-	void (*setup_xfer)(struct shdma_chan *, int);
+	int (*set_slave)(struct shdma_chan *, int, dma_addr_t, bool);
+	int (*setup_xfer)(struct shdma_chan *, int);
 	void (*start_xfer)(struct shdma_chan *, struct shdma_desc *);
 	struct shdma_desc *(*embedded_desc)(void *, int);
 	bool (*chan_irq)(struct shdma_chan *, int);
@@ -114,7 +115,6 @@ struct shdma_dev {
 
 int shdma_request_irq(struct shdma_chan *, int,
 			   unsigned long, const char *);
-void shdma_free_irq(struct shdma_chan *);
 bool shdma_reset(struct shdma_dev *sdev);
 void shdma_chan_probe(struct shdma_dev *sdev,
 			   struct shdma_chan *schan, int id);
@@ -122,5 +122,13 @@ void shdma_chan_remove(struct shdma_chan *schan);
 int shdma_init(struct device *dev, struct shdma_dev *sdev,
 		    int chan_num);
 void shdma_cleanup(struct shdma_dev *sdev);
+#if IS_ENABLED(CONFIG_SH_DMAE_BASE)
+bool shdma_chan_filter(struct dma_chan *chan, void *arg);
+#else
+static inline bool shdma_chan_filter(struct dma_chan *chan, void *arg)
+{
+	return false;
+}
+#endif
 
 #endif

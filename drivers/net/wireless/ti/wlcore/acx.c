@@ -1,24 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of wl1271
  *
  * Copyright (C) 2008-2009 Nokia Corporation
  *
  * Contact: Luciano Coelho <luciano.coelho@nokia.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 
 #include "acx.h"
@@ -31,7 +17,6 @@
 #include "wlcore.h"
 #include "debug.h"
 #include "wl12xx_80211.h"
-#include "ps.h"
 #include "hw_ops.h"
 
 int wl1271_acx_wake_up_conditions(struct wl1271 *wl, struct wl12xx_vif *wlvif,
@@ -43,7 +28,7 @@ int wl1271_acx_wake_up_conditions(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 	wl1271_debug(DEBUG_ACX, "acx wake up conditions (wake_up_event %d listen_interval %d)",
 		     wake_up_event, listen_interval);
 
-	wake_up = kzalloc(sizeof(*wake_up), GFP_KERNEL);
+	wake_up = kzalloc_obj(*wake_up);
 	if (!wake_up) {
 		ret = -ENOMEM;
 		goto out;
@@ -72,7 +57,7 @@ int wl1271_acx_sleep_auth(struct wl1271 *wl, u8 sleep_auth)
 
 	wl1271_debug(DEBUG_ACX, "acx sleep auth %d", sleep_auth);
 
-	auth = kzalloc(sizeof(*auth), GFP_KERNEL);
+	auth = kzalloc_obj(*auth);
 	if (!auth) {
 		ret = -ENOMEM;
 		goto out;
@@ -105,7 +90,7 @@ int wl1271_acx_tx_power(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 	if (power < 0 || power > 25)
 		return -EINVAL;
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -132,7 +117,7 @@ int wl1271_acx_feature_cfg(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 
 	wl1271_debug(DEBUG_ACX, "acx feature cfg");
 
-	feature = kzalloc(sizeof(*feature), GFP_KERNEL);
+	feature = kzalloc_obj(*feature);
 	if (!feature) {
 		ret = -ENOMEM;
 		goto out;
@@ -146,7 +131,7 @@ int wl1271_acx_feature_cfg(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 	ret = wl1271_cmd_configure(wl, ACX_FEATURE_CFG,
 				   feature, sizeof(*feature));
 	if (ret < 0) {
-		wl1271_error("Couldnt set HW encryption");
+		wl1271_error("Couldn't set HW encryption");
 		goto out;
 	}
 
@@ -162,7 +147,8 @@ int wl1271_acx_mem_map(struct wl1271 *wl, struct acx_header *mem_map,
 
 	wl1271_debug(DEBUG_ACX, "acx mem map");
 
-	ret = wl1271_cmd_interrogate(wl, ACX_MEM_MAP, mem_map, len);
+	ret = wl1271_cmd_interrogate(wl, ACX_MEM_MAP, mem_map,
+				     sizeof(struct acx_header), len);
 	if (ret < 0)
 		return ret;
 
@@ -176,7 +162,7 @@ int wl1271_acx_rx_msdu_life_time(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "acx rx msdu life time");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -203,7 +189,7 @@ int wl1271_acx_slot(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx slot");
 
-	slot = kzalloc(sizeof(*slot), GFP_KERNEL);
+	slot = kzalloc_obj(*slot);
 	if (!slot) {
 		ret = -ENOMEM;
 		goto out;
@@ -232,7 +218,7 @@ int wl1271_acx_group_address_tbl(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx group address tbl");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -262,7 +248,7 @@ int wl1271_acx_service_period_timeout(struct wl1271 *wl,
 	struct acx_rx_timeout *rx_timeout;
 	int ret;
 
-	rx_timeout = kzalloc(sizeof(*rx_timeout), GFP_KERNEL);
+	rx_timeout = kzalloc_obj(*rx_timeout);
 	if (!rx_timeout) {
 		ret = -ENOMEM;
 		goto out;
@@ -302,7 +288,7 @@ int wl1271_acx_rts_threshold(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx rts threshold: %d", rts_threshold);
 
-	rts = kzalloc(sizeof(*rts), GFP_KERNEL);
+	rts = kzalloc_obj(*rts);
 	if (!rts) {
 		ret = -ENOMEM;
 		goto out;
@@ -330,7 +316,7 @@ int wl1271_acx_dco_itrim_params(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "acx dco itrim parameters");
 
-	dco = kzalloc(sizeof(*dco), GFP_KERNEL);
+	dco = kzalloc_obj(*dco);
 	if (!dco) {
 		ret = -ENOMEM;
 		goto out;
@@ -357,13 +343,14 @@ int wl1271_acx_beacon_filter_opt(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 	struct acx_beacon_filter_option *beacon_filter = NULL;
 	int ret = 0;
 
-	wl1271_debug(DEBUG_ACX, "acx beacon filter opt");
+	wl1271_debug(DEBUG_ACX, "acx beacon filter opt enable=%d",
+		     enable_filter);
 
 	if (enable_filter &&
 	    wl->conf.conn.bcn_filt_mode == CONF_BCN_FILT_MODE_DISABLED)
 		goto out;
 
-	beacon_filter = kzalloc(sizeof(*beacon_filter), GFP_KERNEL);
+	beacon_filter = kzalloc_obj(*beacon_filter);
 	if (!beacon_filter) {
 		ret = -ENOMEM;
 		goto out;
@@ -400,7 +387,7 @@ int wl1271_acx_beacon_filter_table(struct wl1271 *wl,
 
 	wl1271_debug(DEBUG_ACX, "acx beacon filter table");
 
-	ie_table = kzalloc(sizeof(*ie_table), GFP_KERNEL);
+	ie_table = kzalloc_obj(*ie_table);
 	if (!ie_table) {
 		ret = -ENOMEM;
 		goto out;
@@ -459,7 +446,7 @@ int wl1271_acx_conn_monit_params(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 	wl1271_debug(DEBUG_ACX, "acx connection monitor parameters: %s",
 		     enable ? "enabled" : "disabled");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -495,7 +482,7 @@ int wl1271_acx_sg_enable(struct wl1271 *wl, bool enable)
 
 	wl1271_debug(DEBUG_ACX, "acx sg enable");
 
-	pta = kzalloc(sizeof(*pta), GFP_KERNEL);
+	pta = kzalloc_obj(*pta);
 	if (!pta) {
 		ret = -ENOMEM;
 		goto out;
@@ -525,16 +512,16 @@ int wl12xx_acx_sg_cfg(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "acx sg cfg");
 
-	param = kzalloc(sizeof(*param), GFP_KERNEL);
+	param = kzalloc_obj(*param);
 	if (!param) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
 	/* BT-WLAN coext parameters */
-	for (i = 0; i < CONF_SG_PARAMS_MAX; i++)
+	for (i = 0; i < WLCORE_CONF_SG_PARAMS_MAX; i++)
 		param->params[i] = cpu_to_le32(c->params[i]);
-	param->param_idx = CONF_SG_PARAMS_ALL;
+	param->param_idx = WLCORE_CONF_SG_PARAMS_ALL;
 
 	ret = wl1271_cmd_configure(wl, ACX_SG_CFG, param, sizeof(*param));
 	if (ret < 0) {
@@ -554,7 +541,7 @@ int wl1271_acx_cca_threshold(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "acx cca threshold");
 
-	detection = kzalloc(sizeof(*detection), GFP_KERNEL);
+	detection = kzalloc_obj(*detection);
 	if (!detection) {
 		ret = -ENOMEM;
 		goto out;
@@ -580,7 +567,7 @@ int wl1271_acx_bcn_dtim_options(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 
 	wl1271_debug(DEBUG_ACX, "acx bcn dtim options");
 
-	bb = kzalloc(sizeof(*bb), GFP_KERNEL);
+	bb = kzalloc_obj(*bb);
 	if (!bb) {
 		ret = -ENOMEM;
 		goto out;
@@ -610,7 +597,7 @@ int wl1271_acx_aid(struct wl1271 *wl, struct wl12xx_vif *wlvif, u16 aid)
 
 	wl1271_debug(DEBUG_ACX, "acx aid");
 
-	acx_aid = kzalloc(sizeof(*acx_aid), GFP_KERNEL);
+	acx_aid = kzalloc_obj(*acx_aid);
 	if (!acx_aid) {
 		ret = -ENOMEM;
 		goto out;
@@ -637,7 +624,7 @@ int wl1271_acx_event_mbox_mask(struct wl1271 *wl, u32 event_mask)
 
 	wl1271_debug(DEBUG_ACX, "acx event mbox mask");
 
-	mask = kzalloc(sizeof(*mask), GFP_KERNEL);
+	mask = kzalloc_obj(*mask);
 	if (!mask) {
 		ret = -ENOMEM;
 		goto out;
@@ -667,7 +654,7 @@ int wl1271_acx_set_preamble(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx_set_preamble");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -695,7 +682,7 @@ int wl1271_acx_cts_protect(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx_set_ctsprotect");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -722,6 +709,7 @@ int wl1271_acx_statistics(struct wl1271 *wl, void *stats)
 	wl1271_debug(DEBUG_ACX, "acx statistics");
 
 	ret = wl1271_cmd_interrogate(wl, ACX_STATISTICS, stats,
+				     sizeof(struct acx_header),
 				     wl->stats.fw_stats_len);
 	if (ret < 0) {
 		wl1271_warning("acx statistics failed: %d", ret);
@@ -739,7 +727,7 @@ int wl1271_acx_sta_rate_policies(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 
 	wl1271_debug(DEBUG_ACX, "acx rate policies");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 
 	if (!acx) {
 		ret = -ENOMEM;
@@ -810,7 +798,7 @@ int wl1271_acx_ap_rate_policy(struct wl1271 *wl, struct conf_tx_rate_class *c,
 	wl1271_debug(DEBUG_ACX, "acx ap rate policy %d rates 0x%x",
 		     idx, c->enabled_rates);
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -843,7 +831,7 @@ int wl1271_acx_ac_cfg(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 	wl1271_debug(DEBUG_ACX, "acx ac cfg %d cw_ming %d cw_max %d "
 		     "aifs %d txop %d", ac, cw_min, cw_max, aifsn, txop);
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 
 	if (!acx) {
 		ret = -ENOMEM;
@@ -878,7 +866,7 @@ int wl1271_acx_tid_cfg(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx tid config");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 
 	if (!acx) {
 		ret = -ENOMEM;
@@ -919,7 +907,7 @@ int wl1271_acx_frag_threshold(struct wl1271 *wl, u32 frag_threshold)
 
 	wl1271_debug(DEBUG_ACX, "acx frag threshold: %d", frag_threshold);
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 
 	if (!acx) {
 		ret = -ENOMEM;
@@ -945,7 +933,7 @@ int wl1271_acx_tx_config_options(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "acx tx config options");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 
 	if (!acx) {
 		ret = -ENOMEM;
@@ -973,7 +961,7 @@ int wl12xx_acx_mem_cfg(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "wl1271 mem cfg");
 
-	mem_conf = kzalloc(sizeof(*mem_conf), GFP_KERNEL);
+	mem_conf = kzalloc_obj(*mem_conf);
 	if (!mem_conf) {
 		ret = -ENOMEM;
 		goto out;
@@ -1010,8 +998,7 @@ int wl1271_acx_init_mem_config(struct wl1271 *wl)
 {
 	int ret;
 
-	wl->target_mem_map = kzalloc(sizeof(struct wl1271_acx_mem_map),
-				     GFP_KERNEL);
+	wl->target_mem_map = kzalloc_obj(struct wl1271_acx_mem_map);
 	if (!wl->target_mem_map) {
 		wl1271_error("couldn't allocate target memory map");
 		return -ENOMEM;
@@ -1044,7 +1031,7 @@ int wl1271_acx_init_rx_interrupt(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "wl1271 rx interrupt config");
 
-	rx_conf = kzalloc(sizeof(*rx_conf), GFP_KERNEL);
+	rx_conf = kzalloc_obj(*rx_conf);
 	if (!rx_conf) {
 		ret = -ENOMEM;
 		goto out;
@@ -1078,7 +1065,7 @@ int wl1271_acx_bet_enable(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 	if (enable && wl->conf.conn.bet_enable == CONF_BET_MODE_DISABLE)
 		goto out;
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1107,7 +1094,7 @@ int wl1271_acx_arp_ip_filter(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx arp ip filter, enable: %d", enable);
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1140,7 +1127,7 @@ int wl1271_acx_pm_config(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "acx pm config");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1169,7 +1156,7 @@ int wl1271_acx_keep_alive_mode(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx keep alive mode: %d", enable);
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1197,7 +1184,7 @@ int wl1271_acx_keep_alive_config(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx keep alive config");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1229,7 +1216,7 @@ int wl1271_acx_rssi_snr_trigger(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx rssi snr trigger");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1271,7 +1258,7 @@ int wl1271_acx_rssi_snr_avg_weights(struct wl1271 *wl,
 
 	wl1271_debug(DEBUG_ACX, "acx rssi snr avg weights");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1306,7 +1293,7 @@ int wl1271_acx_set_ht_capabilities(struct wl1271 *wl,
 		     "sta supp: %d sta cap: %d", ht_cap->ht_supported,
 		     ht_cap->cap);
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1352,7 +1339,7 @@ int wl1271_acx_set_ht_information(struct wl1271 *wl,
 
 	wl1271_debug(DEBUG_ACX, "acx ht information setting");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1388,7 +1375,7 @@ int wl12xx_acx_set_ba_initiator_policy(struct wl1271 *wl,
 
 	wl1271_debug(DEBUG_ACX, "acx ba initiator policy");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1416,14 +1403,15 @@ out:
 
 /* setup BA session receiver setting in the FW. */
 int wl12xx_acx_set_ba_receiver_session(struct wl1271 *wl, u8 tid_index,
-				       u16 ssn, bool enable, u8 peer_hlid)
+				       u16 ssn, bool enable, u8 peer_hlid,
+				       u8 win_size)
 {
 	struct wl1271_acx_ba_receiver_setup *acx;
 	int ret;
 
 	wl1271_debug(DEBUG_ACX, "acx ba receiver session setting");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1432,7 +1420,7 @@ int wl12xx_acx_set_ba_receiver_session(struct wl1271 *wl, u8 tid_index,
 	acx->hlid = peer_hlid;
 	acx->tid = tid_index;
 	acx->enable = enable;
-	acx->win_size = wl->conf.ht.rx_ba_win_size;
+	acx->win_size =	win_size;
 	acx->ssn = ssn;
 
 	ret = wlcore_cmd_configure_failsafe(wl, ACX_BA_SESSION_RX_SETUP, acx,
@@ -1462,7 +1450,7 @@ int wl12xx_acx_tsf_info(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 	struct wl12xx_acx_fw_tsf_information *tsf_info;
 	int ret;
 
-	tsf_info = kzalloc(sizeof(*tsf_info), GFP_KERNEL);
+	tsf_info = kzalloc_obj(*tsf_info);
 	if (!tsf_info) {
 		ret = -ENOMEM;
 		goto out;
@@ -1470,8 +1458,8 @@ int wl12xx_acx_tsf_info(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	tsf_info->role_id = wlvif->role_id;
 
-	ret = wl1271_cmd_interrogate(wl, ACX_TSF_INFO,
-				     tsf_info, sizeof(*tsf_info));
+	ret = wl1271_cmd_interrogate(wl, ACX_TSF_INFO, tsf_info,
+				sizeof(struct acx_header), sizeof(*tsf_info));
 	if (ret < 0) {
 		wl1271_warning("acx tsf info interrogate failed");
 		goto out;
@@ -1494,7 +1482,7 @@ int wl1271_acx_ps_rx_streaming(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx ps rx streaming");
 
-	rx_streaming = kzalloc(sizeof(*rx_streaming), GFP_KERNEL);
+	rx_streaming = kzalloc_obj(*rx_streaming);
 	if (!rx_streaming) {
 		ret = -ENOMEM;
 		goto out;
@@ -1541,7 +1529,7 @@ int wl1271_acx_ap_max_tx_retry(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 
 	wl1271_debug(DEBUG_ACX, "acx ap max tx retry");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx)
 		return -ENOMEM;
 
@@ -1566,7 +1554,7 @@ int wl12xx_acx_config_ps(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 
 	wl1271_debug(DEBUG_ACX, "acx config ps");
 
-	config_ps = kzalloc(sizeof(*config_ps), GFP_KERNEL);
+	config_ps = kzalloc_obj(*config_ps);
 	if (!config_ps) {
 		ret = -ENOMEM;
 		goto out;
@@ -1589,18 +1577,20 @@ out:
 	return ret;
 }
 
-int wl1271_acx_set_inconnection_sta(struct wl1271 *wl, u8 *addr)
+int wl1271_acx_set_inconnection_sta(struct wl1271 *wl,
+				    struct wl12xx_vif *wlvif, u8 *addr)
 {
 	struct wl1271_acx_inconnection_sta *acx = NULL;
 	int ret;
 
 	wl1271_debug(DEBUG_ACX, "acx set inconnaction sta %pM", addr);
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx)
 		return -ENOMEM;
 
 	memcpy(acx->addr, addr, ETH_ALEN);
+	acx->role_id = wlvif->role_id;
 
 	ret = wl1271_cmd_configure(wl, ACX_UPDATE_INCONNECTION_STA_LIST,
 				   acx, sizeof(*acx));
@@ -1621,7 +1611,7 @@ int wl1271_acx_fm_coex(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "acx fm coex setting");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1662,7 +1652,7 @@ int wl12xx_acx_set_rate_mgmt_params(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "acx set rate mgmt params");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx)
 		return -ENOMEM;
 
@@ -1704,7 +1694,7 @@ int wl12xx_acx_config_hangover(struct wl1271 *wl)
 
 	wl1271_debug(DEBUG_ACX, "acx config hangover");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1720,7 +1710,7 @@ int wl12xx_acx_config_hangover(struct wl1271 *wl)
 	acx->decrease_delta = conf->decrease_delta;
 	acx->quiet_time = conf->quiet_time;
 	acx->increase_time = conf->increase_time;
-	acx->window_size = acx->window_size;
+	acx->window_size = conf->window_size;
 
 	ret = wl1271_cmd_configure(wl, ACX_CONFIG_HANGOVER, acx,
 				   sizeof(*acx));
@@ -1744,7 +1734,7 @@ int wlcore_acx_average_rssi(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	wl1271_debug(DEBUG_ACX, "acx roaming statistics");
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx) {
 		ret = -ENOMEM;
 		goto out;
@@ -1752,7 +1742,7 @@ int wlcore_acx_average_rssi(struct wl1271 *wl, struct wl12xx_vif *wlvif,
 
 	acx->role_id = wlvif->role_id;
 	ret = wl1271_cmd_interrogate(wl, ACX_ROAMING_STATISTICS_TBL,
-				     acx, sizeof(*acx));
+				     acx, sizeof(*acx), sizeof(*acx));
 	if (ret	< 0) {
 		wl1271_warning("acx roaming statistics failed: %d", ret);
 		ret = -ENOMEM;
@@ -1776,7 +1766,7 @@ int wl1271_acx_default_rx_filter_enable(struct wl1271 *wl, bool enable,
 	wl1271_debug(DEBUG_ACX, "acx default rx filter en: %d act: %d",
 		     enable, action);
 
-	acx = kzalloc(sizeof(*acx), GFP_KERNEL);
+	acx = kzalloc_obj(*acx);
 	if (!acx)
 		return -ENOMEM;
 

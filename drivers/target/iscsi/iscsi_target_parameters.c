@@ -1,31 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*******************************************************************************
  * This file contains main functions related to iSCSI Parameter negotiation.
  *
- * \u00a9 Copyright 2007-2011 RisingTide Systems LLC.
- *
- * Licensed to the Linux Foundation under the General Public License (GPL) version 2.
+ * (c) Copyright 2007-2013 Datera, Inc.
  *
  * Author: Nicholas A. Bellinger <nab@linux-iscsi.org>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  ******************************************************************************/
 
 #include <linux/slab.h>
-
-#include "iscsi_target_core.h"
+#include <linux/uio.h> /* struct kvec */
+#include <target/iscsi/iscsi_target_core.h>
 #include "iscsi_target_util.h"
 #include "iscsi_target_parameters.h"
 
 int iscsi_login_rx_data(
-	struct iscsi_conn *conn,
+	struct iscsit_conn *conn,
 	char *buf,
 	int length)
 {
@@ -35,13 +25,6 @@ int iscsi_login_rx_data(
 	memset(&iov, 0, sizeof(struct kvec));
 	iov.iov_len	= length;
 	iov.iov_base	= buf;
-
-	/*
-	 * Initial Marker-less Interval.
-	 * Add the values regardless of IFMarker/OFMarker, considering
-	 * it may not be negoitated yet.
-	 */
-	conn->of_marker += length;
 
 	rx_got = rx_data(conn, &iov, 1, length);
 	if (rx_got != length) {
@@ -54,7 +37,7 @@ int iscsi_login_rx_data(
 }
 
 int iscsi_login_tx_data(
-	struct iscsi_conn *conn,
+	struct iscsit_conn *conn,
 	char *pdu_buf,
 	char *text_buf,
 	int text_length)
@@ -74,13 +57,6 @@ int iscsi_login_tx_data(
 		iov_cnt++;
 	}
 
-	/*
-	 * Initial Marker-less Interval.
-	 * Add the values regardless of IFMarker/OFMarker, considering
-	 * it may not be negoitated yet.
-	 */
-	conn->if_marker += length;
-
 	tx_sent = tx_data(conn, &iov[0], iov_cnt, length);
 	if (tx_sent != length) {
 		pr_err("tx_data returned %d, expecting %d.\n",
@@ -91,67 +67,13 @@ int iscsi_login_tx_data(
 	return 0;
 }
 
-void iscsi_dump_conn_ops(struct iscsi_conn_ops *conn_ops)
-{
-	pr_debug("HeaderDigest: %s\n", (conn_ops->HeaderDigest) ?
-				"CRC32C" : "None");
-	pr_debug("DataDigest: %s\n", (conn_ops->DataDigest) ?
-				"CRC32C" : "None");
-	pr_debug("MaxRecvDataSegmentLength: %u\n",
-				conn_ops->MaxRecvDataSegmentLength);
-	pr_debug("OFMarker: %s\n", (conn_ops->OFMarker) ? "Yes" : "No");
-	pr_debug("IFMarker: %s\n", (conn_ops->IFMarker) ? "Yes" : "No");
-	if (conn_ops->OFMarker)
-		pr_debug("OFMarkInt: %u\n", conn_ops->OFMarkInt);
-	if (conn_ops->IFMarker)
-		pr_debug("IFMarkInt: %u\n", conn_ops->IFMarkInt);
-}
-
-void iscsi_dump_sess_ops(struct iscsi_sess_ops *sess_ops)
-{
-	pr_debug("InitiatorName: %s\n", sess_ops->InitiatorName);
-	pr_debug("InitiatorAlias: %s\n", sess_ops->InitiatorAlias);
-	pr_debug("TargetName: %s\n", sess_ops->TargetName);
-	pr_debug("TargetAlias: %s\n", sess_ops->TargetAlias);
-	pr_debug("TargetPortalGroupTag: %hu\n",
-			sess_ops->TargetPortalGroupTag);
-	pr_debug("MaxConnections: %hu\n", sess_ops->MaxConnections);
-	pr_debug("InitialR2T: %s\n",
-			(sess_ops->InitialR2T) ? "Yes" : "No");
-	pr_debug("ImmediateData: %s\n", (sess_ops->ImmediateData) ?
-			"Yes" : "No");
-	pr_debug("MaxBurstLength: %u\n", sess_ops->MaxBurstLength);
-	pr_debug("FirstBurstLength: %u\n", sess_ops->FirstBurstLength);
-	pr_debug("DefaultTime2Wait: %hu\n", sess_ops->DefaultTime2Wait);
-	pr_debug("DefaultTime2Retain: %hu\n",
-			sess_ops->DefaultTime2Retain);
-	pr_debug("MaxOutstandingR2T: %hu\n",
-			sess_ops->MaxOutstandingR2T);
-	pr_debug("DataPDUInOrder: %s\n",
-			(sess_ops->DataPDUInOrder) ? "Yes" : "No");
-	pr_debug("DataSequenceInOrder: %s\n",
-			(sess_ops->DataSequenceInOrder) ? "Yes" : "No");
-	pr_debug("ErrorRecoveryLevel: %hu\n",
-			sess_ops->ErrorRecoveryLevel);
-	pr_debug("SessionType: %s\n", (sess_ops->SessionType) ?
-			"Discovery" : "Normal");
-}
-
-void iscsi_print_params(struct iscsi_param_list *param_list)
-{
-	struct iscsi_param *param;
-
-	list_for_each_entry(param, &param_list->param_list, p_list)
-		pr_debug("%s: %s\n", param->name, param->value);
-}
-
 static struct iscsi_param *iscsi_set_default_param(struct iscsi_param_list *param_list,
 		char *name, char *value, u8 phase, u8 scope, u8 sender,
 		u16 type_range, u8 use)
 {
 	struct iscsi_param *param = NULL;
 
-	param = kzalloc(sizeof(struct iscsi_param), GFP_KERNEL);
+	param = kzalloc_obj(struct iscsi_param);
 	if (!param) {
 		pr_err("Unable to allocate memory for parameter.\n");
 		goto out;
@@ -196,10 +118,6 @@ static struct iscsi_param *iscsi_set_default_param(struct iscsi_param_list *para
 	case TYPERANGE_DIGEST:
 		param->type = TYPE_VALUE_LIST | TYPE_STRING;
 		break;
-	case TYPERANGE_MARKINT:
-		param->type = TYPE_NUMBER_RANGE;
-		param->type_range |= TYPERANGE_1_TO_65535;
-		break;
 	case TYPERANGE_ISCSINAME:
 	case TYPERANGE_SESSIONTYPE:
 	case TYPERANGE_TARGETADDRESS:
@@ -230,11 +148,11 @@ int iscsi_create_default_params(struct iscsi_param_list **param_list_ptr)
 	struct iscsi_param *param = NULL;
 	struct iscsi_param_list *pl;
 
-	pl = kzalloc(sizeof(struct iscsi_param_list), GFP_KERNEL);
+	pl = kzalloc_obj(struct iscsi_param_list);
 	if (!pl) {
 		pr_err("Unable to allocate memory for"
 				" struct iscsi_param_list.\n");
-		return -1 ;
+		return -ENOMEM;
 	}
 	INIT_LIST_HEAD(&pl->param_list);
 	INIT_LIST_HEAD(&pl->extra_response_list);
@@ -424,15 +342,16 @@ int iscsi_create_default_params(struct iscsi_param_list **param_list_ptr)
 
 	param = iscsi_set_default_param(pl, IFMARKINT, INITIAL_IFMARKINT,
 			PHASE_OPERATIONAL, SCOPE_CONNECTION_ONLY, SENDER_BOTH,
-			TYPERANGE_MARKINT, USE_INITIAL_ONLY);
+			TYPERANGE_UTF8, USE_INITIAL_ONLY);
 	if (!param)
 		goto out;
 
 	param = iscsi_set_default_param(pl, OFMARKINT, INITIAL_OFMARKINT,
 			PHASE_OPERATIONAL, SCOPE_CONNECTION_ONLY, SENDER_BOTH,
-			TYPERANGE_MARKINT, USE_INITIAL_ONLY);
+			TYPERANGE_UTF8, USE_INITIAL_ONLY);
 	if (!param)
 		goto out;
+
 	/*
 	 * Extra parameters for ISER from RFC-5046
 	 */
@@ -476,10 +395,10 @@ int iscsi_set_keys_to_negotiate(
 		if (!strcmp(param->name, AUTHMETHOD)) {
 			SET_PSTATE_NEGOTIATE(param);
 		} else if (!strcmp(param->name, HEADERDIGEST)) {
-			if (iser == false)
+			if (!iser)
 				SET_PSTATE_NEGOTIATE(param);
 		} else if (!strcmp(param->name, DATADIGEST)) {
-			if (iser == false)
+			if (!iser)
 				SET_PSTATE_NEGOTIATE(param);
 		} else if (!strcmp(param->name, MAXCONNECTIONS)) {
 			SET_PSTATE_NEGOTIATE(param);
@@ -499,7 +418,7 @@ int iscsi_set_keys_to_negotiate(
 		} else if (!strcmp(param->name, IMMEDIATEDATA)) {
 			SET_PSTATE_NEGOTIATE(param);
 		} else if (!strcmp(param->name, MAXRECVDATASEGMENTLENGTH)) {
-			if (iser == false)
+			if (!iser)
 				SET_PSTATE_NEGOTIATE(param);
 		} else if (!strcmp(param->name, MAXXMITDATASEGMENTLENGTH)) {
 			continue;
@@ -522,21 +441,21 @@ int iscsi_set_keys_to_negotiate(
 		} else if (!strcmp(param->name, SESSIONTYPE)) {
 			SET_PSTATE_NEGOTIATE(param);
 		} else if (!strcmp(param->name, IFMARKER)) {
-			SET_PSTATE_NEGOTIATE(param);
+			SET_PSTATE_REJECT(param);
 		} else if (!strcmp(param->name, OFMARKER)) {
-			SET_PSTATE_NEGOTIATE(param);
+			SET_PSTATE_REJECT(param);
 		} else if (!strcmp(param->name, IFMARKINT)) {
-			SET_PSTATE_NEGOTIATE(param);
+			SET_PSTATE_REJECT(param);
 		} else if (!strcmp(param->name, OFMARKINT)) {
-			SET_PSTATE_NEGOTIATE(param);
+			SET_PSTATE_REJECT(param);
 		} else if (!strcmp(param->name, RDMAEXTENSIONS)) {
-			if (iser == true)
+			if (iser)
 				SET_PSTATE_NEGOTIATE(param);
 		} else if (!strcmp(param->name, INITIATORRECVDATASEGMENTLENGTH)) {
-			if (iser == true)
+			if (iser)
 				SET_PSTATE_NEGOTIATE(param);
 		} else if (!strcmp(param->name, TARGETRECVDATASEGMENTLENGTH)) {
-			if (iser == true)
+			if (iser)
 				SET_PSTATE_NEGOTIATE(param);
 		}
 	}
@@ -600,10 +519,10 @@ int iscsi_copy_param_list(
 	struct iscsi_param *new_param = NULL;
 	struct iscsi_param_list *param_list = NULL;
 
-	param_list = kzalloc(sizeof(struct iscsi_param_list), GFP_KERNEL);
+	param_list = kzalloc_obj(struct iscsi_param_list);
 	if (!param_list) {
 		pr_err("Unable to allocate memory for struct iscsi_param_list.\n");
-		goto err_out;
+		return -ENOMEM;
 	}
 	INIT_LIST_HEAD(&param_list->param_list);
 	INIT_LIST_HEAD(&param_list->extra_response_list);
@@ -616,7 +535,7 @@ int iscsi_copy_param_list(
 				continue;
 		}
 
-		new_param = kzalloc(sizeof(struct iscsi_param), GFP_KERNEL);
+		new_param = kzalloc_obj(struct iscsi_param);
 		if (!new_param) {
 			pr_err("Unable to allocate memory for struct iscsi_param.\n");
 			goto err_out;
@@ -654,7 +573,7 @@ int iscsi_copy_param_list(
 
 err_out:
 	iscsi_release_param_list(param_list);
-	return -1;
+	return -ENOMEM;
 }
 
 static void iscsi_release_extra_responses(struct iscsi_param_list *param_list)
@@ -705,6 +624,7 @@ struct iscsi_param *iscsi_find_param_from_key(
 	pr_err("Unable to locate key \"%s\".\n", key);
 	return NULL;
 }
+EXPORT_SYMBOL(iscsi_find_param_from_key);
 
 int iscsi_extract_key_value(char *textbuf, char **key, char **value)
 {
@@ -750,16 +670,16 @@ static int iscsi_add_notunderstood_response(
 		return -1;
 	}
 
-	extra_response = kzalloc(sizeof(struct iscsi_extra_response), GFP_KERNEL);
+	extra_response = kzalloc_obj(struct iscsi_extra_response);
 	if (!extra_response) {
 		pr_err("Unable to allocate memory for"
 			" struct iscsi_extra_response.\n");
-		return -1;
+		return -ENOMEM;
 	}
 	INIT_LIST_HEAD(&extra_response->er_list);
 
-	strlcpy(extra_response->key, key, sizeof(extra_response->key));
-	strlcpy(extra_response->value, NOTUNDERSTOOD,
+	strscpy(extra_response->key, key, sizeof(extra_response->key));
+	strscpy(extra_response->value, NOTUNDERSTOOD,
 		sizeof(extra_response->value));
 
 	list_add_tail(&extra_response->er_list,
@@ -789,7 +709,8 @@ static int iscsi_check_for_auth_key(char *key)
 	return 0;
 }
 
-static void iscsi_check_proposer_for_optional_reply(struct iscsi_param *param)
+static void iscsi_check_proposer_for_optional_reply(struct iscsi_param *param,
+						    bool keys_workaround)
 {
 	if (IS_TYPE_BOOL_AND(param)) {
 		if (!strcmp(param->value, NO))
@@ -797,35 +718,31 @@ static void iscsi_check_proposer_for_optional_reply(struct iscsi_param *param)
 	} else if (IS_TYPE_BOOL_OR(param)) {
 		if (!strcmp(param->value, YES))
 			SET_PSTATE_REPLY_OPTIONAL(param);
-		 /*
-		  * Required for gPXE iSCSI boot client
-		  */
-		if (!strcmp(param->name, IMMEDIATEDATA))
-			SET_PSTATE_REPLY_OPTIONAL(param);
+
+		if (keys_workaround) {
+			/*
+			 * Required for gPXE iSCSI boot client
+			 */
+			if (!strcmp(param->name, IMMEDIATEDATA))
+				SET_PSTATE_REPLY_OPTIONAL(param);
+		}
 	} else if (IS_TYPE_NUMBER(param)) {
 		if (!strcmp(param->name, MAXRECVDATASEGMENTLENGTH))
 			SET_PSTATE_REPLY_OPTIONAL(param);
-		/*
-		 * The GlobalSAN iSCSI Initiator for MacOSX does
-		 * not respond to MaxBurstLength, FirstBurstLength,
-		 * DefaultTime2Wait or DefaultTime2Retain parameter keys.
-		 * So, we set them to 'reply optional' here, and assume the
-		 * the defaults from iscsi_parameters.h if the initiator
-		 * is not RFC compliant and the keys are not negotiated.
-		 */
-		if (!strcmp(param->name, MAXBURSTLENGTH))
-			SET_PSTATE_REPLY_OPTIONAL(param);
-		if (!strcmp(param->name, FIRSTBURSTLENGTH))
-			SET_PSTATE_REPLY_OPTIONAL(param);
-		if (!strcmp(param->name, DEFAULTTIME2WAIT))
-			SET_PSTATE_REPLY_OPTIONAL(param);
-		if (!strcmp(param->name, DEFAULTTIME2RETAIN))
-			SET_PSTATE_REPLY_OPTIONAL(param);
-		/*
-		 * Required for gPXE iSCSI boot client
-		 */
-		if (!strcmp(param->name, MAXCONNECTIONS))
-			SET_PSTATE_REPLY_OPTIONAL(param);
+
+		if (keys_workaround) {
+			/*
+			 * Required for Mellanox Flexboot PXE boot ROM
+			 */
+			if (!strcmp(param->name, FIRSTBURSTLENGTH))
+				SET_PSTATE_REPLY_OPTIONAL(param);
+
+			/*
+			 * Required for gPXE iSCSI boot client
+			 */
+			if (!strcmp(param->name, MAXCONNECTIONS))
+				SET_PSTATE_REPLY_OPTIONAL(param);
+		}
 	} else if (IS_PHASE_DECLARATIVE(param))
 		SET_PSTATE_REPLY_OPTIONAL(param);
 }
@@ -908,91 +825,6 @@ static int iscsi_check_numerical_value(struct iscsi_param *param, char *value_pt
 	return 0;
 }
 
-static int iscsi_check_numerical_range_value(struct iscsi_param *param, char *value)
-{
-	char *left_val_ptr = NULL, *right_val_ptr = NULL;
-	char *tilde_ptr = NULL;
-	u32 left_val, right_val, local_left_val;
-
-	if (strcmp(param->name, IFMARKINT) &&
-	    strcmp(param->name, OFMARKINT)) {
-		pr_err("Only parameters \"%s\" or \"%s\" may contain a"
-		       " numerical range value.\n", IFMARKINT, OFMARKINT);
-		return -1;
-	}
-
-	if (IS_PSTATE_PROPOSER(param))
-		return 0;
-
-	tilde_ptr = strchr(value, '~');
-	if (!tilde_ptr) {
-		pr_err("Unable to locate numerical range indicator"
-			" \"~\" for \"%s\".\n", param->name);
-		return -1;
-	}
-	*tilde_ptr = '\0';
-
-	left_val_ptr = value;
-	right_val_ptr = value + strlen(left_val_ptr) + 1;
-
-	if (iscsi_check_numerical_value(param, left_val_ptr) < 0)
-		return -1;
-	if (iscsi_check_numerical_value(param, right_val_ptr) < 0)
-		return -1;
-
-	left_val = simple_strtoul(left_val_ptr, NULL, 0);
-	right_val = simple_strtoul(right_val_ptr, NULL, 0);
-	*tilde_ptr = '~';
-
-	if (right_val < left_val) {
-		pr_err("Numerical range for parameter \"%s\" contains"
-			" a right value which is less than the left.\n",
-				param->name);
-		return -1;
-	}
-
-	/*
-	 * For now,  enforce reasonable defaults for [I,O]FMarkInt.
-	 */
-	tilde_ptr = strchr(param->value, '~');
-	if (!tilde_ptr) {
-		pr_err("Unable to locate numerical range indicator"
-			" \"~\" for \"%s\".\n", param->name);
-		return -1;
-	}
-	*tilde_ptr = '\0';
-
-	left_val_ptr = param->value;
-	right_val_ptr = param->value + strlen(left_val_ptr) + 1;
-
-	local_left_val = simple_strtoul(left_val_ptr, NULL, 0);
-	*tilde_ptr = '~';
-
-	if (param->set_param) {
-		if ((left_val < local_left_val) ||
-		    (right_val < local_left_val)) {
-			pr_err("Passed value range \"%u~%u\" is below"
-				" minimum left value \"%u\" for key \"%s\","
-				" rejecting.\n", left_val, right_val,
-				local_left_val, param->name);
-			return -1;
-		}
-	} else {
-		if ((left_val < local_left_val) &&
-		    (right_val < local_left_val)) {
-			pr_err("Received value range \"%u~%u\" is"
-				" below minimum left value \"%u\" for key"
-				" \"%s\", rejecting.\n", left_val, right_val,
-				local_left_val, param->name);
-			SET_PSTATE_REJECT(param);
-			if (iscsi_update_param_value(param, REJECT) < 0)
-				return -1;
-		}
-	}
-
-	return 0;
-}
-
 static int iscsi_check_string_or_list_value(struct iscsi_param *param, char *value)
 {
 	if (IS_PSTATE_PROPOSER(param))
@@ -1027,33 +859,6 @@ static int iscsi_check_string_or_list_value(struct iscsi_param *param, char *val
 	}
 
 	return 0;
-}
-
-/*
- *	This function is used to pick a value range number,  currently just
- *	returns the lesser of both right values.
- */
-static char *iscsi_get_value_from_number_range(
-	struct iscsi_param *param,
-	char *value)
-{
-	char *end_ptr, *tilde_ptr1 = NULL, *tilde_ptr2 = NULL;
-	u32 acceptor_right_value, proposer_right_value;
-
-	tilde_ptr1 = strchr(value, '~');
-	if (!tilde_ptr1)
-		return NULL;
-	*tilde_ptr1++ = '\0';
-	proposer_right_value = simple_strtoul(tilde_ptr1, &end_ptr, 0);
-
-	tilde_ptr2 = strchr(param->value, '~');
-	if (!tilde_ptr2)
-		return NULL;
-	*tilde_ptr2++ = '\0';
-	acceptor_right_value = simple_strtoul(tilde_ptr2, &end_ptr, 0);
-
-	return (acceptor_right_value >= proposer_right_value) ?
-		tilde_ptr1 : tilde_ptr2;
 }
 
 static char *iscsi_check_valuelist_for_support(
@@ -1102,10 +907,10 @@ out:
 }
 
 static int iscsi_check_acceptor_state(struct iscsi_param *param, char *value,
-				struct iscsi_conn *conn)
+				struct iscsit_conn *conn)
 {
 	u8 acceptor_boolean_value = 0, proposer_boolean_value = 0;
-	char *negoitated_value = NULL;
+	char *negotiated_value = NULL;
 
 	if (IS_PSTATE_ACCEPTOR(param)) {
 		pr_err("Received key \"%s\" twice, protocol error.\n",
@@ -1182,7 +987,7 @@ static int iscsi_check_acceptor_state(struct iscsi_param *param, char *value,
 			unsigned long long tmp;
 			int rc;
 
-			rc = strict_strtoull(param->value, 0, &tmp);
+			rc = kstrtoull(param->value, 0, &tmp);
 			if (rc < 0)
 				return -1;
 
@@ -1205,24 +1010,16 @@ static int iscsi_check_acceptor_state(struct iscsi_param *param, char *value,
 			pr_debug("Updated %s to target MXDSL value: %s\n",
 					param->name, param->value);
 		}
-
-	} else if (IS_TYPE_NUMBER_RANGE(param)) {
-		negoitated_value = iscsi_get_value_from_number_range(
-					param, value);
-		if (!negoitated_value)
-			return -1;
-		if (iscsi_update_param_value(param, negoitated_value) < 0)
-			return -1;
 	} else if (IS_TYPE_VALUE_LIST(param)) {
-		negoitated_value = iscsi_check_valuelist_for_support(
+		negotiated_value = iscsi_check_valuelist_for_support(
 					param, value);
-		if (!negoitated_value) {
+		if (!negotiated_value) {
 			pr_err("Proposer's value list \"%s\" contains"
 				" no valid values from Acceptor's value list"
 				" \"%s\".\n", value, param->value);
 			return -1;
 		}
-		if (iscsi_update_param_value(param, negoitated_value) < 0)
+		if (iscsi_update_param_value(param, negotiated_value) < 0)
 			return -1;
 	} else if (IS_PHASE_DECLARATIVE(param)) {
 		if (iscsi_update_param_value(param, value) < 0)
@@ -1241,47 +1038,7 @@ static int iscsi_check_proposer_state(struct iscsi_param *param, char *value)
 		return -1;
 	}
 
-	if (IS_TYPE_NUMBER_RANGE(param)) {
-		u32 left_val = 0, right_val = 0, recieved_value = 0;
-		char *left_val_ptr = NULL, *right_val_ptr = NULL;
-		char *tilde_ptr = NULL;
-
-		if (!strcmp(value, IRRELEVANT) || !strcmp(value, REJECT)) {
-			if (iscsi_update_param_value(param, value) < 0)
-				return -1;
-			return 0;
-		}
-
-		tilde_ptr = strchr(value, '~');
-		if (tilde_ptr) {
-			pr_err("Illegal \"~\" in response for \"%s\".\n",
-					param->name);
-			return -1;
-		}
-		tilde_ptr = strchr(param->value, '~');
-		if (!tilde_ptr) {
-			pr_err("Unable to locate numerical range"
-				" indicator \"~\" for \"%s\".\n", param->name);
-			return -1;
-		}
-		*tilde_ptr = '\0';
-
-		left_val_ptr = param->value;
-		right_val_ptr = param->value + strlen(left_val_ptr) + 1;
-		left_val = simple_strtoul(left_val_ptr, NULL, 0);
-		right_val = simple_strtoul(right_val_ptr, NULL, 0);
-		recieved_value = simple_strtoul(value, NULL, 0);
-
-		*tilde_ptr = '~';
-
-		if ((recieved_value < left_val) ||
-		    (recieved_value > right_val)) {
-			pr_err("Illegal response \"%s=%u\", value must"
-				" be between %u and %u.\n", param->name,
-				recieved_value, left_val, right_val);
-			return -1;
-		}
-	} else if (IS_TYPE_VALUE_LIST(param)) {
+	if (IS_TYPE_VALUE_LIST(param)) {
 		char *comma_ptr = NULL, *tmp_ptr = NULL;
 
 		comma_ptr = strchr(value, ',');
@@ -1362,9 +1119,6 @@ static int iscsi_check_value(struct iscsi_param *param, char *value)
 				return -1;
 		} else if (IS_TYPE_NUMBER(param)) {
 			if (iscsi_check_numerical_value(param, value) < 0)
-				return -1;
-		} else if (IS_TYPE_NUMBER_RANGE(param)) {
-			if (iscsi_check_numerical_range_value(param, value) < 0)
 				return -1;
 		} else if (IS_TYPE_STRING(param) || IS_TYPE_VALUE_LIST(param)) {
 			if (iscsi_check_string_or_list_value(param, value) < 0)
@@ -1460,18 +1214,20 @@ static struct iscsi_param *iscsi_check_key(
 		return param;
 
 	if (!(param->phase & phase)) {
-		pr_err("Key \"%s\" may not be negotiated during ",
-				param->name);
+		char *phase_name;
+
 		switch (phase) {
 		case PHASE_SECURITY:
-			pr_debug("Security phase.\n");
+			phase_name = "Security";
 			break;
 		case PHASE_OPERATIONAL:
-			pr_debug("Operational phase.\n");
+			phase_name = "Operational";
 			break;
 		default:
-			pr_debug("Unknown phase.\n");
+			phase_name = "Unknown";
 		}
+		pr_err("Key \"%s\" may not be negotiated during %s phase.\n",
+				param->name, phase_name);
 		return NULL;
 	}
 
@@ -1485,8 +1241,6 @@ static int iscsi_enforce_integrity_rules(
 	char *tmpptr;
 	u8 DataSequenceInOrder = 0;
 	u8 ErrorRecoveryLevel = 0, SessionType = 0;
-	u8 IFMarker = 0, OFMarker = 0;
-	u8 IFMarkInt_Reject = 1, OFMarkInt_Reject = 1;
 	u32 FirstBurstLength = 0, MaxBurstLength = 0;
 	struct iscsi_param *param = NULL;
 
@@ -1505,28 +1259,12 @@ static int iscsi_enforce_integrity_rules(
 		if (!strcmp(param->name, MAXBURSTLENGTH))
 			MaxBurstLength = simple_strtoul(param->value,
 					&tmpptr, 0);
-		if (!strcmp(param->name, IFMARKER))
-			if (!strcmp(param->value, YES))
-				IFMarker = 1;
-		if (!strcmp(param->name, OFMARKER))
-			if (!strcmp(param->value, YES))
-				OFMarker = 1;
-		if (!strcmp(param->name, IFMARKINT))
-			if (!strcmp(param->value, REJECT))
-				IFMarkInt_Reject = 1;
-		if (!strcmp(param->name, OFMARKINT))
-			if (!strcmp(param->value, REJECT))
-				OFMarkInt_Reject = 1;
 	}
 
 	list_for_each_entry(param, &param_list->param_list, p_list) {
 		if (!(param->phase & phase))
 			continue;
-		if (!SessionType && (!IS_PSTATE_ACCEPTOR(param) &&
-		     (strcmp(param->name, IFMARKER) &&
-		      strcmp(param->name, OFMARKER) &&
-		      strcmp(param->name, IFMARKINT) &&
-		      strcmp(param->name, OFMARKINT))))
+		if (!SessionType && !IS_PSTATE_ACCEPTOR(param))
 			continue;
 		if (!strcmp(param->name, MAXOUTSTANDINGR2T) &&
 		    DataSequenceInOrder && (ErrorRecoveryLevel > 0)) {
@@ -1558,38 +1296,6 @@ static int iscsi_enforce_integrity_rules(
 					param->name, param->value);
 			}
 		}
-		if (!strcmp(param->name, IFMARKER) && IFMarkInt_Reject) {
-			if (iscsi_update_param_value(param, NO) < 0)
-				return -1;
-			IFMarker = 0;
-			pr_debug("Reset \"%s\" to \"%s\".\n",
-					param->name, param->value);
-		}
-		if (!strcmp(param->name, OFMARKER) && OFMarkInt_Reject) {
-			if (iscsi_update_param_value(param, NO) < 0)
-				return -1;
-			OFMarker = 0;
-			pr_debug("Reset \"%s\" to \"%s\".\n",
-					 param->name, param->value);
-		}
-		if (!strcmp(param->name, IFMARKINT) && !IFMarker) {
-			if (!strcmp(param->value, REJECT))
-				continue;
-			param->state &= ~PSTATE_NEGOTIATE;
-			if (iscsi_update_param_value(param, IRRELEVANT) < 0)
-				return -1;
-			pr_debug("Reset \"%s\" to \"%s\".\n",
-					param->name, param->value);
-		}
-		if (!strcmp(param->name, OFMARKINT) && !OFMarker) {
-			if (!strcmp(param->value, REJECT))
-				continue;
-			param->state &= ~PSTATE_NEGOTIATE;
-			if (iscsi_update_param_value(param, IRRELEVANT) < 0)
-				return -1;
-			pr_debug("Reset \"%s\" to \"%s\".\n",
-					param->name, param->value);
-		}
 	}
 
 	return 0;
@@ -1600,19 +1306,17 @@ int iscsi_decode_text_input(
 	u8 sender,
 	char *textbuf,
 	u32 length,
-	struct iscsi_conn *conn)
+	struct iscsit_conn *conn)
 {
 	struct iscsi_param_list *param_list = conn->param_list;
 	char *tmpbuf, *start = NULL, *end = NULL;
 
-	tmpbuf = kzalloc(length + 1, GFP_KERNEL);
+	tmpbuf = kmemdup_nul(textbuf, length, GFP_KERNEL);
 	if (!tmpbuf) {
-		pr_err("Unable to allocate memory for tmpbuf.\n");
-		return -1;
+		pr_err("Unable to allocate %u + 1 bytes for tmpbuf.\n", length);
+		return -ENOMEM;
 	}
 
-	memcpy(tmpbuf, textbuf, length);
-	tmpbuf[length] = '\0';
 	start = tmpbuf;
 	end = (start + length);
 
@@ -1620,10 +1324,8 @@ int iscsi_decode_text_input(
 		char *key, *value;
 		struct iscsi_param *param;
 
-		if (iscsi_extract_key_value(start, &key, &value) < 0) {
-			kfree(tmpbuf);
-			return -1;
-		}
+		if (iscsi_extract_key_value(start, &key, &value) < 0)
+			goto free_buffer;
 
 		pr_debug("Got key: %s=%s\n", key, value);
 
@@ -1636,37 +1338,60 @@ int iscsi_decode_text_input(
 
 		param = iscsi_check_key(key, phase, sender, param_list);
 		if (!param) {
-			if (iscsi_add_notunderstood_response(key,
-					value, param_list) < 0) {
-				kfree(tmpbuf);
-				return -1;
-			}
+			if (iscsi_add_notunderstood_response(key, value,
+							     param_list) < 0)
+				goto free_buffer;
+
 			start += strlen(key) + strlen(value) + 2;
 			continue;
 		}
-		if (iscsi_check_value(param, value) < 0) {
-			kfree(tmpbuf);
-			return -1;
-		}
+		if (iscsi_check_value(param, value) < 0)
+			goto free_buffer;
 
 		start += strlen(key) + strlen(value) + 2;
 
 		if (IS_PSTATE_PROPOSER(param)) {
-			if (iscsi_check_proposer_state(param, value) < 0) {
-				kfree(tmpbuf);
-				return -1;
-			}
+			if (iscsi_check_proposer_state(param, value) < 0)
+				goto free_buffer;
+
 			SET_PSTATE_RESPONSE_GOT(param);
 		} else {
-			if (iscsi_check_acceptor_state(param, value, conn) < 0) {
-				kfree(tmpbuf);
-				return -1;
-			}
+			if (iscsi_check_acceptor_state(param, value, conn) < 0)
+				goto free_buffer;
+
 			SET_PSTATE_ACCEPTOR(param);
 		}
 	}
 
 	kfree(tmpbuf);
+	return 0;
+
+free_buffer:
+	kfree(tmpbuf);
+	return -1;
+}
+
+/*
+ * Append "key=value" plus a trailing NUL into @textbuf at *@length.
+ * Returns 0 on success and advances *@length, or -EMSGSIZE if the
+ * record (including the NUL) would not fit in the remaining buffer.
+ */
+static int iscsi_encode_text_record(char *textbuf, u32 *length,
+				    u32 textbuf_size,
+				    const char *key, const char *value)
+{
+	int n;
+	u32 avail;
+
+	if (*length >= textbuf_size)
+		return -EMSGSIZE;
+
+	avail = textbuf_size - *length;
+	n = snprintf(textbuf + *length, avail, "%s=%s", key, value);
+	if (n < 0 || (u32)n + 1 > avail)
+		return -EMSGSIZE;
+
+	*length += n + 1;
 	return 0;
 }
 
@@ -1675,13 +1400,13 @@ int iscsi_encode_text_output(
 	u8 sender,
 	char *textbuf,
 	u32 *length,
-	struct iscsi_param_list *param_list)
+	u32 textbuf_size,
+	struct iscsi_param_list *param_list,
+	bool keys_workaround)
 {
-	char *output_buf = NULL;
 	struct iscsi_extra_response *er;
 	struct iscsi_param *param;
-
-	output_buf = textbuf + *length;
+	int ret;
 
 	if (iscsi_enforce_integrity_rules(phase, param_list) < 0)
 		return -1;
@@ -1693,10 +1418,12 @@ int iscsi_encode_text_output(
 		    !IS_PSTATE_RESPONSE_SENT(param) &&
 		    !IS_PSTATE_REPLY_OPTIONAL(param) &&
 		    (param->phase & phase)) {
-			*length += sprintf(output_buf, "%s=%s",
-				param->name, param->value);
-			*length += 1;
-			output_buf = textbuf + *length;
+			ret = iscsi_encode_text_record(textbuf, length,
+						       textbuf_size,
+						       param->name,
+						       param->value);
+			if (ret < 0)
+				goto err_overflow;
 			SET_PSTATE_RESPONSE_SENT(param);
 			pr_debug("Sending key: %s=%s\n",
 				param->name, param->value);
@@ -1706,26 +1433,36 @@ int iscsi_encode_text_output(
 		    !IS_PSTATE_ACCEPTOR(param) &&
 		    !IS_PSTATE_PROPOSER(param) &&
 		    (param->phase & phase)) {
-			*length += sprintf(output_buf, "%s=%s",
-				param->name, param->value);
-			*length += 1;
-			output_buf = textbuf + *length;
+			ret = iscsi_encode_text_record(textbuf, length,
+						       textbuf_size,
+						       param->name,
+						       param->value);
+			if (ret < 0)
+				goto err_overflow;
 			SET_PSTATE_PROPOSER(param);
-			iscsi_check_proposer_for_optional_reply(param);
+			iscsi_check_proposer_for_optional_reply(param,
+							        keys_workaround);
 			pr_debug("Sending key: %s=%s\n",
 				param->name, param->value);
 		}
 	}
 
 	list_for_each_entry(er, &param_list->extra_response_list, er_list) {
-		*length += sprintf(output_buf, "%s=%s", er->key, er->value);
-		*length += 1;
-		output_buf = textbuf + *length;
+		ret = iscsi_encode_text_record(textbuf, length, textbuf_size,
+					       er->key, er->value);
+		if (ret < 0)
+			goto err_overflow;
 		pr_debug("Sending key: %s=%s\n", er->key, er->value);
 	}
 	iscsi_release_extra_responses(param_list);
 
 	return 0;
+
+err_overflow:
+	pr_err("iSCSI login response buffer (%u bytes) exhausted, dropping login.\n",
+	       textbuf_size);
+	iscsi_release_extra_responses(param_list);
+	return -1;
 }
 
 int iscsi_check_negotiated_keys(struct iscsi_param_list *param_list)
@@ -1799,9 +1536,6 @@ void iscsi_set_connection_parameters(
 		 * this key is not sent over the wire.
 		 */
 		if (!strcmp(param->name, MAXXMITDATASEGMENTLENGTH)) {
-			if (param_list->iser == true)
-				continue;
-
 			ops->MaxXmitDataSegmentLength =
 				simple_strtoul(param->value, &tmpptr, 0);
 			pr_debug("MaxXmitDataSegmentLength:     %s\n",
@@ -1829,24 +1563,6 @@ void iscsi_set_connection_parameters(
 			 */
 			pr_debug("MaxRecvDataSegmentLength:     %u\n",
 				ops->MaxRecvDataSegmentLength);
-		} else if (!strcmp(param->name, OFMARKER)) {
-			ops->OFMarker = !strcmp(param->value, YES);
-			pr_debug("OFMarker:                     %s\n",
-				param->value);
-		} else if (!strcmp(param->name, IFMARKER)) {
-			ops->IFMarker = !strcmp(param->value, YES);
-			pr_debug("IFMarker:                     %s\n",
-				param->value);
-		} else if (!strcmp(param->name, OFMARKINT)) {
-			ops->OFMarkInt =
-				simple_strtoul(param->value, &tmpptr, 0);
-			pr_debug("OFMarkInt:                    %s\n",
-				param->value);
-		} else if (!strcmp(param->name, IFMARKINT)) {
-			ops->IFMarkInt =
-				simple_strtoul(param->value, &tmpptr, 0);
-			pr_debug("IFMarkInt:                    %s\n",
-				param->value);
 		} else if (!strcmp(param->name, INITIATORRECVDATASEGMENTLENGTH)) {
 			ops->InitiatorRecvDataSegmentLength =
 				simple_strtoul(param->value, &tmpptr, 0);
@@ -1927,7 +1643,7 @@ void iscsi_set_session_parameters(
 				param->value);
 		} else if (!strcmp(param->name, INITIALR2T)) {
 			ops->InitialR2T = !strcmp(param->value, YES);
-			 pr_debug("InitialR2T:                   %s\n",
+			pr_debug("InitialR2T:                   %s\n",
 				param->value);
 		} else if (!strcmp(param->name, IMMEDIATEDATA)) {
 			ops->ImmediateData = !strcmp(param->value, YES);

@@ -25,7 +25,7 @@ static void ath6kl_recovery_work(struct work_struct *work)
 
 	ar->state = ATH6KL_STATE_RECOVERY;
 
-	del_timer_sync(&ar->fw_recovery.hb_timer);
+	timer_delete_sync(&ar->fw_recovery.hb_timer);
 
 	ath6kl_init_hw_restart(ar);
 
@@ -60,9 +60,9 @@ void ath6kl_recovery_hb_event(struct ath6kl *ar, u32 cookie)
 		ar->fw_recovery.hb_pending = false;
 }
 
-static void ath6kl_recovery_hb_timer(unsigned long data)
+static void ath6kl_recovery_hb_timer(struct timer_list *t)
 {
-	struct ath6kl *ar = (struct ath6kl *) data;
+	struct ath6kl *ar = timer_container_of(ar, t, fw_recovery.hb_timer);
 	int err;
 
 	if (test_bit(RECOVERY_CLEANUP, &ar->flag) ||
@@ -104,9 +104,8 @@ void ath6kl_recovery_init(struct ath6kl *ar)
 	recovery->seq_num = 0;
 	recovery->hb_misscnt = 0;
 	ar->fw_recovery.hb_pending = false;
-	ar->fw_recovery.hb_timer.function = ath6kl_recovery_hb_timer;
-	ar->fw_recovery.hb_timer.data = (unsigned long) ar;
-	init_timer_deferrable(&ar->fw_recovery.hb_timer);
+	timer_setup(&ar->fw_recovery.hb_timer, ath6kl_recovery_hb_timer,
+		    TIMER_DEFERRABLE);
 
 	if (ar->fw_recovery.hb_poll)
 		mod_timer(&ar->fw_recovery.hb_timer, jiffies +
@@ -120,7 +119,7 @@ void ath6kl_recovery_cleanup(struct ath6kl *ar)
 
 	set_bit(RECOVERY_CLEANUP, &ar->flag);
 
-	del_timer_sync(&ar->fw_recovery.hb_timer);
+	timer_delete_sync(&ar->fw_recovery.hb_timer);
 	cancel_work_sync(&ar->fw_recovery.recovery_work);
 }
 

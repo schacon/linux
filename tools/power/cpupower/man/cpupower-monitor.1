@@ -61,7 +61,7 @@ Only display specific monitors. Use the monitor string(s) provided by \-l option
 .PP
 \-i seconds
 .RS 4
-Measure intervall.
+Measure interval.
 .RE
 .PP
 \-c
@@ -80,11 +80,6 @@ command
 Measure idle and frequency characteristics of an arbitrary command/workload.
 The executable \fBcommand\fP is forked and upon its exit, statistics gathered since it was
 forked are displayed.
-.RE
-.PP
-\-v
-.RS 4
-Increase verbosity if the binary was compiled with the DEBUG option set.
 .RE
 
 .SH MONITOR DESCRIPTIONS
@@ -110,13 +105,21 @@ May work poorly on Linux-2.6.20 through 2.6.29, as the \fBacpi-cpufreq \fP
 kernel frequency driver periodically cleared aperf/mperf registers in those
 kernels.
 
-.SS "Nehalem" "SandyBridge"
+.SS "Nehalem" "SandyBridge" "HaswellExtended"
 Intel Core and Package sleep state counters.
 Threads (hyperthreaded cores) may not be able to enter deeper core states if
 its sibling is utilized.
 Deepest package sleep states may in reality show up as machine/platform wide
 sleep states and can only be entered if all cores are idle. Look up Intel
 manuals (some are provided in the References section) for further details.
+The monitors are named after the CPU family where the sleep state capabilities
+got introduced and may not match exactly the CPU name of the platform.
+For example an IvyBridge processor has sleep state capabilities which got
+introduced in Nehalem and SandyBridge processor families.
+Thus on an IvyBridge processor one will get Nehalem and SandyBridge sleep
+state monitors.
+HaswellExtended extra package sleep state capabilities are available only in a
+specific Haswell (family 0x45) and probably also other future processors.
 
 .SS "Fam_12h" "Fam_14h"
 AMD laptop and desktop processor (family 12h and 14h) sleep state counters.
@@ -162,15 +165,17 @@ displayed.
 
 .SH REFERENCES
 "BIOS and Kernel Developer’s Guide (BKDG) for AMD Family 14h Processors"
-http://support.amd.com/us/Processor_TechDocs/43170.pdf
+https://support.amd.com/us/Processor_TechDocs/43170.pdf
 
-"Intel® Turbo Boost Technology
-in Intel® Core™ Microarchitecture (Nehalem) Based Processors"
-http://download.intel.com/design/processor/applnots/320354.pdf
+"What Is Intel® Turbo Boost Technology?"
+https://www.intel.com/content/www/us/en/gaming/resources/turbo-boost.html
+
+"Power Management - Technology Overview"
+https://cdrdv2.intel.com/v1/dl/getContent/637748
 
 "Intel® 64 and IA-32 Architectures Software Developer's Manual
 Volume 3B: System Programming Guide"
-http://www.intel.com/products/processor/manuals
+https://www.intel.com/products/processor/manuals
 
 .SH FILES
 .ta

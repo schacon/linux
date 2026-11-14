@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Roccat Lua driver for Linux
  *
@@ -5,10 +6,6 @@
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
 /*
@@ -30,7 +27,7 @@ static ssize_t lua_sysfs_read(struct file *fp, struct kobject *kobj,
 		char *buf, loff_t off, size_t count,
 		size_t real_size, uint command)
 {
-	struct device *dev = container_of(kobj, struct device, kobj);
+	struct device *dev = kobj_to_dev(kobj);
 	struct lua_device *lua = hid_get_drvdata(dev_get_drvdata(dev));
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	int retval;
@@ -52,7 +49,7 @@ static ssize_t lua_sysfs_write(struct file *fp, struct kobject *kobj,
 		void const *buf, loff_t off, size_t count,
 		size_t real_size, uint command)
 {
-	struct device *dev = container_of(kobj, struct device, kobj);
+	struct device *dev = kobj_to_dev(kobj);
 	struct lua_device *lua = hid_get_drvdata(dev_get_drvdata(dev));
 	struct usb_device *usb_dev = interface_to_usbdev(to_usb_interface(dev));
 	int retval;
@@ -61,7 +58,7 @@ static ssize_t lua_sysfs_write(struct file *fp, struct kobject *kobj,
 		return -EINVAL;
 
 	mutex_lock(&lua->lua_lock);
-	retval = roccat_common2_send(usb_dev, command, (void *)buf, real_size);
+	retval = roccat_common2_send(usb_dev, command, buf, real_size);
 	mutex_unlock(&lua->lua_lock);
 
 	return retval ? retval : real_size;
@@ -69,7 +66,7 @@ static ssize_t lua_sysfs_write(struct file *fp, struct kobject *kobj,
 
 #define LUA_SYSFS_W(thingy, THINGY) \
 static ssize_t lua_sysfs_write_ ## thingy(struct file *fp, \
-		struct kobject *kobj, struct bin_attribute *attr, \
+		struct kobject *kobj, const struct bin_attribute *attr, \
 		char *buf, loff_t off, size_t count) \
 { \
 	return lua_sysfs_write(fp, kobj, buf, off, count, \
@@ -78,7 +75,7 @@ static ssize_t lua_sysfs_write_ ## thingy(struct file *fp, \
 
 #define LUA_SYSFS_R(thingy, THINGY) \
 static ssize_t lua_sysfs_read_ ## thingy(struct file *fp, \
-		struct kobject *kobj, struct bin_attribute *attr, \
+		struct kobject *kobj, const struct bin_attribute *attr, \
 		char *buf, loff_t off, size_t count) \
 { \
 	return lua_sysfs_read(fp, kobj, buf, off, count, \
@@ -88,7 +85,7 @@ static ssize_t lua_sysfs_read_ ## thingy(struct file *fp, \
 #define LUA_BIN_ATTRIBUTE_RW(thingy, THINGY) \
 LUA_SYSFS_W(thingy, THINGY) \
 LUA_SYSFS_R(thingy, THINGY) \
-static struct bin_attribute lua_ ## thingy ## _attr = { \
+static const struct bin_attribute lua_ ## thingy ## _attr = { \
 	.attr = { .name = #thingy, .mode = 0660 }, \
 	.size = LUA_SIZE_ ## THINGY, \
 	.read = lua_sysfs_read_ ## thingy, \
@@ -122,7 +119,7 @@ static int lua_init_specials(struct hid_device *hdev)
 	struct lua_device *lua;
 	int retval;
 
-	lua = kzalloc(sizeof(*lua), GFP_KERNEL);
+	lua = kzalloc_obj(*lua);
 	if (!lua) {
 		hid_err(hdev, "can't alloc device descriptor\n");
 		return -ENOMEM;
@@ -162,6 +159,9 @@ static int lua_probe(struct hid_device *hdev,
 		const struct hid_device_id *id)
 {
 	int retval;
+
+	if (!hid_is_usb(hdev))
+		return -EINVAL;
 
 	retval = hid_parse(hdev);
 	if (retval) {

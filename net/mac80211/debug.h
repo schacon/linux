@@ -1,6 +1,18 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * Portions
+ * Copyright (C) 2022 - 2025 Intel Corporation
+ */
 #ifndef __MAC80211_DEBUG_H
 #define __MAC80211_DEBUG_H
+#include <linux/once_lite.h>
 #include <net/cfg80211.h>
+
+#ifdef CONFIG_MAC80211_OCB_DEBUG
+#define MAC80211_OCB_DEBUG 1
+#else
+#define MAC80211_OCB_DEBUG 0
+#endif
 
 #ifdef CONFIG_MAC80211_IBSS_DEBUG
 #define MAC80211_IBSS_DEBUG 1
@@ -42,6 +54,12 @@
 #define MAC80211_MESH_SYNC_DEBUG 1
 #else
 #define MAC80211_MESH_SYNC_DEBUG 0
+#endif
+
+#ifdef CONFIG_MAC80211_MESH_CSA_DEBUG
+#define MAC80211_MESH_CSA_DEBUG 1
+#else
+#define MAC80211_MESH_CSA_DEBUG 0
 #endif
 
 #ifdef CONFIG_MAC80211_MESH_PS_DEBUG
@@ -117,12 +135,56 @@ do {									\
 #define sdata_dbg(sdata, fmt, ...)					\
 	_sdata_dbg(1, sdata, fmt, ##__VA_ARGS__)
 
+#define link_info(link, fmt, ...)					\
+	do {								\
+		if (ieee80211_vif_is_mld(&(link)->sdata->vif))          \
+			_sdata_info((link)->sdata, "[link %d] " fmt,	\
+				    (link)->link_id,			\
+				    ##__VA_ARGS__);			\
+		else							\
+			_sdata_info((link)->sdata, fmt, ##__VA_ARGS__);	\
+	} while (0)
+#define link_err(link, fmt, ...)					\
+	do {								\
+		if (ieee80211_vif_is_mld(&(link)->sdata->vif))          \
+			_sdata_err((link)->sdata, "[link %d] " fmt,	\
+				   (link)->link_id,			\
+				   ##__VA_ARGS__);			\
+		else							\
+			_sdata_err((link)->sdata, fmt, ##__VA_ARGS__);	\
+	} while (0)
+#define link_err_once(link, fmt, ...)					\
+	DO_ONCE_LITE(link_err, link, fmt, ##__VA_ARGS__)
+#define link_id_info(sdata, link_id, fmt, ...)				\
+	do {								\
+		if (ieee80211_vif_is_mld(&sdata->vif))			\
+			_sdata_info(sdata, "[link %d] " fmt, link_id,	\
+				    ##__VA_ARGS__);			\
+		else							\
+			_sdata_info(sdata, fmt, ##__VA_ARGS__);		\
+	} while (0)
+#define _link_id_dbg(print, sdata, link_id, fmt, ...)			\
+	do {								\
+		if (ieee80211_vif_is_mld(&(sdata)->vif))		\
+			_sdata_dbg(print, sdata, "[link %d] " fmt,	\
+				   link_id, ##__VA_ARGS__);		\
+		else							\
+			_sdata_dbg(print, sdata, fmt, ##__VA_ARGS__);	\
+	} while (0)
+#define link_dbg(link, fmt, ...)					\
+	_link_id_dbg(1, (link)->sdata, (link)->link_id,			\
+		     fmt, ##__VA_ARGS__)
+
 #define ht_dbg(sdata, fmt, ...)						\
 	_sdata_dbg(MAC80211_HT_DEBUG,					\
 		   sdata, fmt, ##__VA_ARGS__)
 
 #define ht_dbg_ratelimited(sdata, fmt, ...)				\
 	_sdata_dbg(MAC80211_HT_DEBUG && net_ratelimit(),		\
+		   sdata, fmt, ##__VA_ARGS__)
+
+#define ocb_dbg(sdata, fmt, ...)					\
+	_sdata_dbg(MAC80211_OCB_DEBUG,					\
 		   sdata, fmt, ##__VA_ARGS__)
 
 #define ibss_dbg(sdata, fmt, ...)					\
@@ -157,6 +219,10 @@ do {									\
 	_sdata_dbg(MAC80211_MESH_SYNC_DEBUG,				\
 		   sdata, fmt, ##__VA_ARGS__)
 
+#define mcsa_dbg(sdata, fmt, ...)					\
+	_sdata_dbg(MAC80211_MESH_CSA_DEBUG,				\
+		   sdata, fmt, ##__VA_ARGS__)
+
 #define mps_dbg(sdata, fmt, ...)					\
 	_sdata_dbg(MAC80211_MESH_PS_DEBUG,				\
 		   sdata, fmt, ##__VA_ARGS__)
@@ -172,6 +238,9 @@ do {									\
 #define mlme_dbg(sdata, fmt, ...)					\
 	_sdata_dbg(MAC80211_MLME_DEBUG,					\
 		   sdata, fmt, ##__VA_ARGS__)
+#define mlme_link_id_dbg(sdata, link_id, fmt, ...)			\
+	_link_id_dbg(MAC80211_MLME_DEBUG, sdata, link_id,		\
+		     fmt, ##__VA_ARGS__)
 
 #define mlme_dbg_ratelimited(sdata, fmt, ...)				\
 	_sdata_dbg(MAC80211_MLME_DEBUG && net_ratelimit(),		\

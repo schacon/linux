@@ -1,9 +1,8 @@
-/*
- * mt9v011 -Micron 1/4-Inch VGA Digital Image Sensor
- *
- * Copyright (c) 2009 Mauro Carvalho Chehab (mchehab@redhat.com)
- * This code is placed under the terms of the GNU General Public License v2
- */
+// SPDX-License-Identifier: GPL-2.0
+//
+// mt9v011 -Micron 1/4-Inch VGA Digital Image Sensor
+//
+// Copyright (c) 2009 Mauro Carvalho Chehab <mchehab@kernel.org>
 
 #include <linux/i2c.h>
 #include <linux/slab.h>
@@ -12,13 +11,12 @@
 #include <linux/module.h>
 #include <asm/div64.h>
 #include <media/v4l2-device.h>
-#include <media/v4l2-chip-ident.h>
 #include <media/v4l2-ctrls.h>
-#include <media/mt9v011.h>
+#include <media/i2c/mt9v011.h>
 
 MODULE_DESCRIPTION("Micron mt9v011 sensor driver");
-MODULE_AUTHOR("Mauro Carvalho Chehab <mchehab@redhat.com>");
-MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Mauro Carvalho Chehab");
+MODULE_LICENSE("GPL v2");
 
 static int debug;
 module_param(debug, int, 0);
@@ -51,6 +49,7 @@ MODULE_PARM_DESC(debug, "Debug level (0-2)");
 
 struct mt9v011 {
 	struct v4l2_subdev sd;
+	struct media_pad pad;
 	struct v4l2_ctrl_handler ctrls;
 	unsigned width, height;
 	unsigned xtal;
@@ -325,19 +324,26 @@ static int mt9v011_reset(struct v4l2_subdev *sd, u32 val)
 	return 0;
 }
 
-static int mt9v011_enum_mbus_fmt(struct v4l2_subdev *sd, unsigned index,
-					enum v4l2_mbus_pixelcode *code)
+static int mt9v011_enum_mbus_code(struct v4l2_subdev *sd,
+		struct v4l2_subdev_state *sd_state,
+		struct v4l2_subdev_mbus_code_enum *code)
 {
-	if (index > 0)
+	if (code->pad || code->index > 0)
 		return -EINVAL;
 
-	*code = V4L2_MBUS_FMT_SGRBG8_1X8;
+	code->code = MEDIA_BUS_FMT_SGRBG8_1X8;
 	return 0;
 }
 
-static int mt9v011_try_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *fmt)
+static int mt9v011_set_fmt(struct v4l2_subdev *sd,
+		const struct v4l2_subdev_client_info *ci,
+		struct v4l2_subdev_state *sd_state,
+		struct v4l2_subdev_format *format)
 {
-	if (fmt->code != V4L2_MBUS_FMT_SGRBG8_1X8)
+	struct v4l2_mbus_framefmt *fmt = &format->format;
+	struct mt9v011 *core = to_mt9v011(sd);
+
+	if (format->pad || fmt->code != MEDIA_BUS_FMT_SGRBG8_1X8)
 		return -EINVAL;
 
 	v4l_bound_align_image(&fmt->width, 48, 639, 1,
@@ -345,34 +351,48 @@ static int mt9v011_try_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefm
 	fmt->field = V4L2_FIELD_NONE;
 	fmt->colorspace = V4L2_COLORSPACE_SRGB;
 
+	if (format->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
+		core->width = fmt->width;
+		core->height = fmt->height;
+
+		set_res(sd);
+	} else {
+		*v4l2_subdev_state_get_format(sd_state, 0) = *fmt;
+	}
+
 	return 0;
 }
 
-static int mt9v011_g_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *parms)
+static int mt9v011_get_frame_interval(struct v4l2_subdev *sd,
+				      struct v4l2_subdev_state *sd_state,
+				      struct v4l2_subdev_frame_interval *ival)
 {
-	struct v4l2_captureparm *cp = &parms->parm.capture;
-
-	if (parms->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+	/*
+	 * FIXME: Implement support for V4L2_SUBDEV_FORMAT_TRY, using the V4L2
+	 * subdev active state API.
+	 */
+	if (ival->which != V4L2_SUBDEV_FORMAT_ACTIVE)
 		return -EINVAL;
 
-	memset(cp, 0, sizeof(struct v4l2_captureparm));
-	cp->capability = V4L2_CAP_TIMEPERFRAME;
 	calc_fps(sd,
-		 &cp->timeperframe.numerator,
-		 &cp->timeperframe.denominator);
+		 &ival->interval.numerator,
+		 &ival->interval.denominator);
 
 	return 0;
 }
 
-static int mt9v011_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *parms)
+static int mt9v011_set_frame_interval(struct v4l2_subdev *sd,
+				      struct v4l2_subdev_state *sd_state,
+				      struct v4l2_subdev_frame_interval *ival)
 {
-	struct v4l2_captureparm *cp = &parms->parm.capture;
-	struct v4l2_fract *tpf = &cp->timeperframe;
+	struct v4l2_fract *tpf = &ival->interval;
 	u16 speed;
 
-	if (parms->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
-		return -EINVAL;
-	if (cp->extendedmode != 0)
+	/*
+	 * FIXME: Implement support for V4L2_SUBDEV_FORMAT_TRY, using the V4L2
+	 * subdev active state API.
+	 */
+	if (ival->which != V4L2_SUBDEV_FORMAT_ACTIVE)
 		return -EINVAL;
 
 	speed = calc_speed(sd, tpf->numerator, tpf->denominator);
@@ -386,34 +406,10 @@ static int mt9v011_s_parm(struct v4l2_subdev *sd, struct v4l2_streamparm *parms)
 	return 0;
 }
 
-static int mt9v011_s_mbus_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *fmt)
-{
-	struct mt9v011 *core = to_mt9v011(sd);
-	int rc;
-
-	rc = mt9v011_try_mbus_fmt(sd, fmt);
-	if (rc < 0)
-		return -EINVAL;
-
-	core->width = fmt->width;
-	core->height = fmt->height;
-
-	set_res(sd);
-
-	return 0;
-}
-
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 static int mt9v011_g_register(struct v4l2_subdev *sd,
 			      struct v4l2_dbg_register *reg)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	if (!v4l2_chip_match_i2c_client(client, &reg->match))
-		return -EINVAL;
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	reg->val = mt9v011_read(sd, reg->reg & 0xff);
 	reg->size = 2;
 
@@ -423,30 +419,11 @@ static int mt9v011_g_register(struct v4l2_subdev *sd,
 static int mt9v011_s_register(struct v4l2_subdev *sd,
 			      const struct v4l2_dbg_register *reg)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	if (!v4l2_chip_match_i2c_client(client, &reg->match))
-		return -EINVAL;
-	if (!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
 	mt9v011_write(sd, reg->reg & 0xff, reg->val & 0xffff);
 
 	return 0;
 }
 #endif
-
-static int mt9v011_g_chip_ident(struct v4l2_subdev *sd,
-				struct v4l2_dbg_chip_ident *chip)
-{
-	u16 version;
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-
-	version = mt9v011_read(sd, R00_MT9V011_CHIP_VERSION);
-
-	return v4l2_chip_ident_i2c_client(client, chip, V4L2_IDENT_MT9V011,
-					  version);
-}
 
 static int mt9v011_s_ctrl(struct v4l2_ctrl *ctrl)
 {
@@ -483,30 +460,28 @@ static int mt9v011_s_ctrl(struct v4l2_ctrl *ctrl)
 	return 0;
 }
 
-static struct v4l2_ctrl_ops mt9v011_ctrl_ops = {
+static const struct v4l2_ctrl_ops mt9v011_ctrl_ops = {
 	.s_ctrl = mt9v011_s_ctrl,
 };
 
 static const struct v4l2_subdev_core_ops mt9v011_core_ops = {
 	.reset = mt9v011_reset,
-	.g_chip_ident = mt9v011_g_chip_ident,
 #ifdef CONFIG_VIDEO_ADV_DEBUG
 	.g_register = mt9v011_g_register,
 	.s_register = mt9v011_s_register,
 #endif
 };
 
-static const struct v4l2_subdev_video_ops mt9v011_video_ops = {
-	.enum_mbus_fmt = mt9v011_enum_mbus_fmt,
-	.try_mbus_fmt = mt9v011_try_mbus_fmt,
-	.s_mbus_fmt = mt9v011_s_mbus_fmt,
-	.g_parm = mt9v011_g_parm,
-	.s_parm = mt9v011_s_parm,
+static const struct v4l2_subdev_pad_ops mt9v011_pad_ops = {
+	.enum_mbus_code = mt9v011_enum_mbus_code,
+	.set_fmt = mt9v011_set_fmt,
+	.get_frame_interval = mt9v011_get_frame_interval,
+	.set_frame_interval = mt9v011_set_frame_interval,
 };
 
 static const struct v4l2_subdev_ops mt9v011_ops = {
 	.core  = &mt9v011_core_ops,
-	.video = &mt9v011_video_ops,
+	.pad   = &mt9v011_pad_ops,
 };
 
 
@@ -514,24 +489,31 @@ static const struct v4l2_subdev_ops mt9v011_ops = {
 			I2C Client & Driver
  ****************************************************************************/
 
-static int mt9v011_probe(struct i2c_client *c,
-			 const struct i2c_device_id *id)
+static int mt9v011_probe(struct i2c_client *c)
 {
 	u16 version;
 	struct mt9v011 *core;
 	struct v4l2_subdev *sd;
+	int ret;
 
 	/* Check if the adapter supports the needed features */
 	if (!i2c_check_functionality(c->adapter,
 	     I2C_FUNC_SMBUS_READ_BYTE | I2C_FUNC_SMBUS_WRITE_BYTE_DATA))
 		return -EIO;
 
-	core = kzalloc(sizeof(struct mt9v011), GFP_KERNEL);
+	core = devm_kzalloc_obj(&c->dev, struct mt9v011);
 	if (!core)
 		return -ENOMEM;
 
 	sd = &core->sd;
 	v4l2_i2c_subdev_init(sd, c, &mt9v011_ops);
+
+	core->pad.flags = MEDIA_PAD_FL_SOURCE;
+	sd->entity.function = MEDIA_ENT_F_CAM_SENSOR;
+
+	ret = media_entity_pads_init(&sd->entity, 1, &core->pad);
+	if (ret < 0)
+		return ret;
 
 	/* Check if the sensor is really a MT9V011 */
 	version = mt9v011_read(sd, R00_MT9V011_CHIP_VERSION);
@@ -539,7 +521,7 @@ static int mt9v011_probe(struct i2c_client *c,
 	    (version != MT9V011_REV_B_VERSION)) {
 		v4l2_info(sd, "*** unknown micron chip detected (0x%04x).\n",
 			  version);
-		kfree(core);
+		media_entity_cleanup(&sd->entity);
 		return -EINVAL;
 	}
 
@@ -562,7 +544,7 @@ static int mt9v011_probe(struct i2c_client *c,
 
 		v4l2_err(sd, "control initialization error %d\n", ret);
 		v4l2_ctrl_handler_free(&core->ctrls);
-		kfree(core);
+		media_entity_cleanup(&sd->entity);
 		return ret;
 	}
 	core->sd.ctrl_handler = &core->ctrls;
@@ -587,7 +569,7 @@ static int mt9v011_probe(struct i2c_client *c,
 	return 0;
 }
 
-static int mt9v011_remove(struct i2c_client *c)
+static void mt9v011_remove(struct i2c_client *c)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(c);
 	struct mt9v011 *core = to_mt9v011(sd);
@@ -598,21 +580,19 @@ static int mt9v011_remove(struct i2c_client *c)
 
 	v4l2_device_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(&core->ctrls);
-	kfree(to_mt9v011(sd));
-	return 0;
+	media_entity_cleanup(&sd->entity);
 }
 
 /* ----------------------------------------------------------------------- */
 
 static const struct i2c_device_id mt9v011_id[] = {
-	{ "mt9v011", 0 },
+	{ .name = "mt9v011" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, mt9v011_id);
 
 static struct i2c_driver mt9v011_driver = {
 	.driver = {
-		.owner	= THIS_MODULE,
 		.name	= "mt9v011",
 	},
 	.probe		= mt9v011_probe,

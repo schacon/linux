@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/arm/mach-spear6xx/spear6xx.c
  *
@@ -7,16 +8,12 @@
  * Rajeev Kumar<rajeev-dlh.kumar@st.com>
  *
  * Copyright 2012 Stefan Roese <sr@denx.de>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/amba/pl08x.h>
 #include <linux/clk.h>
+#include <linux/clk/spear.h>
 #include <linux/err.h>
-#include <linux/irqchip.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -26,8 +23,8 @@
 #include <asm/mach/map.h>
 #include "pl080.h"
 #include "generic.h"
-#include <mach/spear.h>
-#include <mach/misc_regs.h>
+#include "spear.h"
+#include "misc_regs.h"
 
 /* dmac device registration */
 static struct pl08x_channel_data spear600_dma_info[] = {
@@ -323,20 +320,14 @@ static struct pl08x_channel_data spear600_dma_info[] = {
 };
 
 static struct pl08x_platform_data spear6xx_pl080_plat_data = {
-	.memcpy_channel = {
-		.bus_id = "memcpy",
-		.cctl_memcpy =
-			(PL080_BSIZE_16 << PL080_CONTROL_SB_SIZE_SHIFT | \
-			PL080_BSIZE_16 << PL080_CONTROL_DB_SIZE_SHIFT | \
-			PL080_WIDTH_32BIT << PL080_CONTROL_SWIDTH_SHIFT | \
-			PL080_WIDTH_32BIT << PL080_CONTROL_DWIDTH_SHIFT | \
-			PL080_CONTROL_PROT_BUFF | PL080_CONTROL_PROT_CACHE | \
-			PL080_CONTROL_PROT_SYS),
-	},
+	.memcpy_burst_size = PL08X_BURST_SZ_16,
+	.memcpy_bus_width = PL08X_BUS_WIDTH_32_BITS,
+	.memcpy_prot_buff = true,
+	.memcpy_prot_cache = true,
 	.lli_buses = PL08X_AHB1,
 	.mem_buses = PL08X_AHB1,
-	.get_signal = pl080_get_signal,
-	.put_signal = pl080_put_signal,
+	.get_xfer_signal = pl080_get_signal,
+	.put_xfer_signal = pl080_put_signal,
 	.slave_channels = spear600_dma_info,
 	.num_slave_channels = ARRAY_SIZE(spear600_dma_info),
 };
@@ -349,7 +340,7 @@ static struct pl08x_platform_data spear6xx_pl080_plat_data = {
  * 0xD0000000		0xFD000000
  * 0xFC000000		0xFC000000
  */
-struct map_desc spear6xx_io_desc[] __initdata = {
+static struct map_desc spear6xx_io_desc[] __initdata = {
 	{
 		.virtual	= (unsigned long)VA_SPEAR6XX_ML_CPU_BASE,
 		.pfn		= __phys_to_pfn(SPEAR_ICM3_ML1_2_BASE),
@@ -369,12 +360,12 @@ struct map_desc spear6xx_io_desc[] __initdata = {
 };
 
 /* This will create static memory mapping for selected devices */
-void __init spear6xx_map_io(void)
+static void __init spear6xx_map_io(void)
 {
 	iotable_init(spear6xx_io_desc, ARRAY_SIZE(spear6xx_io_desc));
 }
 
-void __init spear6xx_timer_init(void)
+static void __init spear6xx_timer_init(void)
 {
 	char pclk_name[] = "pll3_clk";
 	struct clk *gpt_clk, *pclk;
@@ -404,7 +395,7 @@ void __init spear6xx_timer_init(void)
 }
 
 /* Add auxdata to pass platform data */
-struct of_dev_auxdata spear6xx_auxdata_lookup[] __initdata = {
+static struct of_dev_auxdata spear6xx_auxdata_lookup[] __initdata = {
 	OF_DEV_AUXDATA("arm,pl080", SPEAR_ICM3_DMA_BASE, NULL,
 			&spear6xx_pl080_plat_data),
 	{}
@@ -412,8 +403,7 @@ struct of_dev_auxdata spear6xx_auxdata_lookup[] __initdata = {
 
 static void __init spear600_dt_init(void)
 {
-	of_platform_populate(NULL, of_default_bus_match_table,
-			spear6xx_auxdata_lookup, NULL);
+	of_platform_default_populate(NULL, spear6xx_auxdata_lookup, NULL);
 }
 
 static const char *spear600_dt_board_compat[] = {
@@ -423,7 +413,6 @@ static const char *spear600_dt_board_compat[] = {
 
 DT_MACHINE_START(SPEAR600_DT, "ST SPEAr600 (Flattened Device Tree)")
 	.map_io		=	spear6xx_map_io,
-	.init_irq	=	irqchip_init,
 	.init_time	=	spear6xx_timer_init,
 	.init_machine	=	spear600_dt_init,
 	.restart	=	spear_restart,

@@ -329,7 +329,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_cp1250(void)
@@ -344,4 +343,5 @@ static void __exit exit_nls_cp1250(void)
 module_init(init_nls_cp1250)
 module_exit(exit_nls_cp1250)
 
+MODULE_DESCRIPTION("NLS Windows CP1250 (Slavic/Central European Languages)");
 MODULE_LICENSE("Dual BSD/GPL");

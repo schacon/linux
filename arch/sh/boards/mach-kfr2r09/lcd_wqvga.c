@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * KFR2R09 LCD panel support
  *
@@ -5,10 +6,6 @@
  *
  * Register settings based on the out-of-tree t33fb.c driver
  * Copyright (C) 2008 Lineo Solutions, Inc.
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License. See the file COPYING in the main directory of this archive for
- * more details.
  */
 
 #include <linux/delay.h>
@@ -17,7 +14,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 #include <video/sh_mobile_lcdc.h>
 #include <mach/kfr2r09.h>
 #include <cpu/sh7724.h>
@@ -275,52 +272,4 @@ int kfr2r09_lcd_setup(void *sohandle, struct sh_mobile_lcdc_sys_bus_ops *so)
 void kfr2r09_lcd_start(void *sohandle, struct sh_mobile_lcdc_sys_bus_ops *so)
 {
 	write_memory_start(sohandle, so);
-}
-
-#define CTRL_CKSW       0x10
-#define CTRL_C10        0x20
-#define CTRL_CPSW       0x80
-#define MAIN_MLED4      0x40
-#define MAIN_MSW        0x80
-
-int kfr2r09_lcd_set_brightness(int brightness)
-{
-	struct i2c_adapter *a;
-	struct i2c_msg msg;
-	unsigned char buf[2];
-	int ret;
-
-	a = i2c_get_adapter(0);
-	if (!a)
-		return -ENODEV;
-
-	buf[0] = 0x00;
-	if (brightness)
-		buf[1] = CTRL_CPSW | CTRL_C10 | CTRL_CKSW;
-	else
-		buf[1] = 0;
-
-	msg.addr = 0x75;
-	msg.buf = buf;
-	msg.len = 2;
-	msg.flags = 0;
-	ret = i2c_transfer(a, &msg, 1);
-	if (ret != 1)
-		return -ENODEV;
-
-	buf[0] = 0x01;
-	if (brightness)
-		buf[1] = MAIN_MSW | MAIN_MLED4 | 0x0c;
-	else
-		buf[1] = 0;
-
-	msg.addr = 0x75;
-	msg.buf = buf;
-	msg.len = 2;
-	msg.flags = 0;
-	ret = i2c_transfer(a, &msg, 1);
-	if (ret != 1)
-		return -ENODEV;
-
-	return 0;
 }

@@ -583,7 +583,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_macturkish(void)
@@ -599,4 +598,5 @@ static void __exit exit_nls_macturkish(void)
 module_init(init_nls_macturkish)
 module_exit(exit_nls_macturkish)
 
+MODULE_DESCRIPTION("NLS Codepage macturkish");
 MODULE_LICENSE("Dual BSD/GPL");

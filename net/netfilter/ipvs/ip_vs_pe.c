@@ -1,5 +1,5 @@
-#define KMSG_COMPONENT "IPVS"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+// SPDX-License-Identifier: GPL-2.0-only
+#define pr_fmt(fmt) "IPVS: " fmt
 
 #include <linux/module.h>
 #include <linux/spinlock.h>
@@ -37,8 +37,7 @@ struct ip_vs_pe *__ip_vs_pe_getbyname(const char *pe_name)
 			rcu_read_unlock();
 			return pe;
 		}
-		if (pe->module)
-			module_put(pe->module);
+		module_put(pe->module);
 	}
 	rcu_read_unlock();
 
@@ -68,7 +67,8 @@ int register_ip_vs_pe(struct ip_vs_pe *pe)
 	struct ip_vs_pe *tmp;
 
 	/* increase the module use count */
-	ip_vs_use_count_inc();
+	if (!ip_vs_use_count_inc())
+		return -ENOENT;
 
 	mutex_lock(&ip_vs_pe_mutex);
 	/* Make sure that the pe with this name doesn't exist

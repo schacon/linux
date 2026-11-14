@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _UVESAFB_H
 #define _UVESAFB_H
 
@@ -108,8 +109,6 @@ struct uvesafb_ktask {
 	u32 ack;
 };
 
-static int uvesafb_exec(struct uvesafb_ktask *tsk);
-
 #define UVESAFB_EXACT_RES	1
 #define UVESAFB_EXACT_DEPTH	2
 
@@ -134,6 +133,7 @@ struct uvesafb_par {
 
 	int mode_idx;
 	struct vbe_crtc_ib crtc;
+	int mtrr_handle;
 };
 
 #endif /* _UVESAFB_H */

@@ -305,7 +305,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_koi8_r(void)
@@ -321,4 +320,5 @@ static void __exit exit_nls_koi8_r(void)
 module_init(init_nls_koi8_r)
 module_exit(exit_nls_koi8_r)
 
+MODULE_DESCRIPTION("NLS KOI8-R (Russian)");
 MODULE_LICENSE("Dual BSD/GPL");

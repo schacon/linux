@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __MMU_H
 #define __MMU_H
 
@@ -52,13 +53,13 @@
 #define CTX_NR_MASK		TAG_CONTEXT_BITS
 #define CTX_HW_MASK		(CTX_NR_MASK | CTX_PGSZ_MASK)
 
-#define CTX_FIRST_VERSION	((_AC(1,UL) << CTX_VERSION_SHIFT) + _AC(1,UL))
+#define CTX_FIRST_VERSION	BIT(CTX_VERSION_SHIFT)
 #define CTX_VALID(__ctx)	\
 	 (!(((__ctx.sparc64_ctx_val) ^ tlb_context_cache) & CTX_VERSION_MASK))
 #define CTX_HWBITS(__ctx)	((__ctx.sparc64_ctx_val) & CTX_HW_MASK)
 #define CTX_NRBITS(__ctx)	((__ctx.sparc64_ctx_val) & CTX_NR_MASK)
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #define TSB_ENTRY_ALIGNMENT	16
 
@@ -67,9 +68,9 @@ struct tsb {
 	unsigned long pte;
 } __attribute__((aligned(TSB_ENTRY_ALIGNMENT)));
 
-extern void __tsb_insert(unsigned long ent, unsigned long tag, unsigned long pte);
-extern void tsb_flush(unsigned long ent, unsigned long tag);
-extern void tsb_init(struct tsb *tsb, unsigned long size);
+void __tsb_insert(unsigned long ent, unsigned long tag, unsigned long pte);
+void tsb_flush(unsigned long ent, unsigned long tag);
+void tsb_init(struct tsb *tsb, unsigned long size);
 
 struct tsb_config {
 	struct tsb		*tsb;
@@ -89,16 +90,34 @@ struct tsb_config {
 #define MM_NUM_TSBS	1
 #endif
 
+/* ADI tags are stored when a page is swapped out and the storage for
+ * tags is allocated dynamically. There is a tag storage descriptor
+ * associated with each set of tag storage pages. Tag storage descriptors
+ * are allocated dynamically. Since kernel will allocate a full page for
+ * each tag storage descriptor, we can store up to
+ * PAGE_SIZE/sizeof(tag storage descriptor) descriptors on that page.
+ */
+typedef struct {
+	unsigned long	start;		/* Start address for this tag storage */
+	unsigned long	end;		/* Last address for tag storage */
+	unsigned char	*tags;		/* Where the tags are */
+	unsigned long	tag_users;	/* number of references to descriptor */
+} tag_storage_desc_t;
+
 typedef struct {
 	spinlock_t		lock;
 	unsigned long		sparc64_ctx_val;
-	unsigned long		huge_pte_count;
-	struct page		*pgtable_page;
+	unsigned long		hugetlb_pte_count;
+	unsigned long		thp_pte_count;
 	struct tsb_config	tsb_block[MM_NUM_TSBS];
 	struct hv_tsb_descr	tsb_descr[MM_NUM_TSBS];
+	void			*vdso;
+	bool			adi;
+	tag_storage_desc_t	*tag_store;
+	spinlock_t		tag_lock;
 } mm_context_t;
 
-#endif /* !__ASSEMBLY__ */
+#endif /* !__ASSEMBLER__ */
 
 #define TSB_CONFIG_TSB		0x00
 #define TSB_CONFIG_RSS_LIMIT	0x08

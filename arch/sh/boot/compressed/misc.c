@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/boot/compressed/misc.c
  *
@@ -11,9 +12,11 @@
  * Modified to use standard LinuxSH BIOS by Greg Banks 7Jul2000
  */
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/addrspace.h>
 #include <asm/page.h>
+
+#include "misc.h"
 
 /*
  * gzip declarations
@@ -24,11 +27,6 @@
 #undef memset
 #undef memcpy
 #define memzero(s, n)     memset ((s), 0, (n))
-
-/* cache.c */
-#define CACHE_ENABLE      0
-#define CACHE_DISABLE     1
-int cache_control(unsigned int command);
 
 extern char input_data[];
 extern int input_len;
@@ -103,11 +101,22 @@ static void error(char *x)
 	while(1);	/* Halt */
 }
 
-#ifdef CONFIG_SUPERH64
-#define stackalign	8
-#else
+const unsigned long __stack_chk_guard = 0x000a0dff;
+
+void __stack_chk_fail(void)
+{
+	error("stack-protector: Kernel stack is corrupted\n");
+}
+
+/* Needed because vmlinux.lds.h references this */
+void ftrace_stub(void)
+{
+}
+void arch_ftrace_ops_list_func(void)
+{
+}
+
 #define stackalign	4
-#endif
 
 #define STACK_SIZE (4096)
 long __attribute__ ((aligned(stackalign))) user_stack[STACK_SIZE];
@@ -117,13 +126,9 @@ void decompress_kernel(void)
 {
 	unsigned long output_addr;
 
-#ifdef CONFIG_SUPERH64
-	output_addr = (CONFIG_MEMORY_START + 0x2000);
-#else
 	output_addr = __pa((unsigned long)&_text+PAGE_SIZE);
 #if defined(CONFIG_29BIT)
 	output_addr |= P2SEG;
-#endif
 #endif
 
 	output = (unsigned char *)output_addr;
@@ -131,8 +136,6 @@ void decompress_kernel(void)
 	free_mem_end_ptr = free_mem_ptr + HEAP_SIZE;
 
 	puts("Uncompressing Linux... ");
-	cache_control(CACHE_ENABLE);
-	decompress(input_data, input_len, NULL, NULL, output, NULL, error);
-	cache_control(CACHE_DISABLE);
+	__decompress(input_data, input_len, NULL, NULL, output, 0, NULL, error);
 	puts("Ok, booting the kernel.\n");
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 2000-2001 Vojtech Pavlik
  */
@@ -6,33 +7,12 @@
  * Gunze AHL-51S touchscreen driver for Linux
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
- * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
- */
-
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/serio.h>
-#include <linux/init.h>
 
 #define DRIVER_DESC	"Gunze AHL-51S touchscreen driver"
 
@@ -58,7 +38,7 @@ struct gunze {
 	char phys[32];
 };
 
-static void gunze_process_packet(struct gunze* gunze)
+static void gunze_process_packet(struct gunze *gunze)
 {
 	struct input_dev *dev = gunze->dev;
 
@@ -77,7 +57,7 @@ static void gunze_process_packet(struct gunze* gunze)
 static irqreturn_t gunze_interrupt(struct serio *serio,
 		unsigned char data, unsigned int flags)
 {
-	struct gunze* gunze = serio_get_drvdata(serio);
+	struct gunze *gunze = serio_get_drvdata(serio);
 
 	if (data == '\r') {
 		gunze_process_packet(gunze);
@@ -117,7 +97,7 @@ static int gunze_connect(struct serio *serio, struct serio_driver *drv)
 	struct input_dev *input_dev;
 	int err;
 
-	gunze = kzalloc(sizeof(struct gunze), GFP_KERNEL);
+	gunze = kzalloc_obj(*gunze);
 	input_dev = input_allocate_device();
 	if (!gunze || !input_dev) {
 		err = -ENOMEM;
@@ -126,7 +106,7 @@ static int gunze_connect(struct serio *serio, struct serio_driver *drv)
 
 	gunze->serio = serio;
 	gunze->dev = input_dev;
-	snprintf(gunze->phys, sizeof(serio->phys), "%s/input0", serio->phys);
+	scnprintf(gunze->phys, sizeof(serio->phys), "%s/input0", serio->phys);
 
 	input_dev->name = "Gunze AHL-51S TouchScreen";
 	input_dev->phys = gunze->phys;
@@ -163,7 +143,7 @@ static int gunze_connect(struct serio *serio, struct serio_driver *drv)
  * The serio driver structure.
  */
 
-static struct serio_device_id gunze_serio_ids[] = {
+static const struct serio_device_id gunze_serio_ids[] = {
 	{
 		.type	= SERIO_RS232,
 		.proto	= SERIO_GUNZE,

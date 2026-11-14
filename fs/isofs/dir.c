@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/isofs/dir.c
  *
@@ -11,7 +12,10 @@
  *  isofs directory handling functions
  */
 #include <linux/gfp.h>
+#include <linux/filelock.h>
+#include <linux/slab.h>
 #include "isofs.h"
+#include <linux/fileattr.h>
 
 int isofs_name_translate(struct iso_directory_record *de, char *new, struct inode *inode)
 {
@@ -45,7 +49,7 @@ int isofs_name_translate(struct iso_directory_record *de, char *new, struct inod
 	return i;
 }
 
-/* Acorn extensions written by Matthew Wilcox <willy@bofh.ai> 1998 */
+/* Acorn extensions written by Matthew Wilcox <willy@infradead.org> 1998 */
 int get_acorn_filename(struct iso_directory_record *de,
 			    char *retname, struct inode *inode)
 {
@@ -58,7 +62,7 @@ int get_acorn_filename(struct iso_directory_record *de,
 	std = sizeof(struct iso_directory_record) + de->name_len[0];
 	if (std & 1)
 		std++;
-	if ((*((unsigned char *) de) - std) != 32)
+	if (de->length[0] - std != 32)
 		return retnamlen;
 	chr = ((unsigned char *) de) + std;
 	if (strncmp(chr, "ARCHIMEDES", 10))
@@ -78,9 +82,9 @@ int get_acorn_filename(struct iso_directory_record *de,
 /*
  * This should _really_ be cleaned up some day..
  */
-static int do_isofs_readdir(struct inode *inode, struct file *filp,
-		void *dirent, filldir_t filldir,
-		char *tmpname, struct iso_directory_record *tmpde)
+static int do_isofs_readdir(struct inode *inode, struct file *file,
+		struct dir_context *ctx,
+		char *tmpname)
 {
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(inode);
 	unsigned char bufbits = ISOFS_BUFFER_BITS(inode);
@@ -94,10 +98,10 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 	struct iso_directory_record *de;
 	struct isofs_sb_info *sbi = ISOFS_SB(inode->i_sb);
 
-	offset = filp->f_pos & (bufsize - 1);
-	block = filp->f_pos >> bufbits;
+	offset = ctx->pos & (bufsize - 1);
+	block = ctx->pos >> bufbits;
 
-	while (filp->f_pos < inode->i_size) {
+	while (ctx->pos < inode->i_size) {
 		int de_len;
 
 		if (!bh) {
@@ -106,51 +110,30 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 				return 0;
 		}
 
-		de = (struct iso_directory_record *) (bh->b_data + offset);
-
-		de_len = *(unsigned char *) de;
-
+		de = (struct iso_directory_record *)(bh->b_data + offset);
 		/*
-		 * If the length byte is zero, we should move on to the next
-		 * CDROM sector.  If we are at the end of the directory, we
-		 * kick out of the while loop.
+		 * If we are at the end of a block (or at its zero-padded
+		 * tail), move on to the next CDROM sector.  If we are at the
+		 * end of the directory, we'll abort the while loop.
 		 */
-
-		if (de_len == 0) {
+		if (offset >= bufsize || de->length[0] == 0) {
 			brelse(bh);
 			bh = NULL;
-			filp->f_pos = (filp->f_pos + ISOFS_BLOCK_SIZE) & ~(ISOFS_BLOCK_SIZE - 1);
-			block = filp->f_pos >> bufbits;
+			block++;
+			ctx->pos = (loff_t)block << bufbits;
 			offset = 0;
 			continue;
 		}
-
+		de_len = de->length[0];
 		block_saved = block;
 		offset_saved = offset;
 		offset += de_len;
 
-		/* Make sure we have a full directory entry */
-		if (offset >= bufsize) {
-			int slop = bufsize - offset + de_len;
-			memcpy(tmpde, de, slop);
-			offset &= bufsize - 1;
-			block++;
-			brelse(bh);
-			bh = NULL;
-			if (offset) {
-				bh = isofs_bread(inode, block);
-				if (!bh)
-					return 0;
-				memcpy((void *) tmpde + slop, bh->b_data, offset);
-			}
-			de = tmpde;
-		}
-		/* Basic sanity check, whether name doesn't exceed dir entry */
-		if (de_len < de->name_len[0] +
-					sizeof(struct iso_directory_record)) {
+		if (!isofs_dir_record_valid(de, offset_saved, bufsize)) {
 			printk(KERN_NOTICE "iso9660: Corrupted directory entry"
-			       " in block %lu of inode %lu\n", block,
+			       " in block %lu of inode %llu\n", block,
 			       inode->i_ino);
+			brelse(bh);
 			return -EIO;
 		}
 
@@ -164,16 +147,16 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 
 		if (de->flags[-sbi->s_high_sierra] & 0x80) {
 			first_de = 0;
-			filp->f_pos += de_len;
+			ctx->pos += de_len;
 			continue;
 		}
 		first_de = 1;
 
 		/* Handle the case of the '.' directory */
 		if (de->name_len[0] == 1 && de->name[0] == 0) {
-			if (filldir(dirent, ".", 1, filp->f_pos, inode->i_ino, DT_DIR) < 0)
+			if (!dir_emit_dot(file, ctx))
 				break;
-			filp->f_pos += de_len;
+			ctx->pos += de_len;
 			continue;
 		}
 
@@ -181,10 +164,9 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 
 		/* Handle the case of the '..' directory */
 		if (de->name_len[0] == 1 && de->name[0] == 1) {
-			inode_number = parent_ino(filp->f_path.dentry);
-			if (filldir(dirent, "..", 2, filp->f_pos, inode_number, DT_DIR) < 0)
+			if (!dir_emit_dotdot(file, ctx))
 				break;
-			filp->f_pos += de_len;
+			ctx->pos += de_len;
 			continue;
 		}
 
@@ -198,13 +180,14 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 		if ((sbi->s_hide && (de->flags[-sbi->s_high_sierra] & 1)) ||
 		    (!sbi->s_showassoc &&
 				(de->flags[-sbi->s_high_sierra] & 4))) {
-			filp->f_pos += de_len;
+			ctx->pos += de_len;
 			continue;
 		}
 
 		map = 1;
 		if (sbi->s_rock) {
-			len = get_rock_ridge_filename(de, tmpname, inode);
+			len = get_rock_ridge_filename(de, tmpname, NAME_MAX + 1,
+						      inode);
 			if (len != 0) {		/* may be -1 */
 				p = tmpname;
 				map = 0;
@@ -213,7 +196,9 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 		if (map) {
 #ifdef CONFIG_JOLIET
 			if (sbi->s_joliet_level) {
-				len = get_joliet_filename(de, tmpname, inode);
+				len = get_joliet_filename(de, tmpname,
+							  JOLIET_NAME_MAX + 1,
+							  inode);
 				p = tmpname;
 			} else
 #endif
@@ -230,12 +215,10 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 			}
 		}
 		if (len > 0) {
-			if (filldir(dirent, p, len, filp->f_pos, inode_number, DT_UNKNOWN) < 0)
+			if (!dir_emit(ctx, p, len, inode_number, DT_UNKNOWN))
 				break;
 		}
-		filp->f_pos += de_len;
-
-		continue;
+		ctx->pos += de_len;
 	}
 	if (bh)
 		brelse(bh);
@@ -247,31 +230,47 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
  * handling split directory entries.. The real work is done by
  * "do_isofs_readdir()".
  */
-static int isofs_readdir(struct file *filp,
-		void *dirent, filldir_t filldir)
+static int isofs_readdir(struct file *file, struct dir_context *ctx)
 {
 	int result;
 	char *tmpname;
-	struct iso_directory_record *tmpde;
-	struct inode *inode = file_inode(filp);
+	struct inode *inode = file_inode(file);
 
-	tmpname = (char *)__get_free_page(GFP_KERNEL);
+	/*
+	 * Rockridge can produce names of NAME_MAX size, Acorn extensions at
+	 * most 227 chars.
+	 */
+	BUILD_BUG_ON(JOLIET_NAME_MAX < NAME_MAX || JOLIET_NAME_MAX < 227);
+	tmpname = kmalloc(JOLIET_NAME_MAX + 1, GFP_KERNEL);
 	if (tmpname == NULL)
 		return -ENOMEM;
 
-	tmpde = (struct iso_directory_record *) (tmpname+1024);
+	result = do_isofs_readdir(inode, file, ctx, tmpname);
 
-	result = do_isofs_readdir(inode, filp, dirent, filldir, tmpname, tmpde);
-
-	free_page((unsigned long) tmpname);
+	kfree(tmpname);
 	return result;
+}
+
+int isofs_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
+{
+	struct isofs_sb_info *sbi = ISOFS_SB(dentry->d_sb);
+
+	if (sbi->s_check == 'r') {
+		fa->fsx_xflags |= FS_XFLAG_CASEFOLD;
+		fa->flags |= FS_CASEFOLD_FL;
+	}
+	if (!sbi->s_joliet_level && !sbi->s_rock &&
+	    (sbi->s_mapping == 'n' || sbi->s_mapping == 'a'))
+		fa->fsx_xflags |= FS_XFLAG_CASENONPRESERVING;
+	return 0;
 }
 
 const struct file_operations isofs_dir_operations =
 {
 	.llseek = generic_file_llseek,
 	.read = generic_read_dir,
-	.readdir = isofs_readdir,
+	.iterate_shared = isofs_readdir,
+	.setlease = generic_setlease,
 };
 
 /*
@@ -280,6 +279,6 @@ const struct file_operations isofs_dir_operations =
 const struct inode_operations isofs_dir_inode_operations =
 {
 	.lookup = isofs_lookup,
+	.fileattr_get = isofs_fileattr_get,
 };
-
 

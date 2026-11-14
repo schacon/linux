@@ -1,12 +1,11 @@
+// SPDX-License-Identifier: GPL-1.0+
+
 /* 8390.c: A general NS8390 ethernet driver core for linux. */
 /*
 	Written 1992-94 by Donald Becker.
 
 	Copyright 1993 United States Government as represented by the
 	Director, National Security Agency.
-
-	This software may be used and distributed according to the terms
-	of the GNU General Public License, incorporated herein by reference.
 
 	The author may be reached as becker@scyld.com, or C/O
 	Scyld Computing Corporation
@@ -50,6 +49,7 @@
 
   */
 
+#include <linux/build_bug.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/jiffies.h>
@@ -99,11 +99,6 @@
 #define ei_block_input (ei_local->block_input)
 #define ei_get_8390_hdr (ei_local->get_8390_hdr)
 
-/* use 0 for production, 1 for verification, >2 for debug */
-#ifndef ei_debug
-int ei_debug = 1;
-#endif
-
 /* Index to functions. */
 static void ei_tx_intr(struct net_device *dev);
 static void ei_tx_err(struct net_device *dev);
@@ -115,6 +110,13 @@ static void NS8390_trigger_send(struct net_device *dev, unsigned int length,
 								int start_page);
 static void do_set_multicast_list(struct net_device *dev);
 static void __NS8390_init(struct net_device *dev, int startp);
+
+static unsigned version_printed;
+static int msg_enable;
+static const int default_msg_level = (NETIF_MSG_DRV | NETIF_MSG_PROBE | NETIF_MSG_RX_ERR |
+				     NETIF_MSG_TX_ERR);
+module_param(msg_enable, int, 0444);
+MODULE_PARM_DESC(msg_enable, "Debug message level (see linux/netdevice.h for bitmap)");
 
 /*
  *	SMP and the 8390 setup.
@@ -251,7 +253,7 @@ static int __ei_close(struct net_device *dev)
  * completed (or failed) - i.e. never posted a Tx related interrupt.
  */
 
-static void __ei_tx_timeout(struct net_device *dev)
+static void __ei_tx_timeout(struct net_device *dev, unsigned int txqueue)
 {
 	unsigned long e8390_base = dev->base_addr;
 	struct ei_device *ei_local = netdev_priv(dev);
@@ -345,19 +347,23 @@ static netdev_tx_t __ei_start_xmit(struct sk_buff *skb,
 	if (ei_local->tx1 == 0) {
 		output_page = ei_local->tx_start_page;
 		ei_local->tx1 = send_length;
-		if (ei_debug  &&  ei_local->tx2 > 0)
-			netdev_dbg(dev, "idle transmitter tx2=%d, lasttx=%d, txing=%d\n",
+		if ((netif_msg_tx_queued(ei_local)) &&
+		    ei_local->tx2 > 0)
+			netdev_dbg(dev,
+				   "idle transmitter tx2=%d, lasttx=%d, txing=%d\n",
 				   ei_local->tx2, ei_local->lasttx, ei_local->txing);
 	} else if (ei_local->tx2 == 0) {
 		output_page = ei_local->tx_start_page + TX_PAGES/2;
 		ei_local->tx2 = send_length;
-		if (ei_debug  &&  ei_local->tx1 > 0)
-			netdev_dbg(dev, "idle transmitter, tx1=%d, lasttx=%d, txing=%d\n",
+		if ((netif_msg_tx_queued(ei_local)) &&
+		    ei_local->tx1 > 0)
+			netdev_dbg(dev,
+				   "idle transmitter, tx1=%d, lasttx=%d, txing=%d\n",
 				   ei_local->tx1, ei_local->lasttx, ei_local->txing);
 	} else {			/* We should never get here. */
-		if (ei_debug)
-			netdev_dbg(dev, "No Tx buffers free! tx1=%d tx2=%d last=%d\n",
-				   ei_local->tx1, ei_local->tx2, ei_local->lasttx);
+		netif_dbg(ei_local, tx_err, dev,
+			  "No Tx buffers free! tx1=%d tx2=%d last=%d\n",
+			  ei_local->tx1, ei_local->tx2, ei_local->lasttx);
 		ei_local->irqlock = 0;
 		netif_stop_queue(dev);
 		ei_outb_p(ENISR_ALL, e8390_base + EN0_IMR);
@@ -388,7 +394,7 @@ static netdev_tx_t __ei_start_xmit(struct sk_buff *skb,
 	} else
 		ei_local->txqueue++;
 
-	if (ei_local->tx1  &&  ei_local->tx2)
+	if (ei_local->tx1 && ei_local->tx2)
 		netif_stop_queue(dev);
 	else
 		netif_start_queue(dev);
@@ -400,7 +406,7 @@ static netdev_tx_t __ei_start_xmit(struct sk_buff *skb,
 	spin_unlock(&ei_local->page_lock);
 	enable_irq_lockdep_irqrestore(dev->irq, &flags);
 	skb_tx_timestamp(skb);
-	dev_kfree_skb(skb);
+	dev_consume_skb_any(skb);
 	dev->stats.tx_bytes += send_length;
 
 	return NETDEV_TX_OK;
@@ -445,9 +451,8 @@ static irqreturn_t __ei_interrupt(int irq, void *dev_id)
 
 	/* Change to page 0 and read the intr status reg. */
 	ei_outb_p(E8390_NODMA+E8390_PAGE0, e8390_base + E8390_CMD);
-	if (ei_debug > 3)
-		netdev_dbg(dev, "interrupt(isr=%#2.2x)\n",
-			   ei_inb_p(e8390_base + EN0_ISR));
+	netif_dbg(ei_local, intr, dev, "interrupt(isr=%#2.2x)\n",
+		  ei_inb_p(e8390_base + EN0_ISR));
 
 	/* !!Assumption!! -- we stay in page 0.	 Don't break this. */
 	while ((interrupts = ei_inb_p(e8390_base + EN0_ISR)) != 0 &&
@@ -485,7 +490,7 @@ static irqreturn_t __ei_interrupt(int irq, void *dev_id)
 		ei_outb_p(E8390_NODMA+E8390_PAGE0+E8390_START, e8390_base + E8390_CMD);
 	}
 
-	if (interrupts && ei_debug) {
+	if (interrupts && (netif_msg_intr(ei_local))) {
 		ei_outb_p(E8390_NODMA+E8390_PAGE0+E8390_START, e8390_base + E8390_CMD);
 		if (nr_serviced >= MAX_SERVICE) {
 			/* 0xFF is valid for a card removal */
@@ -593,11 +598,13 @@ static void ei_tx_intr(struct net_device *dev)
 		if (ei_local->tx2 > 0) {
 			ei_local->txing = 1;
 			NS8390_trigger_send(dev, ei_local->tx2, ei_local->tx_start_page + 6);
-			dev->trans_start = jiffies;
-			ei_local->tx2 = -1,
+			netif_trans_update(dev);
+			ei_local->tx2 = -1;
 			ei_local->lasttx = 2;
-		} else
-			ei_local->lasttx = 20, ei_local->txing = 0;
+		} else {
+			ei_local->lasttx = 20;
+			ei_local->txing = 0;
+		}
 	} else if (ei_local->tx2 < 0) {
 		if (ei_local->lasttx != 2  &&  ei_local->lasttx != -2)
 			pr_err("%s: bogus last_tx_buffer %d, tx2=%d\n",
@@ -606,11 +613,13 @@ static void ei_tx_intr(struct net_device *dev)
 		if (ei_local->tx1 > 0) {
 			ei_local->txing = 1;
 			NS8390_trigger_send(dev, ei_local->tx1, ei_local->tx_start_page);
-			dev->trans_start = jiffies;
+			netif_trans_update(dev);
 			ei_local->tx1 = -1;
 			ei_local->lasttx = 1;
-		} else
-			ei_local->lasttx = 10, ei_local->txing = 0;
+		} else {
+			ei_local->lasttx = 10;
+			ei_local->txing = 0;
+		}
 	} /* else
 		netdev_warn(dev, "unexpected TX-done interrupt, lasttx=%d\n",
 			    ei_local->lasttx);
@@ -676,10 +685,11 @@ static void ei_receive(struct net_device *dev)
 		   Keep quiet if it looks like a card removal. One problem here
 		   is that some clones crash in roughly the same way.
 		 */
-		if (ei_debug > 0 &&
+		if ((netif_msg_rx_status(ei_local)) &&
 		    this_frame != ei_local->current_page &&
 		    (this_frame != 0x0 || rxing_page != 0xFF))
-			netdev_err(dev, "mismatched read page pointers %2x vs %2x\n",
+			netdev_err(dev,
+				   "mismatched read page pointers %2x vs %2x\n",
 				   this_frame, ei_local->current_page);
 
 		if (this_frame == rxing_page)	/* Read all the frames? */
@@ -707,10 +717,10 @@ static void ei_receive(struct net_device *dev)
 		}
 
 		if (pkt_len < 60  ||  pkt_len > 1518) {
-			if (ei_debug)
-				netdev_dbg(dev, "bogus packet size: %d, status=%#2x nxpg=%#2x\n",
-					   rx_frame.count, rx_frame.status,
-					   rx_frame.next);
+			netif_dbg(ei_local, rx_status, dev,
+				  "bogus packet size: %d, status=%#2x nxpg=%#2x\n",
+				  rx_frame.count, rx_frame.status,
+				  rx_frame.next);
 			dev->stats.rx_errors++;
 			dev->stats.rx_length_errors++;
 		} else if ((pkt_stat & 0x0F) == ENRSR_RXOK) {
@@ -718,9 +728,9 @@ static void ei_receive(struct net_device *dev)
 
 			skb = netdev_alloc_skb(dev, pkt_len + 2);
 			if (skb == NULL) {
-				if (ei_debug > 1)
-					netdev_dbg(dev, "Couldn't allocate a sk_buff of size %d\n",
-						   pkt_len);
+				netif_err(ei_local, rx_err, dev,
+					  "Couldn't allocate a sk_buff of size %d\n",
+					  pkt_len);
 				dev->stats.rx_dropped++;
 				break;
 			} else {
@@ -736,10 +746,10 @@ static void ei_receive(struct net_device *dev)
 					dev->stats.multicast++;
 			}
 		} else {
-			if (ei_debug)
-				netdev_dbg(dev, "bogus packet: status=%#2x nxpg=%#2x size=%d\n",
-					   rx_frame.status, rx_frame.next,
-					   rx_frame.count);
+			netif_err(ei_local, rx_err, dev,
+				  "bogus packet: status=%#2x nxpg=%#2x size=%d\n",
+				  rx_frame.status, rx_frame.next,
+				  rx_frame.count);
 			dev->stats.rx_errors++;
 			/* NB: The NIC counts CRC, frame and missed errors. */
 			if (pkt_stat & ENRSR_FO)
@@ -789,8 +799,7 @@ static void ei_rx_overrun(struct net_device *dev)
 	was_txing = ei_inb_p(e8390_base+E8390_CMD) & E8390_TRANS;
 	ei_outb_p(E8390_NODMA+E8390_PAGE0+E8390_STOP, e8390_base+E8390_CMD);
 
-	if (ei_debug > 1)
-		netdev_dbg(dev, "Receiver overrun\n");
+	netif_dbg(ei_local, rx_err, dev, "Receiver overrun\n");
 	dev->stats.rx_over_errors++;
 
 	/*
@@ -965,12 +974,15 @@ static void __ei_set_multicast_list(struct net_device *dev)
 static void ethdev_setup(struct net_device *dev)
 {
 	struct ei_device *ei_local = netdev_priv(dev);
-	if (ei_debug > 1)
-		printk(version);
 
 	ether_setup(dev);
 
 	spin_lock_init(&ei_local->page_lock);
+
+	ei_local->msg_enable = netif_msg_init(msg_enable, default_msg_level);
+
+	if (netif_msg_drv(ei_local) && (version_printed++ == 0))
+		pr_info("%s", version);
 }
 
 /**
@@ -982,7 +994,7 @@ static void ethdev_setup(struct net_device *dev)
 static struct net_device *____alloc_ei_netdev(int size)
 {
 	return alloc_netdev(sizeof(struct ei_device) + size, "eth%d",
-				ethdev_setup);
+			    NET_NAME_UNKNOWN, ethdev_setup);
 }
 
 
@@ -1008,8 +1020,7 @@ static void __NS8390_init(struct net_device *dev, int startp)
 	    ? (0x48 | ENDCFG_WTS | (ei_local->bigendian ? ENDCFG_BOS : 0))
 	    : 0x48;
 
-	if (sizeof(struct e8390_pkt_hdr) != 4)
-		panic("8390.c: header struct mispacked\n");
+	BUILD_BUG_ON(sizeof(struct e8390_pkt_hdr) != 4);
 	/* Follow National Semi's recommendations for initing the DP83902. */
 	ei_outb_p(E8390_NODMA+E8390_PAGE0+E8390_STOP, e8390_base+E8390_CMD); /* 0x21 */
 	ei_outb_p(endcfg, e8390_base + EN0_DCFG);	/* 0x48 or 0x49 */
@@ -1035,9 +1046,10 @@ static void __NS8390_init(struct net_device *dev, int startp)
 	ei_outb_p(E8390_NODMA + E8390_PAGE1 + E8390_STOP, e8390_base+E8390_CMD); /* 0x61 */
 	for (i = 0; i < 6; i++) {
 		ei_outb_p(dev->dev_addr[i], e8390_base + EN1_PHYS_SHIFT(i));
-		if (ei_debug > 1 &&
+		if ((netif_msg_probe(ei_local)) &&
 		    ei_inb_p(e8390_base + EN1_PHYS_SHIFT(i)) != dev->dev_addr[i])
-			netdev_err(dev, "Hw. address read/write mismap %d\n", i);
+			netdev_err(dev,
+				   "Hw. address read/write mismap %d\n", i);
 	}
 
 	ei_outb_p(ei_local->rx_start_page, e8390_base + EN1_CURPAG);

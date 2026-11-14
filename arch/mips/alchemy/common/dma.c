@@ -31,7 +31,7 @@
  */
 
 #include <linux/init.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/spinlock.h>
@@ -131,29 +131,6 @@ static const struct dma_dev dma_dev_table_bank2[DMA_NUM_DEV_BANK2] = {
 	{ AU1100_SD1_PHYS_ADDR + 0x04, DMA_DS | DMA_DW8 | DMA_DR }	/* coherent */
 };
 
-void dump_au1000_dma_channel(unsigned int dmanr)
-{
-	struct dma_chan *chan;
-
-	if (dmanr >= NUM_AU1000_DMA_CHANNELS)
-		return;
-	chan = &au1000_dma_table[dmanr];
-
-	printk(KERN_INFO "Au1000 DMA%d Register Dump:\n", dmanr);
-	printk(KERN_INFO "  mode = 0x%08x\n",
-	       au_readl(chan->io + DMA_MODE_SET));
-	printk(KERN_INFO "  addr = 0x%08x\n",
-	       au_readl(chan->io + DMA_PERIPHERAL_ADDR));
-	printk(KERN_INFO "  start0 = 0x%08x\n",
-	       au_readl(chan->io + DMA_BUFFER0_START));
-	printk(KERN_INFO "  start1 = 0x%08x\n",
-	       au_readl(chan->io + DMA_BUFFER1_START));
-	printk(KERN_INFO "  count0 = 0x%08x\n",
-	       au_readl(chan->io + DMA_BUFFER0_COUNT));
-	printk(KERN_INFO "  count1 = 0x%08x\n",
-	       au_readl(chan->io + DMA_BUFFER1_COUNT));
-}
-
 /*
  * Finds a free channel, and binds the requested device to it.
  * Returns the allocated channel number, or negative on error.
@@ -204,7 +181,8 @@ int request_au1000_dma(int dev_id, const char *dev_str,
 	}
 
 	/* fill it in */
-	chan->io = KSEG1ADDR(AU1000_DMA_PHYS_ADDR) + i * DMA_CHANNEL_LEN;
+	chan->io = (void __iomem *)(KSEG1ADDR(AU1000_DMA_PHYS_ADDR) +
+			i * DMA_CHANNEL_LEN);
 	chan->dev_id = dev_id;
 	chan->dev_str = dev_str;
 	chan->fifo_addr = dev->fifo_addr;

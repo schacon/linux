@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * HID Sensor Time Driver
  * Copyright (c) 2012, Alexander Holler.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
- *
  */
 #include <linux/device.h>
 #include <linux/platform_device.h>
@@ -22,10 +9,6 @@
 #include <linux/hid-sensor-hub.h>
 #include <linux/iio/iio.h>
 #include <linux/rtc.h>
-
-/* Format: HID-SENSOR-usage_id_in_hex */
-/* Usage ID from spec for Time: 0x2000A0 */
-#define DRIVER_NAME "HID-SENSOR-2000a0" /* must be lowercase */
 
 enum hid_time_channel {
 	CHANNEL_SCAN_INDEX_YEAR,
@@ -76,6 +59,20 @@ static int hid_time_proc_event(struct hid_sensor_hub_device *hsdev,
 	return 0;
 }
 
+static u32 hid_time_value(size_t raw_len, char *raw_data)
+{
+	switch (raw_len) {
+	case 1:
+		return *(u8 *)raw_data;
+	case 2:
+		return *(u16 *)raw_data;
+	case 4:
+		return *(u32 *)raw_data;
+	default:
+		return (u32)(~0U); /* 0xff... or -1 to denote an error */
+	}
+}
+
 static int hid_time_capture_sample(struct hid_sensor_hub_device *hsdev,
 				unsigned usage_id, size_t raw_len,
 				char *raw_data, void *priv)
@@ -85,26 +82,35 @@ static int hid_time_capture_sample(struct hid_sensor_hub_device *hsdev,
 
 	switch (usage_id) {
 	case HID_USAGE_SENSOR_TIME_YEAR:
-		time_buf->tm_year = *(u8 *)raw_data;
-		if (time_buf->tm_year < 70)
-			/* assume we are in 1970...2069 */
-			time_buf->tm_year += 100;
+		/*
+		 * The draft for HID-sensors (HUTRR39) currently doesn't define
+		 * the range for the year attribute. Therefor we support
+		 * 8 bit (0-99) and 16 or 32 bits (full) as size for the year.
+		 */
+		if (raw_len == 1) {
+			time_buf->tm_year = *(u8 *)raw_data;
+			if (time_buf->tm_year < 70)
+				/* assume we are in 1970...2069 */
+				time_buf->tm_year += 100;
+		} else
+			time_buf->tm_year =
+				(int)hid_time_value(raw_len, raw_data)-1900;
 		break;
 	case HID_USAGE_SENSOR_TIME_MONTH:
-		/* sensor sending the month as 1-12, we need 0-11 */
-		time_buf->tm_mon = *(u8 *)raw_data-1;
+		/* sensors are sending the month as 1-12, we need 0-11 */
+		time_buf->tm_mon = (int)hid_time_value(raw_len, raw_data)-1;
 		break;
 	case HID_USAGE_SENSOR_TIME_DAY:
-		time_buf->tm_mday = *(u8 *)raw_data;
+		time_buf->tm_mday = (int)hid_time_value(raw_len, raw_data);
 		break;
 	case HID_USAGE_SENSOR_TIME_HOUR:
-		time_buf->tm_hour = *(u8 *)raw_data;
+		time_buf->tm_hour = (int)hid_time_value(raw_len, raw_data);
 		break;
 	case HID_USAGE_SENSOR_TIME_MINUTE:
-		time_buf->tm_min = *(u8 *)raw_data;
+		time_buf->tm_min = (int)hid_time_value(raw_len, raw_data);
 		break;
 	case HID_USAGE_SENSOR_TIME_SECOND:
-		time_buf->tm_sec = *(u8 *)raw_data;
+		time_buf->tm_sec = (int)hid_time_value(raw_len, raw_data);
 		break;
 	default:
 		return -EINVAL;
@@ -150,9 +156,10 @@ static int hid_time_parse_report(struct platform_device *pdev,
 				"not all needed attributes inside the same report!\n");
 			return -EINVAL;
 		}
-		if (time_state->info[i].size != 1) {
+		if (time_state->info[i].size == 3 ||
+				time_state->info[i].size > 4) {
 			dev_err(&pdev->dev,
-				"attribute '%s' not 8 bits wide!\n",
+				"attribute '%s' not 8, 16 or 32 bits wide!\n",
 				hid_time_attrib_name(
 					time_state->info[i].attrib_id));
 			return -EINVAL;
@@ -185,15 +192,14 @@ static int hid_time_parse_report(struct platform_device *pdev,
 static int hid_rtc_read_time(struct device *dev, struct rtc_time *tm)
 {
 	unsigned long flags;
-	struct hid_time_state *time_state =
-		platform_get_drvdata(to_platform_device(dev));
+	struct hid_time_state *time_state = dev_get_drvdata(dev);
 	int ret;
 
-	INIT_COMPLETION(time_state->comp_last_time);
+	reinit_completion(&time_state->comp_last_time);
 	/* get a report with all values through requesting one value */
 	sensor_hub_input_attr_get_raw_value(time_state->common_attributes.hsdev,
 			HID_USAGE_SENSOR_TIME, hid_time_addresses[0],
-			time_state->info[0].report_id);
+			time_state->info[0].report_id, SENSOR_HUB_SYNC, false);
 	/* wait for all values (event) */
 	ret = wait_for_completion_killable_timeout(
 			&time_state->comp_last_time, HZ*6);
@@ -216,9 +222,9 @@ static const struct rtc_class_ops hid_time_rtc_ops = {
 static int hid_time_probe(struct platform_device *pdev)
 {
 	int ret = 0;
-	struct hid_sensor_hub_device *hsdev = pdev->dev.platform_data;
-	struct hid_time_state *time_state = devm_kzalloc(&pdev->dev,
-		sizeof(struct hid_time_state), GFP_KERNEL);
+	struct hid_sensor_hub_device *hsdev = dev_get_platdata(&pdev->dev);
+	struct hid_time_state *time_state = devm_kzalloc_obj(&pdev->dev,
+							     struct hid_time_state);
 
 	if (time_state == NULL)
 		return -ENOMEM;
@@ -232,7 +238,9 @@ static int hid_time_probe(struct platform_device *pdev)
 
 	ret = hid_sensor_parse_common_attributes(hsdev,
 				HID_USAGE_SENSOR_TIME,
-				&time_state->common_attributes);
+				&time_state->common_attributes,
+				NULL,
+				0);
 	if (ret) {
 		dev_err(&pdev->dev, "failed to setup common attributes!\n");
 		return ret;
@@ -255,31 +263,60 @@ static int hid_time_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	ret = sensor_hub_device_open(hsdev);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to open sensor hub device!\n");
+		goto err_open;
+	}
+
+	/*
+	 * Enable HID input processing early in order to be able to read the
+	 * clock already in devm_rtc_device_register().
+	 */
+	hid_device_io_start(hsdev->hdev);
+
 	time_state->rtc = devm_rtc_device_register(&pdev->dev,
 					"hid-sensor-time", &hid_time_rtc_ops,
 					THIS_MODULE);
 
 	if (IS_ERR(time_state->rtc)) {
+		hid_device_io_stop(hsdev->hdev);
+		ret = PTR_ERR(time_state->rtc);
+		time_state->rtc = NULL;
 		dev_err(&pdev->dev, "rtc device register failed!\n");
-		return PTR_ERR(time_state->rtc);
+		goto err_rtc;
 	}
 
 	return ret;
-}
 
-static int hid_time_remove(struct platform_device *pdev)
-{
-	struct hid_sensor_hub_device *hsdev = pdev->dev.platform_data;
-
+err_rtc:
+	sensor_hub_device_close(hsdev);
+err_open:
 	sensor_hub_remove_callback(hsdev, HID_USAGE_SENSOR_TIME);
-
-	return 0;
+	return ret;
 }
+
+static void hid_time_remove(struct platform_device *pdev)
+{
+	struct hid_sensor_hub_device *hsdev = dev_get_platdata(&pdev->dev);
+
+	sensor_hub_device_close(hsdev);
+	sensor_hub_remove_callback(hsdev, HID_USAGE_SENSOR_TIME);
+}
+
+static const struct platform_device_id hid_time_ids[] = {
+	{
+		/* Format: HID-SENSOR-usage_id_in_hex_lowercase */
+		.name = "HID-SENSOR-2000a0",
+	},
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(platform, hid_time_ids);
 
 static struct platform_driver hid_time_platform_driver = {
+	.id_table = hid_time_ids,
 	.driver = {
-		.name	= DRIVER_NAME,
-		.owner	= THIS_MODULE,
+		.name	= KBUILD_MODNAME,
 	},
 	.probe		= hid_time_probe,
 	.remove		= hid_time_remove,
@@ -289,3 +326,4 @@ module_platform_driver(hid_time_platform_driver);
 MODULE_DESCRIPTION("HID Sensor Time");
 MODULE_AUTHOR("Alexander Holler <holler@ahsoftware.de>");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_HID");

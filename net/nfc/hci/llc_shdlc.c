@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * shdlc Link Layer Control
  *
  * Copyright (C) 2012  Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the
- * Free Software Foundation, Inc.,
- * 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
 #define pr_fmt(fmt) "shdlc: %s: " fmt, __func__
@@ -136,7 +123,7 @@ static bool llc_shdlc_x_lteq_y_lt_z(int x, int y, int z)
 		return ((y >= x) || (y < z)) ? true : false;
 }
 
-static struct sk_buff *llc_shdlc_alloc_skb(struct llc_shdlc *shdlc,
+static struct sk_buff *llc_shdlc_alloc_skb(const struct llc_shdlc *shdlc,
 					   int payload_len)
 {
 	struct sk_buff *skb;
@@ -150,7 +137,7 @@ static struct sk_buff *llc_shdlc_alloc_skb(struct llc_shdlc *shdlc,
 }
 
 /* immediately sends an S frame. */
-static int llc_shdlc_send_s_frame(struct llc_shdlc *shdlc,
+static int llc_shdlc_send_s_frame(const struct llc_shdlc *shdlc,
 				  enum sframe_type sframe_type, int nr)
 {
 	int r;
@@ -162,7 +149,7 @@ static int llc_shdlc_send_s_frame(struct llc_shdlc *shdlc,
 	if (skb == NULL)
 		return -ENOMEM;
 
-	*skb_push(skb, 1) = SHDLC_CONTROL_HEAD_S | (sframe_type << 3) | nr;
+	*(u8 *)skb_push(skb, 1) = SHDLC_CONTROL_HEAD_S | (sframe_type << 3) | nr;
 
 	r = shdlc->xmit_to_drv(shdlc->hdev, skb);
 
@@ -172,7 +159,7 @@ static int llc_shdlc_send_s_frame(struct llc_shdlc *shdlc,
 }
 
 /* immediately sends an U frame. skb may contain optional payload */
-static int llc_shdlc_send_u_frame(struct llc_shdlc *shdlc,
+static int llc_shdlc_send_u_frame(const struct llc_shdlc *shdlc,
 				  struct sk_buff *skb,
 				  enum uframe_modifier uframe_modifier)
 {
@@ -180,7 +167,7 @@ static int llc_shdlc_send_u_frame(struct llc_shdlc *shdlc,
 
 	pr_debug("uframe_modifier=%d\n", uframe_modifier);
 
-	*skb_push(skb, 1) = SHDLC_CONTROL_HEAD_U | uframe_modifier;
+	*(u8 *)skb_push(skb, 1) = SHDLC_CONTROL_HEAD_U | uframe_modifier;
 
 	r = shdlc->xmit_to_drv(shdlc->hdev, skb);
 
@@ -211,11 +198,10 @@ static void llc_shdlc_reset_t2(struct llc_shdlc *shdlc, int y_nr)
 
 	if (skb_queue_empty(&shdlc->ack_pending_q)) {
 		if (shdlc->t2_active) {
-			del_timer_sync(&shdlc->t2_timer);
+			timer_delete_sync(&shdlc->t2_timer);
 			shdlc->t2_active = false;
 
-			pr_debug
-			    ("All sent frames acked. Stopped T2(retransmit)\n");
+			pr_debug("All sent frames acked. Stopped T2(retransmit)\n");
 		}
 	} else {
 		skb = skb_peek(&shdlc->ack_pending_q);
@@ -224,8 +210,7 @@ static void llc_shdlc_reset_t2(struct llc_shdlc *shdlc, int y_nr)
 			  msecs_to_jiffies(SHDLC_T2_VALUE_MS));
 		shdlc->t2_active = true;
 
-		pr_debug
-		    ("Start T2(retransmit) for remaining unacked sent frames\n");
+		pr_debug("Start T2(retransmit) for remaining unacked sent frames\n");
 	}
 }
 
@@ -249,7 +234,7 @@ static void llc_shdlc_rcv_i_frame(struct llc_shdlc *shdlc,
 		goto exit;
 	}
 
-	if (shdlc->t1_active == false) {
+	if (!shdlc->t1_active) {
 		shdlc->t1_active = true;
 		mod_timer(&shdlc->t1_timer, jiffies +
 			  msecs_to_jiffies(SHDLC_T1_VALUE_MS(shdlc->w)));
@@ -300,11 +285,11 @@ static void llc_shdlc_rcv_rej(struct llc_shdlc *shdlc, int y_nr)
 {
 	struct sk_buff *skb;
 
-	pr_debug("remote asks retransmition from frame %d\n", y_nr);
+	pr_debug("remote asks retransmission from frame %d\n", y_nr);
 
 	if (llc_shdlc_x_lteq_y_lt_z(shdlc->dnr, y_nr, shdlc->ns)) {
 		if (shdlc->t2_active) {
-			del_timer_sync(&shdlc->t2_timer);
+			timer_delete_sync(&shdlc->t2_timer);
 			shdlc->t2_active = false;
 			pr_debug("Stopped T2(retransmit)\n");
 		}
@@ -357,7 +342,7 @@ static void llc_shdlc_connect_complete(struct llc_shdlc *shdlc, int r)
 {
 	pr_debug("result=%d\n", r);
 
-	del_timer_sync(&shdlc->connect_timer);
+	timer_delete_sync(&shdlc->connect_timer);
 
 	if (r == 0) {
 		shdlc->ns = 0;
@@ -374,27 +359,23 @@ static void llc_shdlc_connect_complete(struct llc_shdlc *shdlc, int r)
 	wake_up(shdlc->connect_wq);
 }
 
-static int llc_shdlc_connect_initiate(struct llc_shdlc *shdlc)
+static int llc_shdlc_connect_initiate(const struct llc_shdlc *shdlc)
 {
 	struct sk_buff *skb;
-
-	pr_debug("\n");
 
 	skb = llc_shdlc_alloc_skb(shdlc, 2);
 	if (skb == NULL)
 		return -ENOMEM;
 
-	*skb_put(skb, 1) = SHDLC_MAX_WINDOW;
-	*skb_put(skb, 1) = SHDLC_SREJ_SUPPORT ? 1 : 0;
+	skb_put_u8(skb, SHDLC_MAX_WINDOW);
+	skb_put_u8(skb, SHDLC_SREJ_SUPPORT ? 1 : 0);
 
 	return llc_shdlc_send_u_frame(shdlc, skb, U_FRAME_RSET);
 }
 
-static int llc_shdlc_connect_send_ua(struct llc_shdlc *shdlc)
+static int llc_shdlc_connect_send_ua(const struct llc_shdlc *shdlc)
 {
 	struct sk_buff *skb;
-
-	pr_debug("\n");
 
 	skb = llc_shdlc_alloc_skb(shdlc, 0);
 	if (skb == NULL)
@@ -419,7 +400,7 @@ static void llc_shdlc_rcv_u_frame(struct llc_shdlc *shdlc,
 		case SHDLC_NEGOTIATING:
 		case SHDLC_CONNECTING:
 			/*
-			 * We sent RSET, but chip wants to negociate or we
+			 * We sent RSET, but chip wants to negotiate or we
 			 * got RSET before we managed to send out our.
 			 */
 			if (skb->len > 0)
@@ -535,26 +516,25 @@ static void llc_shdlc_handle_send_queue(struct llc_shdlc *shdlc)
 	unsigned long time_sent;
 
 	if (shdlc->send_q.qlen)
-		pr_debug
-		    ("sendQlen=%d ns=%d dnr=%d rnr=%s w_room=%d unackQlen=%d\n",
-		     shdlc->send_q.qlen, shdlc->ns, shdlc->dnr,
-		     shdlc->rnr == false ? "false" : "true",
-		     shdlc->w - llc_shdlc_w_used(shdlc->ns, shdlc->dnr),
-		     shdlc->ack_pending_q.qlen);
+		pr_debug("sendQlen=%d ns=%d dnr=%d rnr=%s w_room=%d unackQlen=%d\n",
+			 shdlc->send_q.qlen, shdlc->ns, shdlc->dnr,
+			 shdlc->rnr == false ? "false" : "true",
+			 shdlc->w - llc_shdlc_w_used(shdlc->ns, shdlc->dnr),
+			 shdlc->ack_pending_q.qlen);
 
 	while (shdlc->send_q.qlen && shdlc->ack_pending_q.qlen < shdlc->w &&
 	       (shdlc->rnr == false)) {
 
 		if (shdlc->t1_active) {
-			del_timer_sync(&shdlc->t1_timer);
+			timer_delete_sync(&shdlc->t1_timer);
 			shdlc->t1_active = false;
 			pr_debug("Stopped T1(send ack)\n");
 		}
 
 		skb = skb_dequeue(&shdlc->send_q);
 
-		*skb_push(skb, 1) = SHDLC_CONTROL_HEAD_I | (shdlc->ns << 3) |
-				    shdlc->nr;
+		*(u8 *)skb_push(skb, 1) = SHDLC_CONTROL_HEAD_I | (shdlc->ns << 3) |
+					shdlc->nr;
 
 		pr_debug("Sending I-Frame %d, waiting to rcv %d\n", shdlc->ns,
 			 shdlc->nr);
@@ -582,27 +562,25 @@ static void llc_shdlc_handle_send_queue(struct llc_shdlc *shdlc)
 	}
 }
 
-static void llc_shdlc_connect_timeout(unsigned long data)
+static void llc_shdlc_connect_timeout(struct timer_list *t)
 {
-	struct llc_shdlc *shdlc = (struct llc_shdlc *)data;
-
-	pr_debug("\n");
+	struct llc_shdlc *shdlc = timer_container_of(shdlc, t, connect_timer);
 
 	schedule_work(&shdlc->sm_work);
 }
 
-static void llc_shdlc_t1_timeout(unsigned long data)
+static void llc_shdlc_t1_timeout(struct timer_list *t)
 {
-	struct llc_shdlc *shdlc = (struct llc_shdlc *)data;
+	struct llc_shdlc *shdlc = timer_container_of(shdlc, t, t1_timer);
 
 	pr_debug("SoftIRQ: need to send ack\n");
 
 	schedule_work(&shdlc->sm_work);
 }
 
-static void llc_shdlc_t2_timeout(unsigned long data)
+static void llc_shdlc_t2_timeout(struct timer_list *t)
 {
-	struct llc_shdlc *shdlc = (struct llc_shdlc *)data;
+	struct llc_shdlc *shdlc = timer_container_of(shdlc, t, t2_timer);
 
 	pr_debug("SoftIRQ: need to retransmit\n");
 
@@ -613,8 +591,6 @@ static void llc_shdlc_sm_work(struct work_struct *work)
 {
 	struct llc_shdlc *shdlc = container_of(work, struct llc_shdlc, sm_work);
 	int r;
-
-	pr_debug("\n");
 
 	mutex_lock(&shdlc->state_mutex);
 
@@ -662,8 +638,7 @@ static void llc_shdlc_sm_work(struct work_struct *work)
 		llc_shdlc_handle_send_queue(shdlc);
 
 		if (shdlc->t1_active && timer_pending(&shdlc->t1_timer) == 0) {
-			pr_debug
-			    ("Handle T1(send ack) elapsed (T1 now inactive)\n");
+			pr_debug("Handle T1(send ack) elapsed (T1 now inactive)\n");
 
 			shdlc->t1_active = false;
 			r = llc_shdlc_send_s_frame(shdlc, S_FRAME_RR,
@@ -673,8 +648,7 @@ static void llc_shdlc_sm_work(struct work_struct *work)
 		}
 
 		if (shdlc->t2_active && timer_pending(&shdlc->t2_timer) == 0) {
-			pr_debug
-			    ("Handle T2(retransmit) elapsed (T2 inactive)\n");
+			pr_debug("Handle T2(retransmit) elapsed (T2 inactive)\n");
 
 			shdlc->t2_active = false;
 
@@ -699,8 +673,6 @@ static int llc_shdlc_connect(struct llc_shdlc *shdlc)
 {
 	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(connect_wq);
 
-	pr_debug("\n");
-
 	mutex_lock(&shdlc->state_mutex);
 
 	shdlc->state = SHDLC_CONNECTING;
@@ -719,8 +691,6 @@ static int llc_shdlc_connect(struct llc_shdlc *shdlc)
 
 static void llc_shdlc_disconnect(struct llc_shdlc *shdlc)
 {
-	pr_debug("\n");
-
 	mutex_lock(&shdlc->state_mutex);
 
 	shdlc->state = SHDLC_DISCONNECTED;
@@ -758,24 +728,16 @@ static void *llc_shdlc_init(struct nfc_hci_dev *hdev, xmit_to_drv_t xmit_to_drv,
 	*rx_headroom = SHDLC_LLC_HEAD_ROOM;
 	*rx_tailroom = 0;
 
-	shdlc = kzalloc(sizeof(struct llc_shdlc), GFP_KERNEL);
+	shdlc = kzalloc_obj(struct llc_shdlc);
 	if (shdlc == NULL)
 		return NULL;
 
 	mutex_init(&shdlc->state_mutex);
 	shdlc->state = SHDLC_DISCONNECTED;
 
-	init_timer(&shdlc->connect_timer);
-	shdlc->connect_timer.data = (unsigned long)shdlc;
-	shdlc->connect_timer.function = llc_shdlc_connect_timeout;
-
-	init_timer(&shdlc->t1_timer);
-	shdlc->t1_timer.data = (unsigned long)shdlc;
-	shdlc->t1_timer.function = llc_shdlc_t1_timeout;
-
-	init_timer(&shdlc->t2_timer);
-	shdlc->t2_timer.data = (unsigned long)shdlc;
-	shdlc->t2_timer.function = llc_shdlc_t2_timeout;
+	timer_setup(&shdlc->connect_timer, llc_shdlc_connect_timeout, 0);
+	timer_setup(&shdlc->t1_timer, llc_shdlc_t1_timeout, 0);
+	timer_setup(&shdlc->t2_timer, llc_shdlc_t2_timeout, 0);
 
 	shdlc->w = SHDLC_MAX_WINDOW;
 	shdlc->srej_support = SHDLC_SREJ_SUPPORT;
@@ -799,6 +761,14 @@ static void *llc_shdlc_init(struct nfc_hci_dev *hdev, xmit_to_drv_t xmit_to_drv,
 static void llc_shdlc_deinit(struct nfc_llc *llc)
 {
 	struct llc_shdlc *shdlc = nfc_llc_get_data(llc);
+
+	timer_shutdown_sync(&shdlc->connect_timer);
+	timer_shutdown_sync(&shdlc->t1_timer);
+	timer_shutdown_sync(&shdlc->t2_timer);
+	shdlc->t1_active = false;
+	shdlc->t2_active = false;
+
+	cancel_work_sync(&shdlc->sm_work);
 
 	skb_queue_purge(&shdlc->rcv_q);
 	skb_queue_purge(&shdlc->send_q);
@@ -841,7 +811,7 @@ static int llc_shdlc_xmit_from_hci(struct nfc_llc *llc, struct sk_buff *skb)
 	return 0;
 }
 
-static struct nfc_llc_ops llc_shdlc_ops = {
+static const struct nfc_llc_ops llc_shdlc_ops = {
 	.init = llc_shdlc_init,
 	.deinit = llc_shdlc_deinit,
 	.start = llc_shdlc_start,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mm/ioremap.c
  *
@@ -22,17 +23,19 @@
  */
 #include <linux/module.h>
 #include <linux/errno.h>
+#include <linux/kasan.h>
 #include <linux/mm.h>
 #include <linux/vmalloc.h>
 #include <linux/io.h>
 #include <linux/sizes.h>
+#include <linux/memblock.h>
 
-#include <asm/cp15.h>
-#include <asm/cputype.h>
 #include <asm/cacheflush.h>
+#include <asm/early_ioremap.h>
 #include <asm/mmu_context.h>
 #include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
+#include <asm/set_memory.h>
 #include <asm/system_info.h>
 
 #include <asm/mach/map.h>
@@ -106,23 +109,52 @@ void __init add_static_vm_early(struct static_vm *svm)
 int ioremap_page(unsigned long virt, unsigned long phys,
 		 const struct mem_type *mtype)
 {
-	return ioremap_page_range(virt, virt + PAGE_SIZE, phys,
-				  __pgprot(mtype->prot_pte));
+	return vmap_page_range(virt, virt + PAGE_SIZE, phys,
+			       __pgprot(mtype->prot_pte));
 }
 EXPORT_SYMBOL(ioremap_page);
 
+#ifdef CONFIG_KASAN
+static unsigned long arm_kasan_mem_to_shadow(unsigned long addr)
+{
+	return (unsigned long)kasan_mem_to_shadow((void *)addr);
+}
+#else
+static unsigned long arm_kasan_mem_to_shadow(unsigned long addr)
+{
+	return 0;
+}
+#endif
+
+static void memcpy_pgd(struct mm_struct *mm, unsigned long start,
+		       unsigned long end)
+{
+	end = ALIGN(end, PGDIR_SIZE);
+	memcpy(pgd_offset(mm, start), pgd_offset_k(start),
+	       sizeof(pgd_t) * (pgd_index(end) - pgd_index(start)));
+}
+
 void __check_vmalloc_seq(struct mm_struct *mm)
 {
-	unsigned int seq;
+	int seq;
 
 	do {
-		seq = init_mm.context.vmalloc_seq;
-		memcpy(pgd_offset(mm, VMALLOC_START),
-		       pgd_offset_k(VMALLOC_START),
-		       sizeof(pgd_t) * (pgd_index(VMALLOC_END) -
-					pgd_index(VMALLOC_START)));
-		mm->context.vmalloc_seq = seq;
-	} while (seq != init_mm.context.vmalloc_seq);
+		seq = atomic_read_acquire(&init_mm.context.vmalloc_seq);
+		memcpy_pgd(mm, VMALLOC_START, VMALLOC_END);
+		if (IS_ENABLED(CONFIG_KASAN_VMALLOC)) {
+			unsigned long start =
+				arm_kasan_mem_to_shadow(VMALLOC_START);
+			unsigned long end =
+				arm_kasan_mem_to_shadow(VMALLOC_END);
+			memcpy_pgd(mm, start, end);
+		}
+		/*
+		 * Use a store-release so that other CPUs that observe the
+		 * counter's new value are guaranteed to see the results of the
+		 * memcpy as well.
+		 */
+		atomic_set_release(&mm->context.vmalloc_seq, seq);
+	} while (seq != atomic_read(&init_mm.context.vmalloc_seq));
 }
 
 #if !defined(CONFIG_SMP) && !defined(CONFIG_ARM_LPAE)
@@ -139,14 +171,8 @@ void __check_vmalloc_seq(struct mm_struct *mm)
 static void unmap_area_sections(unsigned long virt, unsigned long size)
 {
 	unsigned long addr = virt, end = virt + (size & ~(SZ_1M - 1));
-	pgd_t *pgd;
-	pud_t *pud;
-	pmd_t *pmdp;
+	pmd_t *pmdp = pmd_off_k(addr);
 
-	flush_cache_vunmap(addr, end);
-	pgd = pgd_offset_k(addr);
-	pud = pud_offset(pgd, addr);
-	pmdp = pmd_offset(pud, addr);
 	do {
 		pmd_t pmd = *pmdp;
 
@@ -159,7 +185,7 @@ static void unmap_area_sections(unsigned long virt, unsigned long size)
 			 * Note: this is still racy on SMP machines.
 			 */
 			pmd_clear(pmdp);
-			init_mm.context.vmalloc_seq++;
+			atomic_inc_return_release(&init_mm.context.vmalloc_seq);
 
 			/*
 			 * Free the page table, if there was one.
@@ -176,8 +202,7 @@ static void unmap_area_sections(unsigned long virt, unsigned long size)
 	 * Ensure that the active_mm is up to date - we want to
 	 * catch any use-after-iounmap cases.
 	 */
-	if (current->active_mm->context.vmalloc_seq != init_mm.context.vmalloc_seq)
-		__check_vmalloc_seq(current->active_mm);
+	check_vmalloc_seq(current->active_mm);
 
 	flush_tlb_kernel_range(virt, end);
 }
@@ -187,9 +212,7 @@ remap_area_sections(unsigned long virt, unsigned long pfn,
 		    size_t size, const struct mem_type *type)
 {
 	unsigned long addr = virt, end = virt + size;
-	pgd_t *pgd;
-	pud_t *pud;
-	pmd_t *pmd;
+	pmd_t *pmd = pmd_off_k(addr);
 
 	/*
 	 * Remove and free any PTE-based mapping, and
@@ -197,9 +220,6 @@ remap_area_sections(unsigned long virt, unsigned long pfn,
 	 */
 	unmap_area_sections(virt, size);
 
-	pgd = pgd_offset_k(addr);
-	pud = pud_offset(pgd, addr);
-	pmd = pmd_offset(pud, addr);
 	do {
 		pmd[0] = __pmd(__pfn_to_phys(pfn) | type->prot_sect);
 		pfn += SZ_1M >> PAGE_SHIFT;
@@ -214,63 +234,26 @@ remap_area_sections(unsigned long virt, unsigned long pfn,
 	return 0;
 }
 
-static int
-remap_area_supersections(unsigned long virt, unsigned long pfn,
-			 size_t size, const struct mem_type *type)
-{
-	unsigned long addr = virt, end = virt + size;
-	pgd_t *pgd;
-	pud_t *pud;
-	pmd_t *pmd;
-
-	/*
-	 * Remove and free any PTE-based mapping, and
-	 * sync the current kernel mapping.
-	 */
-	unmap_area_sections(virt, size);
-
-	pgd = pgd_offset_k(virt);
-	pud = pud_offset(pgd, addr);
-	pmd = pmd_offset(pud, addr);
-	do {
-		unsigned long super_pmd_val, i;
-
-		super_pmd_val = __pfn_to_phys(pfn) | type->prot_sect |
-				PMD_SECT_SUPER;
-		super_pmd_val |= ((pfn >> (32 - PAGE_SHIFT)) & 0xf) << 20;
-
-		for (i = 0; i < 8; i++) {
-			pmd[0] = __pmd(super_pmd_val);
-			pmd[1] = __pmd(super_pmd_val);
-			flush_pmd_entry(pmd);
-
-			addr += PMD_SIZE;
-			pmd += 2;
-		}
-
-		pfn += SUPERSECTION_SIZE >> PAGE_SHIFT;
-	} while (addr < end);
-
-	return 0;
-}
 #endif
 
-void __iomem * __arm_ioremap_pfn_caller(unsigned long pfn,
+static void __iomem * __arm_ioremap_pfn_caller(unsigned long pfn,
 	unsigned long offset, size_t size, unsigned int mtype, void *caller)
 {
 	const struct mem_type *type;
 	int err;
 	unsigned long addr;
 	struct vm_struct *area;
-	phys_addr_t paddr = __pfn_to_phys(pfn);
+	phys_addr_t paddr;
 
 #ifndef CONFIG_ARM_LPAE
 	/*
-	 * High mappings must be supersection aligned
+	 * The physical range must not extend beyond the 32-bit
+	 * phys_addr_t
 	 */
-	if (pfn >= 0x100000 && (paddr & ~SUPERSECTION_MASK))
+	if (((u64)pfn << PAGE_SHIFT) + offset + size > SZ_4G)
 		return NULL;
 #endif
+	paddr = __pfn_to_phys(pfn);
 
 	type = get_mem_type(mtype);
 	if (!type)
@@ -284,7 +267,7 @@ void __iomem * __arm_ioremap_pfn_caller(unsigned long pfn,
 	/*
 	 * Try to reuse one of the static mapping whenever possible.
 	 */
-	if (size && !(sizeof(phys_addr_t) == 4 && pfn >= 0x100000)) {
+	if (size) {
 		struct static_vm *svm;
 
 		svm = find_static_vm_paddr(paddr, size, mtype);
@@ -296,9 +279,11 @@ void __iomem * __arm_ioremap_pfn_caller(unsigned long pfn,
 	}
 
 	/*
-	 * Don't allow RAM to be mapped - this causes problems with ARMv6+
+	 * Don't allow RAM to be mapped with mismatched attributes - this
+	 * causes problems with ARMv6+
 	 */
-	if (WARN_ON(pfn_valid(pfn)))
+	if (WARN_ON(memblock_is_map_memory(PFN_PHYS(pfn)) &&
+		    mtype != MT_MEMORY_RW))
 		return NULL;
 
 	area = get_vm_area_caller(size, VM_IOREMAP, caller);
@@ -308,13 +293,7 @@ void __iomem * __arm_ioremap_pfn_caller(unsigned long pfn,
 	area->phys_addr = paddr;
 
 #if !defined(CONFIG_SMP) && !defined(CONFIG_ARM_LPAE)
-	if (DOMAIN_IO == 0 &&
-	    (((cpu_architecture() >= CPU_ARCH_ARMv6) && (get_cr() & CR_XP)) ||
-	       cpu_is_xsc3()) && pfn >= 0x100000 &&
-	       !((paddr | size | addr) & ~SUPERSECTION_MASK)) {
-		area->flags |= VM_ARM_SECTION_MAPPING;
-		err = remap_area_supersections(addr, pfn, size, type);
-	} else if (!((paddr | size | addr) & ~PMD_MASK)) {
+	if (!((paddr | size | addr) & ~PMD_MASK)) {
 		area->flags |= VM_ARM_SECTION_MAPPING;
 		err = remap_area_sections(addr, pfn, size, type);
 	} else
@@ -331,10 +310,10 @@ void __iomem * __arm_ioremap_pfn_caller(unsigned long pfn,
 	return (void __iomem *) (offset + addr);
 }
 
-void __iomem *__arm_ioremap_caller(unsigned long phys_addr, size_t size,
+void __iomem *__arm_ioremap_caller(phys_addr_t phys_addr, size_t size,
 	unsigned int mtype, void *caller)
 {
-	unsigned long last_addr;
+	phys_addr_t last_addr;
  	unsigned long offset = phys_addr & ~PAGE_MASK;
  	unsigned long pfn = __phys_to_pfn(phys_addr);
 
@@ -363,21 +342,34 @@ __arm_ioremap_pfn(unsigned long pfn, unsigned long offset, size_t size,
 		  unsigned int mtype)
 {
 	return __arm_ioremap_pfn_caller(pfn, offset, size, mtype,
-			__builtin_return_address(0));
+					__builtin_return_address(0));
 }
 EXPORT_SYMBOL(__arm_ioremap_pfn);
 
-void __iomem * (*arch_ioremap_caller)(unsigned long, size_t,
+void __iomem * (*arch_ioremap_caller)(phys_addr_t, size_t,
 				      unsigned int, void *) =
 	__arm_ioremap_caller;
 
-void __iomem *
-__arm_ioremap(unsigned long phys_addr, size_t size, unsigned int mtype)
+void __iomem *ioremap(resource_size_t res_cookie, size_t size)
 {
-	return arch_ioremap_caller(phys_addr, size, mtype,
-		__builtin_return_address(0));
+	return arch_ioremap_caller(res_cookie, size, MT_DEVICE,
+				   __builtin_return_address(0));
 }
-EXPORT_SYMBOL(__arm_ioremap);
+EXPORT_SYMBOL(ioremap);
+
+void __iomem *ioremap_cache(resource_size_t res_cookie, size_t size)
+{
+	return arch_ioremap_caller(res_cookie, size, MT_DEVICE_CACHED,
+				   __builtin_return_address(0));
+}
+EXPORT_SYMBOL(ioremap_cache);
+
+void __iomem *ioremap_wc(resource_size_t res_cookie, size_t size)
+{
+	return arch_ioremap_caller(res_cookie, size, MT_DEVICE_WC,
+				   __builtin_return_address(0));
+}
+EXPORT_SYMBOL(ioremap_wc);
 
 /*
  * Remap an arbitrary physical address space into the kernel virtual
@@ -387,20 +379,32 @@ EXPORT_SYMBOL(__arm_ioremap);
  * CONFIG_GENERIC_ALLOCATOR for allocating external memory.
  */
 void __iomem *
-__arm_ioremap_exec(unsigned long phys_addr, size_t size, bool cached)
+__arm_ioremap_exec(phys_addr_t phys_addr, size_t size, bool cached)
 {
 	unsigned int mtype;
 
 	if (cached)
-		mtype = MT_MEMORY;
+		mtype = MT_MEMORY_RWX;
 	else
-		mtype = MT_MEMORY_NONCACHED;
+		mtype = MT_MEMORY_RWX_NONCACHED;
 
 	return __arm_ioremap_caller(phys_addr, size, mtype,
 			__builtin_return_address(0));
 }
 
-void __iounmap(volatile void __iomem *io_addr)
+void __arm_iomem_set_ro(void __iomem *ptr, size_t size)
+{
+	set_memory_ro((unsigned long)ptr, PAGE_ALIGN(size) / PAGE_SIZE);
+}
+
+void *arch_memremap_wb(phys_addr_t phys_addr, size_t size, unsigned long flags)
+{
+	return (__force void *)arch_ioremap_caller(phys_addr, size,
+						   MT_MEMORY_RW,
+						   __builtin_return_address(0));
+}
+
+void iounmap(volatile void __iomem *io_addr)
 {
 	void *addr = (void *)(PAGE_MASK & (unsigned long)io_addr);
 	struct static_vm *svm;
@@ -428,24 +432,49 @@ void __iounmap(volatile void __iomem *io_addr)
 
 	vunmap(addr);
 }
+EXPORT_SYMBOL(iounmap);
 
-void (*arch_iounmap)(volatile void __iomem *) = __iounmap;
+#if defined(CONFIG_PCI) || IS_ENABLED(CONFIG_PCMCIA)
+static int pci_ioremap_mem_type = MT_DEVICE;
 
-void __arm_iounmap(volatile void __iomem *io_addr)
+void pci_ioremap_set_mem_type(int mem_type)
 {
-	arch_iounmap(io_addr);
+	pci_ioremap_mem_type = mem_type;
 }
-EXPORT_SYMBOL(__arm_iounmap);
 
-#ifdef CONFIG_PCI
-int pci_ioremap_io(unsigned int offset, phys_addr_t phys_addr)
+int pci_remap_iospace(const struct resource *res, phys_addr_t phys_addr)
 {
-	BUG_ON(offset + SZ_64K > IO_SPACE_LIMIT);
+	unsigned long vaddr = (unsigned long)PCI_IOBASE + res->start;
 
-	return ioremap_page_range(PCI_IO_VIRT_BASE + offset,
-				  PCI_IO_VIRT_BASE + offset + SZ_64K,
-				  phys_addr,
-				  __pgprot(get_mem_type(MT_DEVICE)->prot_pte));
+	if (!(res->flags & IORESOURCE_IO))
+		return -EINVAL;
+
+	if (res->end > IO_SPACE_LIMIT)
+		return -EINVAL;
+
+	return vmap_page_range(vaddr, vaddr + resource_size(res), phys_addr,
+			       __pgprot(get_mem_type(pci_ioremap_mem_type)->prot_pte));
 }
-EXPORT_SYMBOL_GPL(pci_ioremap_io);
+EXPORT_SYMBOL(pci_remap_iospace);
+
+void __iomem *pci_remap_cfgspace(resource_size_t res_cookie, size_t size)
+{
+	return arch_ioremap_caller(res_cookie, size, MT_UNCACHED,
+				   __builtin_return_address(0));
+}
+EXPORT_SYMBOL_GPL(pci_remap_cfgspace);
 #endif
+
+/*
+ * Must be called after early_fixmap_init
+ */
+void __init early_ioremap_init(void)
+{
+	early_ioremap_setup();
+}
+
+bool arch_memremap_can_ram_remap(resource_size_t offset, size_t size,
+				 unsigned long flags)
+{
+	return memblock_is_map_memory(offset);
+}

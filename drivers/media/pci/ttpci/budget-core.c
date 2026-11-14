@@ -1,5 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * budget-core.c: driver for the SAA7146 based Budget DVB cards
+ * budget-core.ko: base-driver for the SAA7146 based Budget DVB cards
  *
  * Compiled from various sources by Michael Hunold <michael@mihu.de>
  *
@@ -13,25 +14,7 @@
  *	     Oliver Endriss <o.endriss@gmx.de>,
  *	     Andreas 'randy' Weinberger
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.	 See the
- * GNU General Public License for more details.
- *
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
- * Or, point your browser to http://www.gnu.org/copyleft/gpl.html
- *
- *
- * the project's page is at http://www.linuxtv.org/ 
+ * the project's page is at https://linuxtv.org
  */
 
 
@@ -51,6 +34,7 @@
 #define BUFFER_WARNING_WAIT	(30*HZ)
 
 int budget_debug;
+EXPORT_SYMBOL_GPL(budget_debug);
 static int dma_buffer_size = TS_MIN_BUFSIZE_K;
 module_param_named(debug, budget_debug, int, 0644);
 module_param_named(bufsize, dma_buffer_size, int, 0444);
@@ -97,7 +81,7 @@ static int start_ts_capture(struct budget *budget)
 	 *      Pitch: 188, NumBytes3: 188, NumLines3: 1024
 	 */
 
-	switch(budget->card->type) {
+	switch (budget->card->type) {
 	case BUDGET_FS_ACTIVY:
 		saa7146_write(dev, DD1_INIT, 0x04000000);
 		saa7146_write(dev, MC2, (MASK_09 | MASK_25));
@@ -161,9 +145,10 @@ static int start_ts_capture(struct budget *budget)
 	return 0;
 }
 
-static int budget_read_fe_status(struct dvb_frontend *fe, fe_status_t *status)
+static int budget_read_fe_status(struct dvb_frontend *fe,
+				 enum fe_status *status)
 {
-	struct budget *budget = (struct budget *) fe->dvb->priv;
+	struct budget *budget = fe->dvb->priv;
 	int synced;
 	int ret;
 
@@ -187,16 +172,17 @@ static int budget_read_fe_status(struct dvb_frontend *fe, fe_status_t *status)
 	return ret;
 }
 
-static void vpeirq(unsigned long data)
+static void vpeirq(struct work_struct *t)
 {
-	struct budget *budget = (struct budget *) data;
+	struct budget *budget = from_work(budget, t, vpe_bh_work);
 	u8 *mem = (u8 *) (budget->grabbing);
 	u32 olddma = budget->ttbp;
 	u32 newdma = saa7146_read(budget->dev, PCI_VDP3);
 	u32 count;
 
 	/* Ensure streamed PCI data is synced to CPU */
-	pci_dma_sync_sg_for_cpu(budget->dev->pci, budget->pt.slist, budget->pt.nents, PCI_DMA_FROMDEVICE);
+	dma_sync_sg_for_cpu(&budget->dev->pci->dev, budget->pt.slist,
+			    budget->pt.nents, DMA_FROM_DEVICE);
 
 	/* nearest lower position divisible by 188 */
 	newdma -= newdma % 188;
@@ -223,7 +209,7 @@ static void vpeirq(unsigned long data)
 		budget->buffer_warnings++;
 
 	if (budget->buffer_warnings && time_after(jiffies, budget->buffer_warning_time)) {
-		printk("%s %s: used %d times >80%% of buffer (%u bytes now)\n",
+		pr_warn("%s %s: used %d times >80%% of buffer (%u bytes now)\n",
 			budget->dev->name, __func__, budget->buffer_warnings, count);
 		budget->buffer_warning_time = jiffies + BUFFER_WARNING_WAIT;
 		budget->buffer_warnings = 0;
@@ -231,63 +217,60 @@ static void vpeirq(unsigned long data)
 }
 
 
-int ttpci_budget_debiread(struct budget *budget, u32 config, int addr, int count,
-			  int uselocks, int nobusyloop)
+static int ttpci_budget_debiread_nolock(struct budget *budget, u32 config,
+		int addr, int count, int nobusyloop)
 {
 	struct saa7146_dev *saa = budget->dev;
-	int result = 0;
-	unsigned long flags = 0;
+	int result;
 
-	if (count > 4 || count <= 0)
-		return 0;
-
-	if (uselocks)
-		spin_lock_irqsave(&budget->debilock, flags);
-
-	if ((result = saa7146_wait_for_debi_done(saa, nobusyloop)) < 0) {
-		if (uselocks)
-			spin_unlock_irqrestore(&budget->debilock, flags);
+	result = saa7146_wait_for_debi_done(saa, nobusyloop);
+	if (result < 0)
 		return result;
-	}
 
 	saa7146_write(saa, DEBI_COMMAND, (count << 17) | 0x10000 | (addr & 0xffff));
 	saa7146_write(saa, DEBI_CONFIG, config);
 	saa7146_write(saa, DEBI_PAGE, 0);
 	saa7146_write(saa, MC2, (2 << 16) | 2);
 
-	if ((result = saa7146_wait_for_debi_done(saa, nobusyloop)) < 0) {
-		if (uselocks)
-			spin_unlock_irqrestore(&budget->debilock, flags);
+	result = saa7146_wait_for_debi_done(saa, nobusyloop);
+	if (result < 0)
 		return result;
-	}
 
 	result = saa7146_read(saa, DEBI_AD);
 	result &= (0xffffffffUL >> ((4 - count) * 8));
-
-	if (uselocks)
-		spin_unlock_irqrestore(&budget->debilock, flags);
-
 	return result;
 }
 
-int ttpci_budget_debiwrite(struct budget *budget, u32 config, int addr,
-			   int count, u32 value, int uselocks, int nobusyloop)
+int ttpci_budget_debiread(struct budget *budget, u32 config, int addr, int count,
+			  int uselocks, int nobusyloop)
 {
-	struct saa7146_dev *saa = budget->dev;
-	unsigned long flags = 0;
-	int result;
-
 	if (count > 4 || count <= 0)
 		return 0;
 
-	if (uselocks)
-		spin_lock_irqsave(&budget->debilock, flags);
+	if (uselocks) {
+		unsigned long flags;
+		int result;
 
-	if ((result = saa7146_wait_for_debi_done(saa, nobusyloop)) < 0) {
-		if (uselocks)
-			spin_unlock_irqrestore(&budget->debilock, flags);
+		spin_lock_irqsave(&budget->debilock, flags);
+		result = ttpci_budget_debiread_nolock(budget, config, addr,
+						      count, nobusyloop);
+		spin_unlock_irqrestore(&budget->debilock, flags);
 		return result;
 	}
+	return ttpci_budget_debiread_nolock(budget, config, addr,
+					    count, nobusyloop);
+}
+EXPORT_SYMBOL_GPL(ttpci_budget_debiread);
+
+static int ttpci_budget_debiwrite_nolock(struct budget *budget, u32 config,
+		int addr, int count, u32 value, int nobusyloop)
+{
+	struct saa7146_dev *saa = budget->dev;
+	int result;
+
+	result = saa7146_wait_for_debi_done(saa, nobusyloop);
+	if (result < 0)
+		return result;
 
 	saa7146_write(saa, DEBI_COMMAND, (count << 17) | 0x00000 | (addr & 0xffff));
 	saa7146_write(saa, DEBI_CONFIG, config);
@@ -295,16 +278,30 @@ int ttpci_budget_debiwrite(struct budget *budget, u32 config, int addr,
 	saa7146_write(saa, DEBI_AD, value);
 	saa7146_write(saa, MC2, (2 << 16) | 2);
 
-	if ((result = saa7146_wait_for_debi_done(saa, nobusyloop)) < 0) {
-		if (uselocks)
-			spin_unlock_irqrestore(&budget->debilock, flags);
+	result = saa7146_wait_for_debi_done(saa, nobusyloop);
+	return result < 0 ? result : 0;
+}
+
+int ttpci_budget_debiwrite(struct budget *budget, u32 config, int addr,
+			   int count, u32 value, int uselocks, int nobusyloop)
+{
+	if (count > 4 || count <= 0)
+		return 0;
+
+	if (uselocks) {
+		unsigned long flags;
+		int result;
+
+		spin_lock_irqsave(&budget->debilock, flags);
+		result = ttpci_budget_debiwrite_nolock(budget, config, addr,
+						count, value, nobusyloop);
+		spin_unlock_irqrestore(&budget->debilock, flags);
 		return result;
 	}
-
-	if (uselocks)
-		spin_unlock_irqrestore(&budget->debilock, flags);
-	return 0;
+	return ttpci_budget_debiwrite_nolock(budget, config, addr,
+					     count, value, nobusyloop);
 }
+EXPORT_SYMBOL_GPL(ttpci_budget_debiwrite);
 
 
 /****************************************************************************
@@ -314,7 +311,7 @@ int ttpci_budget_debiwrite(struct budget *budget, u32 config, int addr,
 static int budget_start_feed(struct dvb_demux_feed *feed)
 {
 	struct dvb_demux *demux = feed->demux;
-	struct budget *budget = (struct budget *) demux->priv;
+	struct budget *budget = demux->priv;
 	int status = 0;
 
 	dprintk(2, "budget: %p\n", budget);
@@ -323,7 +320,7 @@ static int budget_start_feed(struct dvb_demux_feed *feed)
 		return -EINVAL;
 
 	spin_lock(&budget->feedlock);
-	feed->pusi_seen = 0; /* have a clean section start */
+	feed->pusi_seen = false; /* have a clean section start */
 	if (budget->feeding++ == 0)
 		status = start_ts_capture(budget);
 	spin_unlock(&budget->feedlock);
@@ -333,7 +330,7 @@ static int budget_start_feed(struct dvb_demux_feed *feed)
 static int budget_stop_feed(struct dvb_demux_feed *feed)
 {
 	struct dvb_demux *demux = feed->demux;
-	struct budget *budget = (struct budget *) demux->priv;
+	struct budget *budget = demux->priv;
 	int status = 0;
 
 	dprintk(2, "budget: %p\n", budget);
@@ -376,20 +373,25 @@ static int budget_register(struct budget *budget)
 	ret = dvbdemux->dmx.add_frontend(&dvbdemux->dmx, &budget->hw_frontend);
 
 	if (ret < 0)
-		return ret;
+		goto err_release_dmx;
 
 	budget->mem_frontend.source = DMX_MEMORY_FE;
 	ret = dvbdemux->dmx.add_frontend(&dvbdemux->dmx, &budget->mem_frontend);
 	if (ret < 0)
-		return ret;
+		goto err_release_dmx;
 
 	ret = dvbdemux->dmx.connect_frontend(&dvbdemux->dmx, &budget->hw_frontend);
 	if (ret < 0)
-		return ret;
+		goto err_release_dmx;
 
 	dvb_net_init(&budget->dvb_adapter, &budget->dvb_net, &dvbdemux->dmx);
 
 	return 0;
+
+err_release_dmx:
+	dvb_dmxdev_release(&budget->dmxdev);
+	dvb_dmx_release(&budget->demux);
+	return ret;
 }
 
 static void budget_unregister(struct budget *budget)
@@ -424,7 +426,7 @@ int ttpci_budget_init(struct budget *budget, struct saa7146_dev *dev,
 	budget->card = bi;
 	budget->dev = (struct saa7146_dev *) dev;
 
-	switch(budget->card->type) {
+	switch (budget->card->type) {
 	case BUDGET_FS_ACTIVY:
 		budget->buffer_width = TS_WIDTH_ACTIVY;
 		max_bufsize = TS_MAX_BUFSIZE_K_ACTIVY;
@@ -471,7 +473,7 @@ int ttpci_budget_init(struct budget *budget, struct saa7146_dev *dev,
 		budget->dev->name,
 		budget->buffer_size > budget->buffer_width * budget->buffer_height ? "odd/even" : "single",
 		budget->buffer_width, budget->buffer_height);
-	printk("%s: dma buffer size %u\n", budget->dev->name, budget->buffer_size);
+	pr_info("%s: dma buffer size %u\n", budget->dev->name, budget->buffer_size);
 
 	ret = dvb_register_adapter(&budget->dvb_adapter, budget->card->name,
 				   owner, &budget->dev->pci->dev, adapter_nums);
@@ -492,15 +494,19 @@ int ttpci_budget_init(struct budget *budget, struct saa7146_dev *dev,
 	spin_lock_init(&budget->feedlock);
 	spin_lock_init(&budget->debilock);
 
-	/* the Siemens DVB needs this if you want to have the i2c chips
-	   get recognized before the main driver is loaded */
+	/*
+	 * the Siemens DVB needs this if you want to have the i2c chips
+	 * get recognized before the main driver is loaded
+	 */
 	if (bi->type != BUDGET_FS_ACTIVY)
 		saa7146_write(dev, GPIO_CTRL, 0x500000);	/* GPIO 3 = 1 */
 
-	strlcpy(budget->i2c_adap.name, budget->card->name, sizeof(budget->i2c_adap.name));
+	strscpy(budget->i2c_adap.name, budget->card->name,
+		sizeof(budget->i2c_adap.name));
 
 	saa7146_i2c_adapter_prepare(dev, &budget->i2c_adap, SAA7146_I2C_BUS_BIT_RATE_120);
-	strcpy(budget->i2c_adap.name, budget->card->name);
+	strscpy(budget->i2c_adap.name, budget->card->name,
+		sizeof(budget->i2c_adap.name));
 
 	if (i2c_add_adapter(&budget->i2c_adap) < 0) {
 		ret = -ENOMEM;
@@ -510,7 +516,7 @@ int ttpci_budget_init(struct budget *budget, struct saa7146_dev *dev,
 	ttpci_eeprom_parse_mac(&budget->i2c_adap, budget->dvb_adapter.proposed_mac);
 
 	budget->grabbing = saa7146_vmalloc_build_pgtable(dev->pci, budget->buffer_size, &budget->pt);
-	if (NULL == budget->grabbing) {
+	if (budget->grabbing == NULL) {
 		ret = -ENOMEM;
 		goto err_del_i2c;
 	}
@@ -519,13 +525,14 @@ int ttpci_budget_init(struct budget *budget, struct saa7146_dev *dev,
 	/* upload all */
 	saa7146_write(dev, GPIO_CTRL, 0x000000);
 
-	tasklet_init(&budget->vpe_tasklet, vpeirq, (unsigned long) budget);
+	INIT_WORK(&budget->vpe_bh_work, vpeirq);
 
 	/* frontend power on */
 	if (bi->type != BUDGET_FS_ACTIVY)
 		saa7146_setgpio(dev, 2, SAA7146_GPIO_OUTHI);
 
-	if ((ret = budget_register(budget)) == 0)
+	ret = budget_register(budget);
+	if (ret == 0)
 		return 0; /* Everything OK */
 
 	/* An error occurred, cleanup resources */
@@ -539,6 +546,7 @@ err_dvb_unregister:
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(ttpci_budget_init);
 
 void ttpci_budget_init_hooks(struct budget *budget)
 {
@@ -547,6 +555,7 @@ void ttpci_budget_init_hooks(struct budget *budget)
 		budget->dvb_frontend->ops.read_status = budget_read_fe_status;
 	}
 }
+EXPORT_SYMBOL_GPL(ttpci_budget_init_hooks);
 
 int ttpci_budget_deinit(struct budget *budget)
 {
@@ -556,7 +565,7 @@ int ttpci_budget_deinit(struct budget *budget)
 
 	budget_unregister(budget);
 
-	tasklet_kill(&budget->vpe_tasklet);
+	cancel_work_sync(&budget->vpe_bh_work);
 
 	saa7146_vfree_destroy_pgtable(dev->pci, budget->grabbing, &budget->pt);
 
@@ -566,20 +575,22 @@ int ttpci_budget_deinit(struct budget *budget)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(ttpci_budget_deinit);
 
-void ttpci_budget_irq10_handler(struct saa7146_dev *dev, u32 * isr)
+void ttpci_budget_irq10_handler(struct saa7146_dev *dev, u32 *isr)
 {
-	struct budget *budget = (struct budget *) dev->ext_priv;
+	struct budget *budget = dev->ext_priv;
 
 	dprintk(8, "dev: %p, budget: %p\n", dev, budget);
 
 	if (*isr & MASK_10)
-		tasklet_schedule(&budget->vpe_tasklet);
+		queue_work(system_bh_wq, &budget->vpe_bh_work);
 }
+EXPORT_SYMBOL_GPL(ttpci_budget_irq10_handler);
 
 void ttpci_budget_set_video_port(struct saa7146_dev *dev, int video_port)
 {
-	struct budget *budget = (struct budget *) dev->ext_priv;
+	struct budget *budget = dev->ext_priv;
 
 	spin_lock(&budget->feedlock);
 	budget->video_port = video_port;
@@ -589,14 +600,7 @@ void ttpci_budget_set_video_port(struct saa7146_dev *dev, int video_port)
 	}
 	spin_unlock(&budget->feedlock);
 }
-
-EXPORT_SYMBOL_GPL(ttpci_budget_debiread);
-EXPORT_SYMBOL_GPL(ttpci_budget_debiwrite);
-EXPORT_SYMBOL_GPL(ttpci_budget_init);
-EXPORT_SYMBOL_GPL(ttpci_budget_init_hooks);
-EXPORT_SYMBOL_GPL(ttpci_budget_deinit);
-EXPORT_SYMBOL_GPL(ttpci_budget_irq10_handler);
 EXPORT_SYMBOL_GPL(ttpci_budget_set_video_port);
-EXPORT_SYMBOL_GPL(budget_debug);
 
+MODULE_DESCRIPTION("base driver for the SAA7146 based Budget DVB cards");
 MODULE_LICENSE("GPL");

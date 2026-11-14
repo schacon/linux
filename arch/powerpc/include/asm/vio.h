@@ -1,28 +1,23 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * IBM PowerPC Virtual I/O Infrastructure Support.
  *
  * Copyright (c) 2003 IBM Corp.
  *  Dave Engebretsen engebret@us.ibm.com
  *  Santiago Leon santil@us.ibm.com
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #ifndef _ASM_POWERPC_VIO_H
 #define _ASM_POWERPC_VIO_H
 #ifdef __KERNEL__
 
-#include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
 #include <linux/mod_devicetable.h>
+#include <linux/scatterlist.h>
 
 #include <asm/hvcall.h>
-#include <asm/scatterlist.h>
 
 /*
  * Architecture-specific constants for drivers to
@@ -44,7 +39,7 @@
  */
 #define VIO_CMO_MIN_ENT 1562624
 
-extern struct bus_type vio_bus_type;
+extern const struct bus_type vio_bus_type;
 
 struct iommu_table;
 
@@ -118,7 +113,8 @@ struct vio_driver {
 	const char *name;
 	const struct vio_device_id *id_table;
 	int (*probe)(struct vio_dev *dev, const struct vio_device_id *id);
-	int (*remove)(struct vio_dev *dev);
+	void (*remove)(struct vio_dev *dev);
+	void (*shutdown)(struct vio_dev *dev);
 	/* A driver must have a get_desired_dma() function to
 	 * be loaded in a CMO environment if it uses DMA.
 	 */
@@ -160,15 +156,8 @@ static inline int vio_enable_interrupts(struct vio_dev *dev)
 }
 #endif
 
-static inline struct vio_driver *to_vio_driver(struct device_driver *drv)
-{
-	return container_of(drv, struct vio_driver, driver);
-}
-
-static inline struct vio_dev *to_vio_dev(struct device *dev)
-{
-	return container_of(dev, struct vio_dev, dev);
-}
+#define to_vio_driver(__drv)	container_of_const(__drv, struct vio_driver, driver)
+#define to_vio_dev(__dev)	container_of_const(__dev, struct vio_dev, dev)
 
 #endif /* __KERNEL__ */
 #endif /* _ASM_POWERPC_VIO_H */

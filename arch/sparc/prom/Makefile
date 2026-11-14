@@ -1,8 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0
 # Makefile for the Sun Boot PROM interface library under
 # Linux.
 #
-asflags := -ansi
-ccflags := -Werror
 
 lib-y                 := bootstr_$(BITS).o
 lib-y                 += init_$(BITS).o

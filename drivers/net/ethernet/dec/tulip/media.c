@@ -12,7 +12,6 @@
 
 #include <linux/kernel.h>
 #include <linux/mii.h>
-#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
 #include "tulip.h"
@@ -25,7 +24,7 @@
 
 /* Read and write the MII registers using software-generated serial
    MDIO protocol.  It is just different enough from the EEPROM protocol
-   to not share code.  The maxium data clock rate is 2.5 Mhz. */
+   to not share code.  The maximum data clock rate is 2.5 Mhz. */
 #define MDIO_SHIFT_CLK		0x10000
 #define MDIO_DATA_WRITE0	0x00000
 #define MDIO_DATA_WRITE1	0x20000
@@ -320,12 +319,7 @@ void tulip_select_media(struct net_device *dev, int startup)
 			break;
 		}
 		case 5: case 6: {
-			u16 setup[5];
-
 			new_csr6 = 0; /* FIXME */
-
-			for (i = 0; i < 5; i++)
-				setup[i] = get_u16(&p[i*2 + 1]);
 
 			if (startup && mtable->has_reset) {
 				struct medialeaf *rleaf = &mtable->mleaf[mtable->has_reset];
@@ -368,7 +362,7 @@ void tulip_select_media(struct net_device *dev, int startup)
 			iowrite32(0x33, ioaddr + CSR12);
 			new_csr6 = 0x01860000;
 			/* Trigger autonegotiation. */
-			iowrite32(startup ? 0x0201F868 : 0x0001F868, ioaddr + 0xB8);
+			iowrite32(0x0001F868, ioaddr + 0xB8);
 		} else {
 			iowrite32(0x32, ioaddr + CSR12);
 			new_csr6 = 0x00420000;
@@ -458,7 +452,7 @@ void tulip_find_mii(struct net_device *dev, int board_idx)
 	/* Find the connected MII xcvrs.
 	   Doing this in open() would allow detecting external xcvrs later,
 	   but takes much time. */
-	for (phyn = 1; phyn <= 32 && phy_idx < sizeof (tp->phys); phyn++) {
+	for (phyn = 1; phyn <= 32 && phy_idx < ARRAY_SIZE(tp->phys); phyn++) {
 		int phy = phyn & 0x1f;
 		int mii_status = tulip_mdio_read (dev, phy, MII_BMSR);
 		if ((mii_status & 0x8301) == 0x8001 ||

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * R8A66597 HCD (Host Controller Driver)
  *
@@ -7,27 +8,12 @@
  * Portions Copyright (C) 1999 Roman Weissgaerber
  *
  * Author : Yoshihiro Shimoda <yoshihiro.shimoda.uh@renesas.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- *
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
-#include <linux/init.h>
 #include <linux/timer.h>
 #include <linux/delay.h>
 #include <linux/list.h>
@@ -95,7 +81,7 @@ static int r8a66597_clock_enable(struct r8a66597 *r8a66597)
 	int i = 0;
 
 	if (r8a66597->pdata->on_chip) {
-		clk_enable(r8a66597->clk);
+		clk_prepare_enable(r8a66597->clk);
 		do {
 			r8a66597_write(r8a66597, SCKE, SYSCFG0);
 			tmp = r8a66597_read(r8a66597, SYSCFG0);
@@ -139,7 +125,7 @@ static void r8a66597_clock_disable(struct r8a66597 *r8a66597)
 	udelay(1);
 
 	if (r8a66597->pdata->on_chip) {
-		clk_disable(r8a66597->clk);
+		clk_disable_unprepare(r8a66597->clk);
 	} else {
 		r8a66597_bclr(r8a66597, PLLC, SYSCFG0);
 		r8a66597_bclr(r8a66597, XCKE, SYSCFG0);
@@ -311,9 +297,9 @@ static void put_child_connect_map(struct r8a66597 *r8a66597, int address)
 static void set_pipe_reg_addr(struct r8a66597_pipe *pipe, u8 dma_ch)
 {
 	u16 pipenum = pipe->info.pipenum;
-	const unsigned long fifoaddr[] = {D0FIFO, D1FIFO, CFIFO};
-	const unsigned long fifosel[] = {D0FIFOSEL, D1FIFOSEL, CFIFOSEL};
-	const unsigned long fifoctr[] = {D0FIFOCTR, D1FIFOCTR, CFIFOCTR};
+	static const unsigned long fifoaddr[] = {D0FIFO, D1FIFO, CFIFO};
+	static const unsigned long fifosel[] = {D0FIFOSEL, D1FIFOSEL, CFIFOSEL};
+	static const unsigned long fifoctr[] = {D0FIFOCTR, D1FIFOCTR, CFIFOCTR};
 
 	if (dma_ch > R8A66597_PIPE_NO_DMA)	/* dma fifo not use? */
 		dma_ch = R8A66597_PIPE_NO_DMA;
@@ -351,7 +337,7 @@ static int make_r8a66597_device(struct r8a66597 *r8a66597,
 	struct r8a66597_device *dev;
 	int usb_address = urb->setup_packet[2];	/* urb->pipe is address 0 */
 
-	dev = kzalloc(sizeof(struct r8a66597_device), GFP_ATOMIC);
+	dev = kzalloc_obj(struct r8a66597_device, GFP_ATOMIC);
 	if (dev == NULL)
 		return -ENOMEM;
 
@@ -489,16 +475,14 @@ static void pipe_stop(struct r8a66597 *r8a66597, struct r8a66597_pipe *pipe)
 static void clear_all_buffer(struct r8a66597 *r8a66597,
 			     struct r8a66597_pipe *pipe)
 {
-	u16 tmp;
-
 	if (!pipe || pipe->info.pipenum == 0)
 		return;
 
 	pipe_stop(r8a66597, pipe);
 	r8a66597_bset(r8a66597, ACLRM, pipe->pipectr);
-	tmp = r8a66597_read(r8a66597, pipe->pipectr);
-	tmp = r8a66597_read(r8a66597, pipe->pipectr);
-	tmp = r8a66597_read(r8a66597, pipe->pipectr);
+	r8a66597_read(r8a66597, pipe->pipectr);
+	r8a66597_read(r8a66597, pipe->pipectr);
+	r8a66597_read(r8a66597, pipe->pipectr);
 	r8a66597_bclr(r8a66597, ACLRM, pipe->pipectr);
 }
 
@@ -775,7 +759,7 @@ static void enable_r8a66597_pipe_dma(struct r8a66597 *r8a66597,
 	struct r8a66597_pipe_info *info = &pipe->info;
 	unsigned short mbw = mbw_value(r8a66597);
 
-	/* pipe dma is only for external controlles */
+	/* pipe dma is only for external controllers */
 	if (r8a66597->pdata->on_chip)
 		return;
 
@@ -1270,11 +1254,11 @@ static void set_td_timer(struct r8a66597 *r8a66597, struct r8a66597_td *td)
 			time = 30;
 			break;
 		default:
-			time = 300;
+			time = 50;
 			break;
 		}
 
-		mod_timer(&r8a66597->td_timer[td->pipenum],
+		mod_timer(&r8a66597->timers[td->pipenum].td,
 			  jiffies + msecs_to_jiffies(time));
 	}
 }
@@ -1352,7 +1336,7 @@ static void packet_read(struct r8a66597 *r8a66597, u16 pipenum)
 		buf = (void *)urb->transfer_buffer + urb->actual_length;
 		urb_len = urb->transfer_buffer_length - urb->actual_length;
 	}
-	bufsize = min(urb_len, (int) td->maxpacket);
+	bufsize = min_t(int, urb_len, td->maxpacket);
 	if (rcv_len <= bufsize) {
 		size = rcv_len;
 	} else {
@@ -1734,9 +1718,11 @@ static void r8a66597_root_hub_control(struct r8a66597 *r8a66597, int port)
 	}
 }
 
-static void r8a66597_interval_timer(unsigned long _r8a66597)
+static void r8a66597_interval_timer(struct timer_list *t)
 {
-	struct r8a66597 *r8a66597 = (struct r8a66597 *)_r8a66597;
+	struct r8a66597_timers *timers = timer_container_of(timers, t,
+							    interval);
+	struct r8a66597 *r8a66597 = timers->r8a66597;
 	unsigned long flags;
 	u16 pipenum;
 	struct r8a66597_td *td;
@@ -1746,7 +1732,7 @@ static void r8a66597_interval_timer(unsigned long _r8a66597)
 	for (pipenum = 0; pipenum < R8A66597_MAX_NUM_PIPE; pipenum++) {
 		if (!(r8a66597->interval_map & (1 << pipenum)))
 			continue;
-		if (timer_pending(&r8a66597->interval_timer[pipenum]))
+		if (timer_pending(&r8a66597->timers[pipenum].interval))
 			continue;
 
 		td = r8a66597_get_td(r8a66597, pipenum);
@@ -1757,9 +1743,10 @@ static void r8a66597_interval_timer(unsigned long _r8a66597)
 	spin_unlock_irqrestore(&r8a66597->lock, flags);
 }
 
-static void r8a66597_td_timer(unsigned long _r8a66597)
+static void r8a66597_td_timer(struct timer_list *t)
 {
-	struct r8a66597 *r8a66597 = (struct r8a66597 *)_r8a66597;
+	struct r8a66597_timers *timers = timer_container_of(timers, t, td);
+	struct r8a66597 *r8a66597 = timers->r8a66597;
 	unsigned long flags;
 	u16 pipenum;
 	struct r8a66597_td *td, *new_td = NULL;
@@ -1769,7 +1756,7 @@ static void r8a66597_td_timer(unsigned long _r8a66597)
 	for (pipenum = 0; pipenum < R8A66597_MAX_NUM_PIPE; pipenum++) {
 		if (!(r8a66597->timeout_map & (1 << pipenum)))
 			continue;
-		if (timer_pending(&r8a66597->td_timer[pipenum]))
+		if (timer_pending(&r8a66597->timers[pipenum].td))
 			continue;
 
 		td = r8a66597_get_td(r8a66597, pipenum);
@@ -1786,6 +1773,7 @@ static void r8a66597_td_timer(unsigned long _r8a66597)
 		pipe = td->pipe;
 		pipe_stop(r8a66597, pipe);
 
+		/* Select a different address or endpoint */
 		new_td = td;
 		do {
 			list_move_tail(&new_td->queue,
@@ -1795,7 +1783,8 @@ static void r8a66597_td_timer(unsigned long _r8a66597)
 				new_td = td;
 				break;
 			}
-		} while (td != new_td && td->address == new_td->address);
+		} while (td != new_td && td->address == new_td->address &&
+			td->pipe->info.epnum == new_td->pipe->info.epnum);
 
 		start_transfer(r8a66597, new_td);
 
@@ -1808,9 +1797,9 @@ static void r8a66597_td_timer(unsigned long _r8a66597)
 	spin_unlock_irqrestore(&r8a66597->lock, flags);
 }
 
-static void r8a66597_timer(unsigned long _r8a66597)
+static void r8a66597_timer(struct timer_list *t)
 {
-	struct r8a66597 *r8a66597 = (struct r8a66597 *)_r8a66597;
+	struct r8a66597 *r8a66597 = timer_container_of(r8a66597, t, rh_timer);
 	unsigned long flags;
 	int port;
 
@@ -1870,7 +1859,7 @@ static struct r8a66597_td *r8a66597_make_td(struct r8a66597 *r8a66597,
 	struct r8a66597_td *td;
 	u16 pipenum;
 
-	td = kzalloc(sizeof(struct r8a66597_td), GFP_ATOMIC);
+	td = kzalloc_obj(struct r8a66597_td, GFP_ATOMIC);
 	if (td == NULL)
 		return NULL;
 
@@ -1879,8 +1868,7 @@ static struct r8a66597_td *r8a66597_make_td(struct r8a66597 *r8a66597,
 	td->pipe = hep->hcpriv;
 	td->urb = urb;
 	td->address = get_urb_to_r8a66597_addr(r8a66597, urb);
-	td->maxpacket = usb_maxpacket(urb->dev, urb->pipe,
-				      !usb_pipein(urb->pipe));
+	td->maxpacket = usb_maxpacket(urb->dev, urb->pipe);
 	if (usb_pipecontrol(urb->pipe))
 		td->type = USB_PID_SETUP;
 	else if (usb_pipein(urb->pipe))
@@ -1913,8 +1901,7 @@ static int r8a66597_urb_enqueue(struct usb_hcd *hcd,
 		goto error_not_linked;
 
 	if (!hep->hcpriv) {
-		hep->hcpriv = kzalloc(sizeof(struct r8a66597_pipe),
-				GFP_ATOMIC);
+		hep->hcpriv = kzalloc_obj(struct r8a66597_pipe, GFP_ATOMIC);
 		if (!hep->hcpriv) {
 			ret = -ENOMEM;
 			goto error;
@@ -1941,7 +1928,7 @@ static int r8a66597_urb_enqueue(struct usb_hcd *hcd,
 	if (request) {
 		if (td->pipe->info.timer_interval) {
 			r8a66597->interval_map |= 1 << td->pipenum;
-			mod_timer(&r8a66597->interval_timer[td->pipenum],
+			mod_timer(&r8a66597->timers[td->pipenum].interval,
 				  jiffies + msecs_to_jiffies(
 					td->pipe->info.timer_interval));
 		} else {
@@ -1989,6 +1976,8 @@ static int r8a66597_urb_dequeue(struct usb_hcd *hcd, struct urb *urb,
 
 static void r8a66597_endpoint_disable(struct usb_hcd *hcd,
 				      struct usb_host_endpoint *hep)
+__acquires(r8a66597->lock)
+__releases(r8a66597->lock)
 {
 	struct r8a66597 *r8a66597 = hcd_to_r8a66597(hcd);
 	struct r8a66597_pipe *pipe = (struct r8a66597_pipe *)hep->hcpriv;
@@ -2001,13 +1990,14 @@ static void r8a66597_endpoint_disable(struct usb_hcd *hcd,
 		return;
 	pipenum = pipe->info.pipenum;
 
+	spin_lock_irqsave(&r8a66597->lock, flags);
 	if (pipenum == 0) {
 		kfree(hep->hcpriv);
 		hep->hcpriv = NULL;
+		spin_unlock_irqrestore(&r8a66597->lock, flags);
 		return;
 	}
 
-	spin_lock_irqsave(&r8a66597->lock, flags);
 	pipe_stop(r8a66597, pipe);
 	pipe_irq_disable(r8a66597, pipenum);
 	disable_irq_empty(r8a66597, pipenum);
@@ -2100,16 +2090,13 @@ static void r8a66597_check_detect_child(struct r8a66597 *r8a66597,
 
 	memset(now_map, 0, sizeof(now_map));
 
-	list_for_each_entry(bus, &usb_bus_list, bus_list) {
-		if (!bus->root_hub)
-			continue;
-
-		if (bus->busnum != hcd->self.busnum)
-			continue;
-
+	mutex_lock(&usb_bus_idr_lock);
+	bus = idr_find(&usb_bus_idr, hcd->self.busnum);
+	if (bus && bus->root_hub) {
 		collect_usb_address_map(bus->root_hub, now_map);
 		update_usb_address_map(r8a66597, bus->root_hub, now_map);
 	}
+	mutex_unlock(&usb_bus_idr_lock);
 }
 
 static int r8a66597_hub_status_data(struct usb_hcd *hcd, char *buf)
@@ -2137,12 +2124,13 @@ static int r8a66597_hub_status_data(struct usb_hcd *hcd, char *buf)
 static void r8a66597_hub_descriptor(struct r8a66597 *r8a66597,
 				    struct usb_hub_descriptor *desc)
 {
-	desc->bDescriptorType = 0x29;
+	desc->bDescriptorType = USB_DT_HUB;
 	desc->bHubContrCurrent = 0;
 	desc->bNbrPorts = r8a66597->max_root_hub;
 	desc->bDescLength = 9;
 	desc->bPwrOn2PwrGood = 0;
-	desc->wHubCharacteristics = cpu_to_le16(0x0011);
+	desc->wHubCharacteristics =
+		cpu_to_le16(HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_NO_OCPM);
 	desc->u.hs.DeviceRemovable[0] =
 		((1 << r8a66597->max_root_hub) - 1) << 1;
 	desc->u.hs.DeviceRemovable[1] = ~0;
@@ -2301,7 +2289,7 @@ static int r8a66597_bus_resume(struct usb_hcd *hcd)
 		rh->port &= ~USB_PORT_STAT_SUSPEND;
 		rh->port |= USB_PORT_STAT_C_SUSPEND << 16;
 		r8a66597_mdfy(r8a66597, RESUME, RESUME | UACT, dvstctr_reg);
-		msleep(50);
+		msleep(USB_RESUME_TIMEOUT);
 		r8a66597_mdfy(r8a66597, UACT, RESUME | UACT, dvstctr_reg);
 	}
 
@@ -2313,7 +2301,7 @@ static int r8a66597_bus_resume(struct usb_hcd *hcd)
 #define	r8a66597_bus_resume	NULL
 #endif
 
-static struct hc_driver r8a66597_hc_driver = {
+static const struct hc_driver r8a66597_hc_driver = {
 	.description =		hcd_name,
 	.hcd_priv_size =	sizeof(struct r8a66597),
 	.irq =			r8a66597_irq,
@@ -2391,18 +2379,17 @@ static const struct dev_pm_ops r8a66597_dev_pm_ops = {
 #define R8A66597_DEV_PM_OPS	NULL
 #endif
 
-static int r8a66597_remove(struct platform_device *pdev)
+static void r8a66597_remove(struct platform_device *pdev)
 {
-	struct r8a66597		*r8a66597 = dev_get_drvdata(&pdev->dev);
+	struct r8a66597		*r8a66597 = platform_get_drvdata(pdev);
 	struct usb_hcd		*hcd = r8a66597_to_hcd(r8a66597);
 
-	del_timer_sync(&r8a66597->rh_timer);
+	timer_delete_sync(&r8a66597->rh_timer);
 	usb_remove_hcd(hcd);
 	iounmap(r8a66597->reg);
 	if (r8a66597->pdata->on_chip)
 		clk_put(r8a66597->clk);
 	usb_put_hcd(hcd);
-	return 0;
 }
 
 static int r8a66597_probe(struct platform_device *pdev)
@@ -2419,12 +2406,6 @@ static int r8a66597_probe(struct platform_device *pdev)
 
 	if (usb_disabled())
 		return -ENODEV;
-
-	if (pdev->dev.dma_mask) {
-		ret = -EINVAL;
-		dev_err(&pdev->dev, "dma not supported\n");
-		goto clean_up;
-	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
@@ -2466,8 +2447,8 @@ static int r8a66597_probe(struct platform_device *pdev)
 	}
 	r8a66597 = hcd_to_r8a66597(hcd);
 	memset(r8a66597, 0, sizeof(struct r8a66597));
-	dev_set_drvdata(&pdev->dev, r8a66597);
-	r8a66597->pdata = pdev->dev.platform_data;
+	platform_set_drvdata(pdev, r8a66597);
+	r8a66597->pdata = dev_get_platdata(&pdev->dev);
 	r8a66597->irq_sense_low = irq_trigger == IRQF_TRIGGER_LOW;
 
 	if (r8a66597->pdata->on_chip) {
@@ -2484,9 +2465,7 @@ static int r8a66597_probe(struct platform_device *pdev)
 		r8a66597->max_root_hub = 2;
 
 	spin_lock_init(&r8a66597->lock);
-	init_timer(&r8a66597->rh_timer);
-	r8a66597->rh_timer.function = r8a66597_timer;
-	r8a66597->rh_timer.data = (unsigned long)r8a66597;
+	timer_setup(&r8a66597->rh_timer, r8a66597_timer, 0);
 	r8a66597->reg = reg;
 
 	/* make sure no interrupts are pending */
@@ -2497,12 +2476,10 @@ static int r8a66597_probe(struct platform_device *pdev)
 
 	for (i = 0; i < R8A66597_MAX_NUM_PIPE; i++) {
 		INIT_LIST_HEAD(&r8a66597->pipe_queue[i]);
-		init_timer(&r8a66597->td_timer[i]);
-		r8a66597->td_timer[i].function = r8a66597_td_timer;
-		r8a66597->td_timer[i].data = (unsigned long)r8a66597;
-		setup_timer(&r8a66597->interval_timer[i],
-				r8a66597_interval_timer,
-				(unsigned long)r8a66597);
+		r8a66597->timers[i].r8a66597 = r8a66597;
+		timer_setup(&r8a66597->timers[i].td, r8a66597_td_timer, 0);
+		timer_setup(&r8a66597->timers[i].interval,
+			    r8a66597_interval_timer, 0);
 	}
 	INIT_LIST_HEAD(&r8a66597->child_device);
 
@@ -2514,6 +2491,7 @@ static int r8a66597_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "Failed to add hcd\n");
 		goto clean_up3;
 	}
+	device_wakeup_enable(hcd->self.controller);
 
 	return 0;
 
@@ -2534,8 +2512,7 @@ static struct platform_driver r8a66597_driver = {
 	.probe =	r8a66597_probe,
 	.remove =	r8a66597_remove,
 	.driver		= {
-		.name = (char *) hcd_name,
-		.owner	= THIS_MODULE,
+		.name = hcd_name,
 		.pm	= R8A66597_DEV_PM_OPS,
 	},
 };

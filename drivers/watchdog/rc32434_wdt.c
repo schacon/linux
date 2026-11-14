@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  IDT Interprise 79RC32434 watchdog driver
  *
@@ -9,12 +10,6 @@
  *
  *  (c) Copyright 1996 Alan Cox <alan@lxorguk.ukuu.org.uk>,
  *					All Rights Reserved.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -25,13 +20,14 @@
 #include <linux/errno.h>		/* For the -ENODEV/... values */
 #include <linux/kernel.h>		/* For printk/panic/... */
 #include <linux/fs.h>			/* For file operations */
-#include <linux/miscdevice.h>		/* For MODULE_ALIAS_MISCDEV
-							(WATCHDOG_MINOR) */
+#include <linux/miscdevice.h>		/* For struct miscdevice */
 #include <linux/watchdog.h>		/* For the watchdog specific items */
 #include <linux/init.h>			/* For __init/__exit/... */
 #include <linux/platform_device.h>	/* For platform_driver framework */
 #include <linux/spinlock.h>		/* For spin_lock/spin_unlock/... */
 #include <linux/uaccess.h>		/* For copy_to_user/put_user/... */
+#include <linux/io.h>			/* For devm_ioremap */
+#include <linux/stringify.h>		/* For __stringify */
 
 #include <asm/mach-rc32434/integ.h>	/* For the Watchdog registers */
 
@@ -62,12 +58,12 @@ extern unsigned int idt_cpu_freq;
 static int timeout = WATCHDOG_TIMEOUT;
 module_param(timeout, int, 0);
 MODULE_PARM_DESC(timeout, "Watchdog timeout value, in seconds (default="
-		__MODULE_STRING(WATCHDOG_TIMEOUT) ")");
+		__stringify(WATCHDOG_TIMEOUT) ")");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default="
-	__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+	__stringify(WATCHDOG_NOWAYOUT) ")");
 
 /* apply or and nand masks to data read from addr and write back */
 #define SET_BITS(addr, or, nand) \
@@ -150,7 +146,7 @@ static int rc32434_wdt_open(struct inode *inode, struct file *file)
 	rc32434_wdt_start();
 	rc32434_wdt_ping();
 
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 static int rc32434_wdt_release(struct inode *inode, struct file *file)
@@ -235,9 +231,9 @@ static long rc32434_wdt_ioctl(struct file *file, unsigned int cmd,
 			return -EFAULT;
 		if (rc32434_wdt_set(new_timeout))
 			return -EINVAL;
-		/* Fall through */
+		fallthrough;
 	case WDIOC_GETTIMEOUT:
-		return copy_to_user(argp, &timeout, sizeof(int));
+		return copy_to_user(argp, &timeout, sizeof(int)) ? -EFAULT : 0;
 	default:
 		return -ENOTTY;
 	}
@@ -247,9 +243,9 @@ static long rc32434_wdt_ioctl(struct file *file, unsigned int cmd,
 
 static const struct file_operations rc32434_wdt_fops = {
 	.owner		= THIS_MODULE,
-	.llseek		= no_llseek,
 	.write		= rc32434_wdt_write,
 	.unlocked_ioctl	= rc32434_wdt_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= rc32434_wdt_open,
 	.release	= rc32434_wdt_release,
 };
@@ -271,7 +267,7 @@ static int rc32434_wdt_probe(struct platform_device *pdev)
 		return -ENODEV;
 	}
 
-	wdt_reg = ioremap_nocache(r->start, resource_size(r));
+	wdt_reg = devm_ioremap(&pdev->dev, r->start, resource_size(r));
 	if (!wdt_reg) {
 		pr_err("failed to remap I/O resources\n");
 		return -ENXIO;
@@ -293,24 +289,18 @@ static int rc32434_wdt_probe(struct platform_device *pdev)
 	ret = misc_register(&rc32434_wdt_miscdev);
 	if (ret < 0) {
 		pr_err("failed to register watchdog device\n");
-		goto unmap;
+		return ret;
 	}
 
 	pr_info("Watchdog Timer version " VERSION ", timer margin: %d sec\n",
 		timeout);
 
 	return 0;
-
-unmap:
-	iounmap(wdt_reg);
-	return ret;
 }
 
-static int rc32434_wdt_remove(struct platform_device *pdev)
+static void rc32434_wdt_remove(struct platform_device *pdev)
 {
 	misc_deregister(&rc32434_wdt_miscdev);
-	iounmap(wdt_reg);
-	return 0;
 }
 
 static void rc32434_wdt_shutdown(struct platform_device *pdev)
@@ -333,4 +323,3 @@ MODULE_AUTHOR("Ondrej Zajicek <santiago@crfreenet.org>,"
 		"Florian Fainelli <florian@openwrt.org>");
 MODULE_DESCRIPTION("Driver for the IDT RC32434 SoC watchdog");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(WATCHDOG_MINOR);

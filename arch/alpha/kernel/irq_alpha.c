@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Alpha specific irq code.
  */
@@ -40,7 +41,7 @@ EXPORT_SYMBOL(perf_irq);
  * The main interrupt entry point.
  */
 
-asmlinkage void 
+asmlinkage void
 do_entInt(unsigned long type, unsigned long vector,
 	  unsigned long la_ptr, struct pt_regs *regs)
 {
@@ -51,56 +52,95 @@ do_entInt(unsigned long type, unsigned long vector,
 	 * Note that there is no matching local_irq_enable() due to
 	 * severe problems with RTI at IPL0 and some MILO PALcode
 	 * (namely LX164).
+	 *
+	 * PALcode has already raised PS.IPL to the level of the interrupt
+	 * being delivered.  For an IPL 7 entry - a machine check or a system
+	 * event - that is IPL_MAX, which is what arch_irqs_disabled() tests
+	 * for, so local_irq_disable() would decide interrupts were already
+	 * off and skip trace_hardirqs_off().  lockdep would then spend the
+	 * whole handler believing interrupts are enabled.  Drive the
+	 * annotation from lockdep's own state rather than the hardware IPL.
 	 */
-	local_irq_disable();
+	raw_local_irq_disable();
+	if (lockdep_hardirqs_enabled())
+		trace_hardirqs_off();
+
+	old_regs = set_irq_regs(regs);
+
 	switch (type) {
 	case 0:
 #ifdef CONFIG_SMP
+		irq_enter();
 		handle_ipi(regs);
-		return;
+		irq_exit();
+		break;
 #else
 		irq_err_count++;
-		printk(KERN_CRIT "Interprocessor interrupt? "
-		       "You must be kidding!\n");
-#endif
+		pr_crit("Interprocessor interrupt? You must be kidding!\n");
 		break;
-	case 1:
-		old_regs = set_irq_regs(regs);
-#ifdef CONFIG_SMP
-	  {
-		long cpu;
-
-		smp_percpu_timer_interrupt(regs);
-		cpu = smp_processor_id();
-		if (cpu != boot_cpuid) {
-		        kstat_incr_irqs_this_cpu(RTC_IRQ, irq_to_desc(RTC_IRQ));
-		} else {
-			handle_irq(RTC_IRQ);
-		}
-	  }
-#else
-		handle_irq(RTC_IRQ);
 #endif
-		set_irq_regs(old_regs);
-		return;
+	case 1:
+		/* handle_irq() already does irq_enter()/irq_exit() */
+		handle_irq(RTC_IRQ);
+		break;
 	case 2:
-		old_regs = set_irq_regs(regs);
+		irq_enter();
 		alpha_mv.machine_check(vector, la_ptr);
-		set_irq_regs(old_regs);
-		return;
+		irq_exit();
+		break;
 	case 3:
-		old_regs = set_irq_regs(regs);
+		irq_enter();
 		alpha_mv.device_interrupt(vector);
-		set_irq_regs(old_regs);
-		return;
+		irq_exit();
+		break;
 	case 4:
+		irq_enter();
 		perf_irq(la_ptr, regs);
-		return;
+		irq_exit();
+		break;
 	default:
-		printk(KERN_CRIT "Hardware intr %ld %lx? Huh?\n",
-		       type, vector);
+		pr_crit("Hardware intr %lu %lx? Huh?\n", type, vector);
+		pr_crit("PC = %016lx PS=%04lx\n", regs->pc, regs->ps);
+		break;
 	}
-	printk(KERN_CRIT "PC = %016lx PS=%04lx\n", regs->pc, regs->ps);
+
+	set_irq_regs(old_regs);
+
+	/*
+	 * Intentionally no local_irq_enable(): Alpha historically avoids
+	 * enabling at IPL0 here due to PAL/RTI issues (LX164/MILO note).
+	 */
+}
+
+void notrace lockdep_on_restore(unsigned long ps,
+				unsigned long ip)
+{
+#ifdef CONFIG_PROVE_LOCKING
+	/*
+	 * If PAL_rti will restore IPL == 7, IRQs remain disabled.
+	 * There is no hardirqs-on transition to annotate.
+	 */
+	if ((ps & 7) == 7)
+		return;
+
+	/*
+	 * This helper is meant to run before PAL_rti, after entry.S has
+	 * forced IPL to 7.  If IRQs are already enabled, do not emit a
+	 * fake transition.
+	 */
+	if (!irqs_disabled())
+		return;
+
+	/*
+	 * Only emit an ON transition if lockdep currently tracks hardirqs
+	 * as off.
+	 */
+	if (lockdep_hardirqs_enabled())
+		return;
+
+	lockdep_hardirqs_on_prepare();
+	lockdep_hardirqs_on(ip);
+#endif
 }
 
 void __init
@@ -110,6 +150,19 @@ common_init_isa_dma(void)
 	outb(0, DMA2_RESET_REG);
 	outb(0, DMA1_CLR_MASK_REG);
 	outb(0, DMA2_CLR_MASK_REG);
+}
+
+/*
+ * The platforms wire up their interrupts by calling into the generic irq
+ * code with fixed interrupt numbers, so the descriptors have to exist by
+ * then.  Preallocate the machine's full complement rather than take the
+ * NR_IRQS_LEGACY default, which would leave everything above IRQ 15
+ * without a descriptor and silently drop the handler setup.
+ */
+int __init
+arch_probe_nr_irqs(void)
+{
+	return alpha_mv.nr_irqs;
 }
 
 void __init
@@ -226,32 +279,13 @@ process_mcheck_info(unsigned long vector, unsigned long la_ptr,
  * The special RTC interrupt type.  The interrupt itself was
  * processed by PALcode, and comes in via entInt vector 1.
  */
-
-struct irqaction timer_irqaction = {
-	.handler	= timer_interrupt,
-	.name		= "timer",
-};
-
 void __init
-init_rtc_irq(void)
+init_rtc_irq(irq_handler_t handler)
 {
 	irq_set_chip_and_handler_name(RTC_IRQ, &dummy_irq_chip,
-				      handle_simple_irq, "RTC");
-	setup_irq(RTC_IRQ, &timer_irqaction);
+				      handle_percpu_irq, "RTC");
+	if (!handler)
+		handler = rtc_timer_interrupt;
+	if (request_irq(RTC_IRQ, handler, 0, "timer", NULL))
+		pr_err("Failed to register timer interrupt\n");
 }
-
-/* Dummy irqactions.  */
-struct irqaction isa_cascade_irqaction = {
-	.handler	= no_action,
-	.name		= "isa-cascade"
-};
-
-struct irqaction timer_cascade_irqaction = {
-	.handler	= no_action,
-	.name		= "timer-cascade"
-};
-
-struct irqaction halt_switch_irqaction = {
-	.handler	= no_action,
-	.name		= "halt-switch"
-};

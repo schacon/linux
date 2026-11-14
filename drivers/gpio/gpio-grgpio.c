@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for Aeroflex Gaisler GRGPIO General Purpose I/O cores.
  *
@@ -12,29 +13,25 @@
  * See "Documentation/devicetree/bindings/gpio/gpio-grgpio.txt" for
  * information on open firmware properties.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
- *
  * Contributors: Andreas Larsson <andreas@gaisler.com>
  */
 
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/spinlock.h>
-#include <linux/io.h>
-#include <linux/of.h>
-#include <linux/of_gpio.h>
-#include <linux/of_platform.h>
-#include <linux/gpio.h>
-#include <linux/slab.h>
+#include <linux/bitops.h>
 #include <linux/err.h>
-#include <linux/basic_mmio_gpio.h>
+#include <linux/gpio/driver.h>
+#include <linux/gpio/generic.h>
+#include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/string_choices.h>
 
 #define GRGPIO_MAX_NGPIO 32
 
@@ -49,7 +46,7 @@
 
 /* Structure for an irq of the core - called an underlying irq */
 struct grgpio_uirq {
-	u8 refcnt; /* Reference counter to manage requesting/freeing of uirq */
+	atomic_t refcnt; /* Reference counter to manage requesting/freeing of uirq */
 	u8 uirq; /* Underlying irq of the gpio driver */
 };
 
@@ -63,7 +60,7 @@ struct grgpio_lirq {
 };
 
 struct grgpio_priv {
-	struct bgpio_chip bgc;
+	struct gpio_generic_chip chip;
 	void __iomem *regs;
 	struct device *dev;
 
@@ -92,36 +89,22 @@ struct grgpio_priv {
 	struct grgpio_lirq lirqs[GRGPIO_MAX_NGPIO];
 };
 
-static inline struct grgpio_priv *grgpio_gc_to_priv(struct gpio_chip *gc)
-{
-	struct bgpio_chip *bgc = to_bgpio_chip(gc);
-
-	return container_of(bgc, struct grgpio_priv, bgc);
-}
-
 static void grgpio_set_imask(struct grgpio_priv *priv, unsigned int offset,
 			     int val)
 {
-	struct bgpio_chip *bgc = &priv->bgc;
-	unsigned long mask = bgc->pin2mask(bgc, offset);
-	unsigned long flags;
-
-	spin_lock_irqsave(&bgc->lock, flags);
-
 	if (val)
-		priv->imask |= mask;
+		priv->imask |= BIT(offset);
 	else
-		priv->imask &= ~mask;
-	bgc->write_reg(priv->regs + GRGPIO_IMASK, priv->imask);
+		priv->imask &= ~BIT(offset);
 
-	spin_unlock_irqrestore(&bgc->lock, flags);
+	gpio_generic_write_reg(&priv->chip, priv->regs + GRGPIO_IMASK, priv->imask);
 }
 
 static int grgpio_to_irq(struct gpio_chip *gc, unsigned offset)
 {
-	struct grgpio_priv *priv = grgpio_gc_to_priv(gc);
+	struct grgpio_priv *priv = gpiochip_get_data(gc);
 
-	if (offset > gc->ngpio)
+	if (offset >= gc->ngpio)
 		return -ENXIO;
 
 	if (priv->lirqs[offset].index < 0)
@@ -135,7 +118,6 @@ static int grgpio_to_irq(struct gpio_chip *gc, unsigned offset)
 static int grgpio_irq_set_type(struct irq_data *d, unsigned int type)
 {
 	struct grgpio_priv *priv = irq_data_get_irq_chip_data(d);
-	unsigned long flags;
 	u32 mask = BIT(d->hwirq);
 	u32 ipol;
 	u32 iedge;
@@ -163,15 +145,13 @@ static int grgpio_irq_set_type(struct irq_data *d, unsigned int type)
 		return -EINVAL;
 	}
 
-	spin_lock_irqsave(&priv->bgc.lock, flags);
+	guard(gpio_generic_lock_irqsave)(&priv->chip);
 
-	ipol = priv->bgc.read_reg(priv->regs + GRGPIO_IPOL) & ~mask;
-	iedge = priv->bgc.read_reg(priv->regs + GRGPIO_IEDGE) & ~mask;
+	ipol = gpio_generic_read_reg(&priv->chip, priv->regs + GRGPIO_IPOL) & ~mask;
+	iedge = gpio_generic_read_reg(&priv->chip, priv->regs + GRGPIO_IEDGE) & ~mask;
 
-	priv->bgc.write_reg(priv->regs + GRGPIO_IPOL, ipol | pol);
-	priv->bgc.write_reg(priv->regs + GRGPIO_IEDGE, iedge | edge);
-
-	spin_unlock_irqrestore(&priv->bgc.lock, flags);
+	gpio_generic_write_reg(&priv->chip, priv->regs + GRGPIO_IPOL, ipol | pol);
+	gpio_generic_write_reg(&priv->chip, priv->regs + GRGPIO_IEDGE, iedge | edge);
 
 	return 0;
 }
@@ -181,7 +161,10 @@ static void grgpio_irq_mask(struct irq_data *d)
 	struct grgpio_priv *priv = irq_data_get_irq_chip_data(d);
 	int offset = d->hwirq;
 
-	grgpio_set_imask(priv, offset, 0);
+	scoped_guard(gpio_generic_lock_irqsave, &priv->chip)
+		grgpio_set_imask(priv, offset, 0);
+
+	gpiochip_disable_irq(&priv->chip.gc, d->hwirq);
 }
 
 static void grgpio_irq_unmask(struct irq_data *d)
@@ -189,25 +172,30 @@ static void grgpio_irq_unmask(struct irq_data *d)
 	struct grgpio_priv *priv = irq_data_get_irq_chip_data(d);
 	int offset = d->hwirq;
 
+	gpiochip_enable_irq(&priv->chip.gc, d->hwirq);
+
+	guard(gpio_generic_lock_irqsave)(&priv->chip);
+
 	grgpio_set_imask(priv, offset, 1);
 }
 
-static struct irq_chip grgpio_irq_chip = {
+static const struct irq_chip grgpio_irq_chip = {
 	.name			= "grgpio",
 	.irq_mask		= grgpio_irq_mask,
 	.irq_unmask		= grgpio_irq_unmask,
 	.irq_set_type		= grgpio_irq_set_type,
+	.flags = IRQCHIP_IMMUTABLE,
+	GPIOCHIP_IRQ_RESOURCE_HELPERS,
 };
 
 static irqreturn_t grgpio_irq_handler(int irq, void *dev)
 {
 	struct grgpio_priv *priv = dev;
-	int ngpio = priv->bgc.gc.ngpio;
-	unsigned long flags;
+	int ngpio = priv->chip.gc.ngpio;
 	int i;
 	int match = 0;
 
-	spin_lock_irqsave(&priv->bgc.lock, flags);
+	guard(gpio_generic_lock_irqsave)(&priv->chip);
 
 	/*
 	 * For each gpio line, call its interrupt handler if it its underlying
@@ -223,8 +211,6 @@ static irqreturn_t grgpio_irq_handler(int irq, void *dev)
 		}
 	}
 
-	spin_unlock_irqrestore(&priv->bgc.lock, flags);
-
 	if (!match)
 		dev_warn(priv->dev, "No gpio line matched irq %d\n", irq);
 
@@ -235,8 +221,8 @@ static irqreturn_t grgpio_irq_handler(int irq, void *dev)
  * This function will be called as a consequence of the call to
  * irq_create_mapping in grgpio_to_irq
  */
-int grgpio_irq_map(struct irq_domain *d, unsigned int irq,
-		   irq_hw_number_t hwirq)
+static int grgpio_irq_map(struct irq_domain *d, unsigned int irq,
+			  irq_hw_number_t hwirq)
 {
 	struct grgpio_priv *priv = d->host_data;
 	struct grgpio_lirq *lirq;
@@ -255,59 +241,47 @@ int grgpio_irq_map(struct irq_domain *d, unsigned int irq,
 	dev_dbg(priv->dev, "Mapping irq %d for gpio line %d\n",
 		irq, offset);
 
-	spin_lock_irqsave(&priv->bgc.lock, flags);
-
-	/* Request underlying irq if not already requested */
+	gpio_generic_chip_lock_irqsave(&priv->chip, flags);
 	lirq->irq = irq;
 	uirq = &priv->uirqs[lirq->index];
-	if (uirq->refcnt == 0) {
+	gpio_generic_chip_unlock_irqrestore(&priv->chip, flags);
+
+	/* Request underlying irq if not already requested */
+	if (atomic_fetch_add(1, &uirq->refcnt) == 0) {
 		ret = request_irq(uirq->uirq, grgpio_irq_handler, 0,
 				  dev_name(priv->dev), priv);
 		if (ret) {
 			dev_err(priv->dev,
 				"Could not request underlying irq %d\n",
 				uirq->uirq);
-
-			spin_unlock_irqrestore(&priv->bgc.lock, flags);
-
+			atomic_dec(&uirq->refcnt); /* rollback */
 			return ret;
 		}
 	}
-	uirq->refcnt++;
-
-	spin_unlock_irqrestore(&priv->bgc.lock, flags);
 
 	/* Setup irq  */
 	irq_set_chip_data(irq, priv);
 	irq_set_chip_and_handler(irq, &grgpio_irq_chip,
 				 handle_simple_irq);
-	irq_clear_status_flags(irq, IRQ_NOREQUEST);
-#ifdef CONFIG_ARM
-	set_irq_flags(irq, IRQF_VALID);
-#else
 	irq_set_noprobe(irq);
-#endif
 
 	return ret;
 }
 
-void grgpio_irq_unmap(struct irq_domain *d, unsigned int irq)
+static void grgpio_irq_unmap(struct irq_domain *d, unsigned int irq)
 {
 	struct grgpio_priv *priv = d->host_data;
 	int index;
 	struct grgpio_lirq *lirq;
 	struct grgpio_uirq *uirq;
 	unsigned long flags;
-	int ngpio = priv->bgc.gc.ngpio;
+	int ngpio = priv->chip.gc.ngpio;
 	int i;
 
-#ifdef CONFIG_ARM
-	set_irq_flags(irq, 0);
-#endif
 	irq_set_chip_and_handler(irq, NULL, NULL);
 	irq_set_chip_data(irq, NULL);
 
-	spin_lock_irqsave(&priv->bgc.lock, flags);
+	gpio_generic_chip_lock_irqsave(&priv->chip, flags);
 
 	/* Free underlying irq if last user unmapped */
 	index = -1;
@@ -324,15 +298,24 @@ void grgpio_irq_unmap(struct irq_domain *d, unsigned int irq)
 
 	if (index >= 0) {
 		uirq = &priv->uirqs[lirq->index];
-		uirq->refcnt--;
-		if (uirq->refcnt == 0)
+		if (atomic_dec_and_test(&uirq->refcnt)) {
+			gpio_generic_chip_unlock_irqrestore(&priv->chip, flags);
 			free_irq(uirq->uirq, priv);
+			return;
+		}
 	}
 
-	spin_unlock_irqrestore(&priv->bgc.lock, flags);
+	gpio_generic_chip_unlock_irqrestore(&priv->chip, flags);
 }
 
-static struct irq_domain_ops grgpio_irq_domain_ops = {
+static void grgpio_irq_domain_remove(void *data)
+{
+	struct irq_domain *domain = data;
+
+	irq_domain_remove(domain);
+}
+
+static const struct irq_domain_ops grgpio_irq_domain_ops = {
 	.map	= grgpio_irq_map,
 	.unmap	= grgpio_irq_unmap,
 };
@@ -342,51 +325,58 @@ static struct irq_domain_ops grgpio_irq_domain_ops = {
 static int grgpio_probe(struct platform_device *ofdev)
 {
 	struct device_node *np = ofdev->dev.of_node;
+	struct gpio_generic_chip_config config;
+	struct device *dev = &ofdev->dev;
 	void  __iomem *regs;
 	struct gpio_chip *gc;
-	struct bgpio_chip *bgc;
 	struct grgpio_priv *priv;
-	struct resource *res;
 	int err;
 	u32 prop;
 	s32 *irqmap;
 	int size;
 	int i;
 
-	priv = devm_kzalloc(&ofdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
-	res = platform_get_resource(ofdev, IORESOURCE_MEM, 0);
-	regs = devm_ioremap_resource(&ofdev->dev, res);
+	regs = devm_platform_ioremap_resource(ofdev, 0);
 	if (IS_ERR(regs))
 		return PTR_ERR(regs);
 
-	bgc = &priv->bgc;
-	err = bgpio_init(bgc, &ofdev->dev, 4, regs + GRGPIO_DATA,
-			 regs + GRGPIO_OUTPUT, NULL, regs + GRGPIO_DIR, NULL,
-			 BGPIOF_BIG_ENDIAN_BYTE_ORDER);
+	config = (struct gpio_generic_chip_config) {
+		.dev = dev,
+		.sz = 4,
+		.dat = regs + GRGPIO_DATA,
+		.set = regs + GRGPIO_OUTPUT,
+		.dirout = regs + GRGPIO_DIR,
+		.flags = GPIO_GENERIC_BIG_ENDIAN_BYTE_ORDER,
+	};
+
+	gc = &priv->chip.gc;
+	err = gpio_generic_chip_init(&priv->chip, &config);
 	if (err) {
-		dev_err(&ofdev->dev, "bgpio_init() failed\n");
+		dev_err(dev, "failed to initialize the generic GPIO chip\n");
 		return err;
 	}
 
 	priv->regs = regs;
-	priv->imask = bgc->read_reg(regs + GRGPIO_IMASK);
-	priv->dev = &ofdev->dev;
+	priv->imask = gpio_generic_read_reg(&priv->chip, regs + GRGPIO_IMASK);
+	priv->dev = dev;
 
-	gc = &bgc->gc;
-	gc->of_node = np;
 	gc->owner = THIS_MODULE;
 	gc->to_irq = grgpio_to_irq;
-	gc->label = np->full_name;
+	gc->label = devm_kasprintf(dev, GFP_KERNEL, "%pOF", np);
+	if (!gc->label)
+		return -ENOMEM;
+
 	gc->base = -1;
 
 	err = of_property_read_u32(np, "nbits", &prop);
 	if (err || prop <= 0 || prop > GRGPIO_MAX_NGPIO) {
 		gc->ngpio = GRGPIO_MAX_NGPIO;
-		dev_dbg(&ofdev->dev,
-			"No or invalid nbits property: assume %d\n", gc->ngpio);
+		dev_dbg(dev, "No or invalid nbits property: assume %d\n",
+			gc->ngpio);
 	} else {
 		gc->ngpio = prop;
 	}
@@ -398,19 +388,23 @@ static int grgpio_probe(struct platform_device *ofdev)
 	irqmap = (s32 *)of_get_property(np, "irqmap", &size);
 	if (irqmap) {
 		if (size < gc->ngpio) {
-			dev_err(&ofdev->dev,
+			dev_err(dev,
 				"irqmap shorter than ngpio (%d < %d)\n",
 				size, gc->ngpio);
 			return -EINVAL;
 		}
 
-		priv->domain = irq_domain_add_linear(np, gc->ngpio,
-						     &grgpio_irq_domain_ops,
-						     priv);
+		priv->domain = irq_domain_create_linear(dev_fwnode(&ofdev->dev), gc->ngpio,
+							&grgpio_irq_domain_ops, priv);
 		if (!priv->domain) {
-			dev_err(&ofdev->dev, "Could not add irq domain\n");
+			dev_err(dev, "Could not add irq domain\n");
 			return -EINVAL;
 		}
+
+		err = devm_add_action_or_reset(dev, grgpio_irq_domain_remove,
+					       priv->domain);
+		if (err)
+			return err;
 
 		for (i = 0; i < gc->ngpio; i++) {
 			struct grgpio_lirq *lirq;
@@ -428,60 +422,26 @@ static int grgpio_probe(struct platform_device *ofdev)
 				 * Continue without irq functionality for that
 				 * gpio line
 				 */
-				dev_err(priv->dev,
-					"Failed to get irq for offset %d\n", i);
 				continue;
 			}
 			priv->uirqs[lirq->index].uirq = ret;
+			atomic_set(&priv->uirqs[lirq->index].refcnt, 0);
 		}
 	}
 
-	platform_set_drvdata(ofdev, priv);
-
-	err = gpiochip_add(gc);
+	err = devm_gpiochip_add_data(dev, gc, priv);
 	if (err) {
-		dev_err(&ofdev->dev, "Could not add gpiochip\n");
+		dev_err(dev, "Could not add gpiochip\n");
 		return err;
 	}
 
-	dev_info(&ofdev->dev, "regs=0x%p, base=%d, ngpio=%d, irqs=%s\n",
-		 priv->regs, gc->base, gc->ngpio, priv->domain ? "on" : "off");
+	dev_info(dev, "regs=0x%p, base=%d, ngpio=%d, irqs=%s\n",
+		 priv->regs, gc->base, gc->ngpio, str_on_off(priv->domain));
 
 	return 0;
 }
 
-static int grgpio_remove(struct platform_device *ofdev)
-{
-	struct grgpio_priv *priv = platform_get_drvdata(ofdev);
-	unsigned long flags;
-	int i;
-	int ret = 0;
-
-	spin_lock_irqsave(&priv->bgc.lock, flags);
-
-	if (priv->domain) {
-		for (i = 0; i < GRGPIO_MAX_NGPIO; i++) {
-			if (priv->uirqs[i].refcnt != 0) {
-				ret = -EBUSY;
-				goto out;
-			}
-		}
-	}
-
-	ret = gpiochip_remove(&priv->bgc.gc);
-	if (ret)
-		goto out;
-
-	if (priv->domain)
-		irq_domain_remove(priv->domain);
-
-out:
-	spin_unlock_irqrestore(&priv->bgc.lock, flags);
-
-	return ret;
-}
-
-static struct of_device_id grgpio_match[] = {
+static const struct of_device_id grgpio_match[] = {
 	{.name = "GAISLER_GPIO"},
 	{.name = "01_01a"},
 	{},
@@ -492,11 +452,9 @@ MODULE_DEVICE_TABLE(of, grgpio_match);
 static struct platform_driver grgpio_driver = {
 	.driver = {
 		.name = "grgpio",
-		.owner = THIS_MODULE,
 		.of_match_table = grgpio_match,
 	},
 	.probe = grgpio_probe,
-	.remove = grgpio_remove,
 };
 module_platform_driver(grgpio_driver);
 

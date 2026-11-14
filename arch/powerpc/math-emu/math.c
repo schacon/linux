@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 1999  Eddie C. Dost  (ecd@atecom.com)
  */
@@ -5,13 +6,28 @@
 #include <linux/types.h>
 #include <linux/sched.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/reg.h>
+#include <asm/switch_to.h>
 
 #include <asm/sfp-machine.h>
 #include <math-emu/double.h>
 
 #define FLOATFUNC(x)	extern int x(void *, void *, void *, void *)
+
+/* The instructions list which may be not implemented by a hardware FPU */
+FLOATFUNC(fre);
+FLOATFUNC(frsqrtes);
+FLOATFUNC(fsqrt);
+FLOATFUNC(fsqrts);
+FLOATFUNC(mtfsf);
+FLOATFUNC(mtfsfi);
+
+#ifdef CONFIG_MATH_EMULATION_HW_UNIMPLEMENTED
+#undef FLOATFUNC
+#define FLOATFUNC(x)	static inline int x(void *op1, void *op2, void *op3, \
+						 void *op4) { return 0; }
+#endif
 
 FLOATFUNC(fadd);
 FLOATFUNC(fadds);
@@ -42,8 +58,6 @@ FLOATFUNC(mcrfs);
 FLOATFUNC(mffs);
 FLOATFUNC(mtfsb0);
 FLOATFUNC(mtfsb1);
-FLOATFUNC(mtfsf);
-FLOATFUNC(mtfsfi);
 
 FLOATFUNC(lfd);
 FLOATFUNC(lfs);
@@ -61,8 +75,6 @@ FLOATFUNC(fneg);
 FLOATFUNC(fres);
 FLOATFUNC(frsqrte);
 FLOATFUNC(fsel);
-FLOATFUNC(fsqrt);
-FLOATFUNC(fsqrts);
 
 
 #define OP31		0x1f		/*   31 */
@@ -97,6 +109,7 @@ FLOATFUNC(fsqrts);
 #define FSQRTS		0x016		/*   22 */
 #define FRES		0x018		/*   24 */
 #define FMULS		0x019		/*   25 */
+#define FRSQRTES	0x01a		/*   26 */
 #define FMSUBS		0x01c		/*   28 */
 #define FMADDS		0x01d		/*   29 */
 #define FNMSUBS		0x01e		/*   30 */
@@ -109,6 +122,7 @@ FLOATFUNC(fsqrts);
 #define FADD		0x015		/*   21 */
 #define FSQRT		0x016		/*   22 */
 #define FSEL		0x017		/*   23 */
+#define FRE		0x018		/*   24 */
 #define FMUL		0x019		/*   25 */
 #define FRSQRTE		0x01a		/*   26 */
 #define FMSUB		0x01c		/*   28 */
@@ -150,7 +164,6 @@ FLOATFUNC(fsqrts);
 #define XEU	15
 #define XFLB	10
 
-#ifdef CONFIG_MATH_EMULATION
 static int
 record_exception(struct pt_regs *regs, int eflag)
 {
@@ -208,66 +221,22 @@ record_exception(struct pt_regs *regs, int eflag)
 
 	return (fpscr & FPSCR_FEX) ? 1 : 0;
 }
-#endif /* CONFIG_MATH_EMULATION */
 
 int
 do_mathemu(struct pt_regs *regs)
 {
-	void *op0 = 0, *op1 = 0, *op2 = 0, *op3 = 0;
+	void *op0 = NULL, *op1 = NULL, *op2 = NULL, *op3 = NULL;
 	unsigned long pc = regs->nip;
 	signed short sdisp;
 	u32 insn = 0;
 	int idx = 0;
-#ifdef CONFIG_MATH_EMULATION
 	int (*func)(void *, void *, void *, void *);
 	int type = 0;
 	int eflag, trap;
-#endif
 
-	if (get_user(insn, (u32 *)pc))
+	if (get_user(insn, (u32 __user *)pc))
 		return -EFAULT;
 
-#ifndef CONFIG_MATH_EMULATION
-	switch (insn >> 26) {
-	case LFD:
-		idx = (insn >> 16) & 0x1f;
-		sdisp = (insn & 0xffff);
-		op0 = (void *)&current->thread.TS_FPR((insn >> 21) & 0x1f);
-		op1 = (void *)((idx ? regs->gpr[idx] : 0) + sdisp);
-		lfd(op0, op1, op2, op3);
-		break;
-	case LFDU:
-		idx = (insn >> 16) & 0x1f;
-		sdisp = (insn & 0xffff);
-		op0 = (void *)&current->thread.TS_FPR((insn >> 21) & 0x1f);
-		op1 = (void *)((idx ? regs->gpr[idx] : 0) + sdisp);
-		lfd(op0, op1, op2, op3);
-		regs->gpr[idx] = (unsigned long)op1;
-		break;
-	case STFD:
-		idx = (insn >> 16) & 0x1f;
-		sdisp = (insn & 0xffff);
-		op0 = (void *)&current->thread.TS_FPR((insn >> 21) & 0x1f);
-		op1 = (void *)((idx ? regs->gpr[idx] : 0) + sdisp);
-		stfd(op0, op1, op2, op3);
-		break;
-	case STFDU:
-		idx = (insn >> 16) & 0x1f;
-		sdisp = (insn & 0xffff);
-		op0 = (void *)&current->thread.TS_FPR((insn >> 21) & 0x1f);
-		op1 = (void *)((idx ? regs->gpr[idx] : 0) + sdisp);
-		stfd(op0, op1, op2, op3);
-		regs->gpr[idx] = (unsigned long)op1;
-		break;
-	case OP63:
-		op0 = (void *)&current->thread.TS_FPR((insn >> 21) & 0x1f);
-		op1 = (void *)&current->thread.TS_FPR((insn >> 11) & 0x1f);
-		fmr(op0, op1, op2, op3);
-		break;
-	default:
-		goto illegal;
-	}
-#else /* CONFIG_MATH_EMULATION */
 	switch (insn >> 26) {
 	case LFS:	func = lfs;	type = D;	break;
 	case LFSU:	func = lfs;	type = DU;	break;
@@ -299,9 +268,10 @@ do_mathemu(struct pt_regs *regs)
 		case FDIVS:	func = fdivs;	type = AB;	break;
 		case FSUBS:	func = fsubs;	type = AB;	break;
 		case FADDS:	func = fadds;	type = AB;	break;
-		case FSQRTS:	func = fsqrts;	type = AB;	break;
-		case FRES:	func = fres;	type = AB;	break;
+		case FSQRTS:	func = fsqrts;	type = XB;	break;
+		case FRES:	func = fres;	type = XB;	break;
 		case FMULS:	func = fmuls;	type = AC;	break;
+		case FRSQRTES:	func = frsqrtes;type = XB;	break;
 		case FMSUBS:	func = fmsubs;	type = ABC;	break;
 		case FMADDS:	func = fmadds;	type = ABC;	break;
 		case FNMSUBS:	func = fnmsubs;	type = ABC;	break;
@@ -317,10 +287,11 @@ do_mathemu(struct pt_regs *regs)
 			case FDIV:	func = fdiv;	type = AB;	break;
 			case FSUB:	func = fsub;	type = AB;	break;
 			case FADD:	func = fadd;	type = AB;	break;
-			case FSQRT:	func = fsqrt;	type = AB;	break;
+			case FSQRT:	func = fsqrt;	type = XB;	break;
+			case FRE:	func = fre;	type = XB;	break;
 			case FSEL:	func = fsel;	type = ABC;	break;
 			case FMUL:	func = fmul;	type = AC;	break;
-			case FRSQRTE:	func = frsqrte;	type = AB;	break;
+			case FRSQRTE:	func = frsqrte;	type = XB;	break;
 			case FMSUB:	func = fmsub;	type = ABC;	break;
 			case FMADD:	func = fmadd;	type = ABC;	break;
 			case FNMSUB:	func = fnmsub;	type = ABC;	break;
@@ -410,54 +381,56 @@ do_mathemu(struct pt_regs *regs)
 	case XE:
 		idx = (insn >> 16) & 0x1f;
 		op0 = (void *)&current->thread.TS_FPR((insn >> 21) & 0x1f);
-		if (!idx) {
-			if (((insn >> 1) & 0x3ff) == STFIWX)
-				op1 = (void *)(regs->gpr[(insn >> 11) & 0x1f]);
-			else
-				goto illegal;
-		} else {
-			op1 = (void *)(regs->gpr[idx] + regs->gpr[(insn >> 11) & 0x1f]);
-		}
-
+		op1 = (void *)((idx ? regs->gpr[idx] : 0)
+				+ regs->gpr[(insn >> 11) & 0x1f]);
 		break;
 
 	case XEU:
 		idx = (insn >> 16) & 0x1f;
+		if (!idx)
+			goto illegal;
 		op0 = (void *)&current->thread.TS_FPR((insn >> 21) & 0x1f);
-		op1 = (void *)((idx ? regs->gpr[idx] : 0)
+		op1 = (void *)(regs->gpr[idx]
 				+ regs->gpr[(insn >> 11) & 0x1f]);
 		break;
 
 	case XCR:
 		op0 = (void *)&regs->ccr;
-		op1 = (void *)((insn >> 23) & 0x7);
+		op1 = (void *)(long)((insn >> 23) & 0x7);
 		op2 = (void *)&current->thread.TS_FPR((insn >> 16) & 0x1f);
 		op3 = (void *)&current->thread.TS_FPR((insn >> 11) & 0x1f);
 		break;
 
 	case XCRL:
 		op0 = (void *)&regs->ccr;
-		op1 = (void *)((insn >> 23) & 0x7);
-		op2 = (void *)((insn >> 18) & 0x7);
+		op1 = (void *)(long)((insn >> 23) & 0x7);
+		op2 = (void *)(long)((insn >> 18) & 0x7);
 		break;
 
 	case XCRB:
-		op0 = (void *)((insn >> 21) & 0x1f);
+		op0 = (void *)(long)((insn >> 21) & 0x1f);
 		break;
 
 	case XCRI:
-		op0 = (void *)((insn >> 23) & 0x7);
-		op1 = (void *)((insn >> 12) & 0xf);
+		op0 = (void *)(long)((insn >> 23) & 0x7);
+		op1 = (void *)(long)((insn >> 12) & 0xf);
 		break;
 
 	case XFLB:
-		op0 = (void *)((insn >> 17) & 0xff);
+		op0 = (void *)(long)((insn >> 17) & 0xff);
 		op1 = (void *)&current->thread.TS_FPR((insn >> 11) & 0x1f);
 		break;
 
 	default:
 		goto illegal;
 	}
+
+	/*
+	 * If we support a HW FPU, we need to ensure the FP state
+	 * is flushed into the thread_struct before attempting
+	 * emulation
+	 */
+	flush_fp_to_thread(current);
 
 	eflag = func(op0, op1, op2, op3);
 
@@ -479,9 +452,8 @@ do_mathemu(struct pt_regs *regs)
 	default:
 		break;
 	}
-#endif /* CONFIG_MATH_EMULATION */
 
-	regs->nip += 4;
+	regs_add_return_ip(regs, 4);
 	return 0;
 
 illegal:

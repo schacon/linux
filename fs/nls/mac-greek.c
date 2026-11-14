@@ -478,7 +478,6 @@ static struct nls_table table = {
 	.char2uni	= char2uni,
 	.charset2lower	= charset2lower,
 	.charset2upper	= charset2upper,
-	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_macgreek(void)
@@ -494,4 +493,5 @@ static void __exit exit_nls_macgreek(void)
 module_init(init_nls_macgreek)
 module_exit(exit_nls_macgreek)
 
+MODULE_DESCRIPTION("NLS Codepage macgreek");
 MODULE_LICENSE("Dual BSD/GPL");

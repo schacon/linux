@@ -1,3 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0
+ifeq ($(MAKELEVEL),0)
+$(error This Makefile is not intended to be run standalone, but only as a part \
+of the  main one in the parent dir)
+endif
+
 OUTPUT := ./
 ifeq ("$(origin O)", "command line")
 ifneq ($(O),)
@@ -5,10 +11,16 @@ ifneq ($(O),)
 endif
 endif
 
+ifeq ($(strip $(STATIC)),true)
+LIBS = -L../ -L$(OUTPUT) -lm
+OBJS = $(OUTPUT)main.o $(OUTPUT)parse.o $(OUTPUT)system.o $(OUTPUT)benchmark.o \
+       $(OUTPUT)../lib/cpufreq.o $(OUTPUT)../lib/cpupower.o
+else
 LIBS = -L../ -L$(OUTPUT) -lm -lcpupower
-
 OBJS = $(OUTPUT)main.o $(OUTPUT)parse.o $(OUTPUT)system.o $(OUTPUT)benchmark.o
-CFLAGS += -D_GNU_SOURCE -I../lib -DDEFAULT_CONFIG_FILE=\"$(confdir)/cpufreq-bench.conf\"
+endif
+
+override CFLAGS += -D_GNU_SOURCE -I../lib -DDEFAULT_CONFIG_FILE=\"$(confdir)/cpufreq-bench.conf\"
 
 $(OUTPUT)%.o : %.c
 	$(ECHO) "  CC      " $@
@@ -16,11 +28,11 @@ $(OUTPUT)%.o : %.c
 
 $(OUTPUT)cpufreq-bench: $(OBJS)
 	$(ECHO) "  CC      " $@
-	$(QUIET) $(CC) -o $@ $(CFLAGS) $(OBJS) $(LIBS)
+	$(QUIET) $(CC) -o $@ $(CFLAGS) $(LDFLAGS) $(OBJS) $(LIBS)
 
 all: $(OUTPUT)cpufreq-bench
 
-install:
+install: $(OUTPUT)cpufreq-bench
 	mkdir -p $(DESTDIR)/$(sbindir)
 	mkdir -p $(DESTDIR)/$(bindir)
 	mkdir -p $(DESTDIR)/$(docdir)

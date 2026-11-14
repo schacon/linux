@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _RDS_INFO_H
 #define _RDS_INFO_H
 
@@ -20,8 +21,7 @@ typedef void (*rds_info_func)(struct socket *sock, unsigned int len,
 
 void rds_info_register_func(int optname, rds_info_func func);
 void rds_info_deregister_func(int optname, rds_info_func func);
-int rds_info_getsockopt(struct socket *sock, int optname, char __user *optval,
-			int __user *optlen);
+int rds_info_getsockopt(struct socket *sock, int optname, sockopt_t *opt);
 void rds_info_copy(struct rds_info_iterator *iter, void *data,
 		   unsigned long bytes);
 void rds_info_iter_unmap(struct rds_info_iterator *iter);

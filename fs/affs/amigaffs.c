@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/affs/amigaffs.c
  *
@@ -8,11 +9,9 @@
  *  Please send bug reports to: hjw@zvw.de
  */
 
+#include <linux/math64.h>
+#include <linux/iversion.h>
 #include "affs.h"
-
-extern struct timezone sys_tz;
-
-static char ErrorBuffer[256];
 
 /*
  * Functions for accessing Amiga-FFS structures.
@@ -34,7 +33,7 @@ affs_insert_hash(struct inode *dir, struct buffer_head *bh)
 	ino = bh->b_blocknr;
 	offset = affs_hash_name(sb, AFFS_TAIL(sb, bh)->name + 1, AFFS_TAIL(sb, bh)->name[0]);
 
-	pr_debug("AFFS: insert_hash(dir=%u, ino=%d)\n", (u32)dir->i_ino, ino);
+	pr_debug("%s(dir=%llu, ino=%d)\n", __func__, dir->i_ino, ino);
 
 	dir_bh = affs_bread(sb, dir->i_ino);
 	if (!dir_bh)
@@ -58,11 +57,11 @@ affs_insert_hash(struct inode *dir, struct buffer_head *bh)
 		AFFS_TAIL(sb, dir_bh)->hash_chain = cpu_to_be32(ino);
 
 	affs_adjust_checksum(dir_bh, ino);
-	mark_buffer_dirty_inode(dir_bh, dir);
+	mark_buffer_dirty(dir_bh);
 	affs_brelse(dir_bh);
 
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME_SEC;
-	dir->i_version++;
+	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
+	inode_inc_iversion(dir);
 	mark_inode_dirty(dir);
 
 	return 0;
@@ -84,7 +83,8 @@ affs_remove_hash(struct inode *dir, struct buffer_head *rem_bh)
 	sb = dir->i_sb;
 	rem_ino = rem_bh->b_blocknr;
 	offset = affs_hash_name(sb, AFFS_TAIL(sb, rem_bh)->name+1, AFFS_TAIL(sb, rem_bh)->name[0]);
-	pr_debug("AFFS: remove_hash(dir=%d, ino=%d, hashval=%d)\n", (u32)dir->i_ino, rem_ino, offset);
+	pr_debug("%s(dir=%llu, ino=%d, hashval=%d)\n", __func__, dir->i_ino,
+		 rem_ino, offset);
 
 	bh = affs_bread(sb, dir->i_ino);
 	if (!bh)
@@ -100,7 +100,7 @@ affs_remove_hash(struct inode *dir, struct buffer_head *rem_bh)
 			else
 				AFFS_TAIL(sb, bh)->hash_chain = ino;
 			affs_adjust_checksum(bh, be32_to_cpu(ino) - hash_ino);
-			mark_buffer_dirty_inode(bh, dir);
+			mark_buffer_dirty(bh);
 			AFFS_TAIL(sb, rem_bh)->parent = 0;
 			retval = 0;
 			break;
@@ -114,8 +114,8 @@ affs_remove_hash(struct inode *dir, struct buffer_head *rem_bh)
 
 	affs_brelse(bh);
 
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME_SEC;
-	dir->i_version++;
+	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
+	inode_inc_iversion(dir);
 	mark_inode_dirty(dir);
 
 	return retval;
@@ -126,9 +126,9 @@ affs_fix_dcache(struct inode *inode, u32 entry_ino)
 {
 	struct dentry *dentry;
 	spin_lock(&inode->i_lock);
-	hlist_for_each_entry(dentry, &inode->i_dentry, d_alias) {
+	for_each_alias(dentry, inode) {
 		if (entry_ino == (u32)(long)dentry->d_fsdata) {
-			dentry->d_fsdata = (void *)inode->i_ino;
+			dentry->d_fsdata = (void *)(unsigned long)inode->i_ino;
 			break;
 		}
 	}
@@ -141,13 +141,13 @@ affs_fix_dcache(struct inode *inode, u32 entry_ino)
 static int
 affs_remove_link(struct dentry *dentry)
 {
-	struct inode *dir, *inode = dentry->d_inode;
+	struct inode *dir, *inode = d_inode(dentry);
 	struct super_block *sb = inode->i_sb;
-	struct buffer_head *bh = NULL, *link_bh = NULL;
+	struct buffer_head *bh, *link_bh = NULL;
 	u32 link_ino, ino;
 	int retval;
 
-	pr_debug("AFFS: remove_link(key=%ld)\n", inode->i_ino);
+	pr_debug("%s(key=%llu)\n", __func__, inode->i_ino);
 	retval = -EIO;
 	bh = affs_bread(sb, inode->i_ino);
 	if (!bh)
@@ -180,7 +180,7 @@ affs_remove_link(struct dentry *dentry)
 			affs_unlock_dir(dir);
 			goto done;
 		}
-		mark_buffer_dirty_inode(link_bh, inode);
+		mark_buffer_dirty(link_bh);
 
 		memcpy(AFFS_TAIL(sb, bh)->name, AFFS_TAIL(sb, link_bh)->name, 32);
 		retval = affs_insert_hash(dir, bh);
@@ -188,7 +188,7 @@ affs_remove_link(struct dentry *dentry)
 			affs_unlock_dir(dir);
 			goto done;
 		}
-		mark_buffer_dirty_inode(bh, inode);
+		mark_buffer_dirty(bh);
 
 		affs_unlock_dir(dir);
 		iput(dir);
@@ -203,7 +203,7 @@ affs_remove_link(struct dentry *dentry)
 			__be32 ino2 = AFFS_TAIL(sb, link_bh)->link_chain;
 			AFFS_TAIL(sb, bh)->link_chain = ino2;
 			affs_adjust_checksum(bh, be32_to_cpu(ino2) - link_ino);
-			mark_buffer_dirty_inode(bh, inode);
+			mark_buffer_dirty(bh);
 			retval = 0;
 			/* Fix the link count, if bh is a normal header block without links */
 			switch (be32_to_cpu(AFFS_TAIL(sb, bh)->stype)) {
@@ -271,15 +271,15 @@ affs_remove_header(struct dentry *dentry)
 	struct buffer_head *bh = NULL;
 	int retval;
 
-	dir = dentry->d_parent->d_inode;
+	dir = d_inode(dentry->d_parent);
 	sb = dir->i_sb;
 
 	retval = -ENOENT;
-	inode = dentry->d_inode;
+	inode = d_inode(dentry);
 	if (!inode)
 		goto done;
 
-	pr_debug("AFFS: remove_header(key=%ld)\n", inode->i_ino);
+	pr_debug("%s(key=%llu)\n", __func__, inode->i_ino);
 	retval = -EIO;
 	bh = affs_bread(sb, (u32)(long)dentry->d_fsdata);
 	if (!bh)
@@ -293,7 +293,11 @@ affs_remove_header(struct dentry *dentry)
 		 * i_hash_lock of the inode must only be
 		 * taken after some checks
 		 */
-		affs_lock_dir(inode);
+		if (inode == dir) {
+			retval = -EIO;
+			goto done_unlock;
+		}
+		affs_lock_subdir(inode);
 		retval = affs_empty_dir(inode);
 		affs_unlock_dir(inode);
 		if (retval)
@@ -306,7 +310,7 @@ affs_remove_header(struct dentry *dentry)
 	retval = affs_remove_hash(dir, bh);
 	if (retval)
 		goto done_unlock;
-	mark_buffer_dirty_inode(bh, inode);
+	mark_buffer_dirty(bh);
 
 	affs_unlock_dir(dir);
 
@@ -315,7 +319,7 @@ affs_remove_header(struct dentry *dentry)
 	else
 		clear_nlink(inode);
 	affs_unlock_link(inode);
-	inode->i_ctime = CURRENT_TIME_SEC;
+	inode_set_ctime_current(inode);
 	mark_inode_dirty(inode);
 
 done:
@@ -369,75 +373,102 @@ affs_fix_checksum(struct super_block *sb, struct buffer_head *bh)
 }
 
 void
-secs_to_datestamp(time_t secs, struct affs_date *ds)
+affs_secs_to_datestamp(time64_t secs, struct affs_date *ds)
 {
 	u32	 days;
 	u32	 minute;
+	s32	 rem;
 
-	secs -= sys_tz.tz_minuteswest * 60 + ((8 * 365 + 2) * 24 * 60 * 60);
+	secs -= sys_tz.tz_minuteswest * 60 + AFFS_EPOCH_DELTA;
 	if (secs < 0)
 		secs = 0;
-	days    = secs / 86400;
-	secs   -= days * 86400;
-	minute  = secs / 60;
-	secs   -= minute * 60;
+	days    = div_s64_rem(secs, 86400, &rem);
+	minute  = rem / 60;
+	rem    -= minute * 60;
 
 	ds->days = cpu_to_be32(days);
 	ds->mins = cpu_to_be32(minute);
-	ds->ticks = cpu_to_be32(secs * 50);
+	ds->ticks = cpu_to_be32(rem * 50);
 }
 
 umode_t
-prot_to_mode(u32 prot)
+affs_prot_to_mode(u32 prot)
 {
 	umode_t mode = 0;
 
 	if (!(prot & FIBF_NOWRITE))
-		mode |= S_IWUSR;
+		mode |= 0200;
 	if (!(prot & FIBF_NOREAD))
-		mode |= S_IRUSR;
+		mode |= 0400;
 	if (!(prot & FIBF_NOEXECUTE))
-		mode |= S_IXUSR;
+		mode |= 0100;
 	if (prot & FIBF_GRP_WRITE)
-		mode |= S_IWGRP;
+		mode |= 0020;
 	if (prot & FIBF_GRP_READ)
-		mode |= S_IRGRP;
+		mode |= 0040;
 	if (prot & FIBF_GRP_EXECUTE)
-		mode |= S_IXGRP;
+		mode |= 0010;
 	if (prot & FIBF_OTR_WRITE)
-		mode |= S_IWOTH;
+		mode |= 0002;
 	if (prot & FIBF_OTR_READ)
-		mode |= S_IROTH;
+		mode |= 0004;
 	if (prot & FIBF_OTR_EXECUTE)
-		mode |= S_IXOTH;
+		mode |= 0001;
 
 	return mode;
 }
 
 void
-mode_to_prot(struct inode *inode)
+affs_mode_to_prot(struct inode *inode)
 {
 	u32 prot = AFFS_I(inode)->i_protect;
 	umode_t mode = inode->i_mode;
 
-	if (!(mode & S_IXUSR))
+	/*
+	 * First, clear all RWED bits for owner, group, other.
+	 * Then, recalculate them afresh.
+	 *
+	 * We'll always clear the delete-inhibit bit for the owner, as that is
+	 * the classic single-user mode AmigaOS protection bit and we need to
+	 * stay compatible with all scenarios.
+	 *
+	 * Since multi-user AmigaOS is an extension, we'll only set the
+	 * delete-allow bit if any of the other bits in the same user class
+	 * (group/other) are used.
+	 */
+	prot &= ~(FIBF_NOEXECUTE | FIBF_NOREAD
+		  | FIBF_NOWRITE | FIBF_NODELETE
+		  | FIBF_GRP_EXECUTE | FIBF_GRP_READ
+		  | FIBF_GRP_WRITE   | FIBF_GRP_DELETE
+		  | FIBF_OTR_EXECUTE | FIBF_OTR_READ
+		  | FIBF_OTR_WRITE   | FIBF_OTR_DELETE);
+
+	/* Classic single-user AmigaOS flags. These are inverted. */
+	if (!(mode & 0100))
 		prot |= FIBF_NOEXECUTE;
-	if (!(mode & S_IRUSR))
+	if (!(mode & 0400))
 		prot |= FIBF_NOREAD;
-	if (!(mode & S_IWUSR))
+	if (!(mode & 0200))
 		prot |= FIBF_NOWRITE;
-	if (mode & S_IXGRP)
+
+	/* Multi-user extended flags. Not inverted. */
+	if (mode & 0010)
 		prot |= FIBF_GRP_EXECUTE;
-	if (mode & S_IRGRP)
+	if (mode & 0040)
 		prot |= FIBF_GRP_READ;
-	if (mode & S_IWGRP)
+	if (mode & 0020)
 		prot |= FIBF_GRP_WRITE;
-	if (mode & S_IXOTH)
+	if (mode & 0070)
+		prot |= FIBF_GRP_DELETE;
+
+	if (mode & 0001)
 		prot |= FIBF_OTR_EXECUTE;
-	if (mode & S_IROTH)
+	if (mode & 0004)
 		prot |= FIBF_OTR_READ;
-	if (mode & S_IWOTH)
+	if (mode & 0002)
 		prot |= FIBF_OTR_WRITE;
+	if (mode & 0007)
+		prot |= FIBF_OTR_DELETE;
 
 	AFFS_I(inode)->i_protect = prot;
 }
@@ -445,46 +476,50 @@ mode_to_prot(struct inode *inode)
 void
 affs_error(struct super_block *sb, const char *function, const char *fmt, ...)
 {
-	va_list	 args;
+	struct va_format vaf;
+	va_list args;
 
-	va_start(args,fmt);
-	vsnprintf(ErrorBuffer,sizeof(ErrorBuffer),fmt,args);
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+	pr_crit("error (device %s): %s(): %pV\n", sb->s_id, function, &vaf);
+	if (!sb_rdonly(sb))
+		pr_warn("Remounting filesystem read-only\n");
+	sb->s_flags |= SB_RDONLY;
 	va_end(args);
-
-	printk(KERN_CRIT "AFFS error (device %s): %s(): %s\n", sb->s_id,
-		function,ErrorBuffer);
-	if (!(sb->s_flags & MS_RDONLY))
-		printk(KERN_WARNING "AFFS: Remounting filesystem read-only\n");
-	sb->s_flags |= MS_RDONLY;
 }
 
 void
 affs_warning(struct super_block *sb, const char *function, const char *fmt, ...)
 {
-	va_list	 args;
+	struct va_format vaf;
+	va_list args;
 
-	va_start(args,fmt);
-	vsnprintf(ErrorBuffer,sizeof(ErrorBuffer),fmt,args);
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+	pr_warn("(device %s): %s(): %pV\n", sb->s_id, function, &vaf);
 	va_end(args);
+}
 
-	printk(KERN_WARNING "AFFS warning (device %s): %s(): %s\n", sb->s_id,
-		function,ErrorBuffer);
+bool
+affs_nofilenametruncate(const struct dentry *dentry)
+{
+	return affs_test_opt(AFFS_SB(dentry->d_sb)->s_flags, SF_NO_TRUNCATE);
 }
 
 /* Check if the name is valid for a affs object. */
 
 int
-affs_check_name(const unsigned char *name, int len)
+affs_check_name(const unsigned char *name, int len, bool notruncate)
 {
 	int	 i;
 
-	if (len > 30)
-#ifdef AFFS_NO_TRUNCATE
-		return -ENAMETOOLONG;
-#else
-		len = 30;
-#endif
-
+	if (len > AFFSNAMEMAX) {
+		if (notruncate)
+			return -ENAMETOOLONG;
+		len = AFFSNAMEMAX;
+	}
 	for (i = 0; i < len; i++) {
 		if (name[i] < ' ' || name[i] == ':'
 		    || (name[i] > 0x7e && name[i] < 0xa0))
@@ -504,7 +539,7 @@ affs_check_name(const unsigned char *name, int len)
 int
 affs_copy_name(unsigned char *bstr, struct dentry *dentry)
 {
-	int len = min(dentry->d_name.len, 30u);
+	u32 len = min(dentry->d_name.len, AFFSNAMEMAX);
 
 	*bstr++ = len;
 	memcpy(bstr, dentry->d_name.name, len);

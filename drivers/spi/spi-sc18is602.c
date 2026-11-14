@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * NXP SC18IS602/603 SPI driver
  *
  * Copyright (C) Guenter Roeck <linux@roeck-us.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/kernel.h>
@@ -25,8 +12,10 @@
 #include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/pm_runtime.h>
-#include <linux/of.h>
 #include <linux/platform_data/sc18is602.h>
+#include <linux/property.h>
+
+#include <linux/gpio/consumer.h>
 
 enum chips { sc18is602, sc18is602b, sc18is603 };
 
@@ -42,7 +31,7 @@ enum chips { sc18is602, sc18is602b, sc18is603 };
 #define SC18IS602_MODE_CLOCK_DIV_128	0x3
 
 struct sc18is602 {
-	struct spi_master	*master;
+	struct spi_controller	*host;
 	struct device		*dev;
 	u8			ctrl;
 	u32			freq;
@@ -54,6 +43,8 @@ struct sc18is602 {
 	u8			buffer[SC18IS602_BUFSIZ + 1];
 	int			tlen;	/* Data queued for tx in buffer */
 	int			rindex;	/* Receive data index in buffer */
+
+	struct gpio_desc	*reset;
 };
 
 static int sc18is602_wait_ready(struct sc18is602 *hw, int len)
@@ -79,7 +70,7 @@ static int sc18is602_txrx(struct sc18is602 *hw, struct spi_message *msg,
 
 	if (hw->tlen == 0) {
 		/* First byte (I2C command) is chip select */
-		hw->buffer[0] = 1 << msg->spi->chip_select;
+		hw->buffer[0] = 1 << spi_get_chipselect(msg->spi, 0);
 		hw->tlen = 1;
 		hw->rindex = 0;
 	}
@@ -183,51 +174,29 @@ static int sc18is602_setup_transfer(struct sc18is602 *hw, u32 hz, u8 mode)
 static int sc18is602_check_transfer(struct spi_device *spi,
 				    struct spi_transfer *t, int tlen)
 {
-	int bpw;
-	uint32_t hz;
-
-	if (t && t->len + tlen > SC18IS602_BUFSIZ)
-		return -EINVAL;
-
-	bpw = spi->bits_per_word;
-	if (t && t->bits_per_word)
-		bpw = t->bits_per_word;
-	if (bpw != 8)
-		return -EINVAL;
-
-	hz = spi->max_speed_hz;
-	if (t && t->speed_hz)
-		hz = t->speed_hz;
-	if (hz == 0)
+	if (t && t->len + tlen > SC18IS602_BUFSIZ + 1)
 		return -EINVAL;
 
 	return 0;
 }
 
-static int sc18is602_transfer_one(struct spi_master *master,
+static int sc18is602_transfer_one(struct spi_controller *host,
 				  struct spi_message *m)
 {
-	struct sc18is602 *hw = spi_master_get_devdata(master);
+	struct sc18is602 *hw = spi_controller_get_devdata(host);
 	struct spi_device *spi = m->spi;
 	struct spi_transfer *t;
 	int status = 0;
 
-	/* SC18IS602 does not support CS2 */
-	if (hw->id == sc18is602 && spi->chip_select == 2) {
-		status = -ENXIO;
-		goto error;
-	}
-
 	hw->tlen = 0;
 	list_for_each_entry(t, &m->transfers, transfer_list) {
-		u32 hz = t->speed_hz ? : spi->max_speed_hz;
 		bool do_transfer;
 
 		status = sc18is602_check_transfer(spi, t, hw->tlen);
 		if (status < 0)
 			break;
 
-		status = sc18is602_setup_transfer(hw, hz, spi->mode);
+		status = sc18is602_setup_transfer(hw, t->speed_hz, spi->mode);
 		if (status < 0)
 			break;
 
@@ -242,123 +211,124 @@ static int sc18is602_transfer_one(struct spi_master *master,
 		}
 		status = 0;
 
-		if (t->delay_usecs)
-			udelay(t->delay_usecs);
+		spi_transfer_delay_exec(t);
 	}
-error:
 	m->status = status;
-	spi_finalize_current_message(master);
+	spi_finalize_current_message(host);
 
 	return status;
 }
 
-static int sc18is602_setup(struct spi_device *spi)
+static size_t sc18is602_max_transfer_size(struct spi_device *spi)
 {
-	if (!spi->bits_per_word)
-		spi->bits_per_word = 8;
-
-	if (spi->mode & ~(SPI_CPHA | SPI_CPOL | SPI_LSB_FIRST))
-		return -EINVAL;
-
-	return sc18is602_check_transfer(spi, NULL, 0);
+	return SC18IS602_BUFSIZ;
 }
 
-static int sc18is602_probe(struct i2c_client *client,
-			   const struct i2c_device_id *id)
+static int sc18is602_setup(struct spi_device *spi)
+{
+	struct sc18is602 *hw = spi_controller_get_devdata(spi->controller);
+
+	/* SC18IS602 does not support CS2 */
+	if (hw->id == sc18is602 && (spi_get_chipselect(spi, 0) == 2))
+		return -ENXIO;
+
+	return 0;
+}
+
+static int sc18is602_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
-	struct device_node *np = dev->of_node;
 	struct sc18is602_platform_data *pdata = dev_get_platdata(dev);
 	struct sc18is602 *hw;
-	struct spi_master *master;
-	int error;
+	struct spi_controller *host;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C |
 				     I2C_FUNC_SMBUS_WRITE_BYTE_DATA))
 		return -EINVAL;
 
-	master = spi_alloc_master(dev, sizeof(struct sc18is602));
-	if (!master)
+	host = devm_spi_alloc_host(dev, sizeof(struct sc18is602));
+	if (!host)
 		return -ENOMEM;
 
-	hw = spi_master_get_devdata(master);
-	i2c_set_clientdata(client, hw);
+	hw = spi_controller_get_devdata(host);
 
-	hw->master = master;
+	/* assert reset and then release */
+	hw->reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(hw->reset))
+		return PTR_ERR(hw->reset);
+	gpiod_set_value_cansleep(hw->reset, 0);
+
+	hw->host = host;
 	hw->client = client;
 	hw->dev = dev;
 	hw->ctrl = 0xff;
 
-	hw->id = id->driver_data;
-
+	hw->id = (uintptr_t)i2c_get_match_data(client);
 	switch (hw->id) {
 	case sc18is602:
 	case sc18is602b:
-		master->num_chipselect = 4;
+		host->num_chipselect = 4;
 		hw->freq = SC18IS602_CLOCK;
 		break;
 	case sc18is603:
-		master->num_chipselect = 2;
-		if (pdata) {
+		host->num_chipselect = 2;
+		if (pdata)
 			hw->freq = pdata->clock_frequency;
-		} else {
-			const __be32 *val;
-			int len;
-
-			val = of_get_property(np, "clock-frequency", &len);
-			if (val && len >= sizeof(__be32))
-				hw->freq = be32_to_cpup(val);
-		}
+		else
+			device_property_read_u32(dev, "clock-frequency", &hw->freq);
 		if (!hw->freq)
 			hw->freq = SC18IS602_CLOCK;
 		break;
 	}
-	master->bus_num = client->adapter->nr;
-	master->mode_bits = SPI_CPHA | SPI_CPOL | SPI_LSB_FIRST;
-	master->setup = sc18is602_setup;
-	master->transfer_one_message = sc18is602_transfer_one;
-	master->dev.of_node = np;
+	host->bus_num = dev_fwnode(dev) ? -1 : client->adapter->nr;
+	host->mode_bits = SPI_CPHA | SPI_CPOL | SPI_LSB_FIRST;
+	host->bits_per_word_mask = SPI_BPW_MASK(8);
+	host->setup = sc18is602_setup;
+	host->transfer_one_message = sc18is602_transfer_one;
+	host->max_transfer_size = sc18is602_max_transfer_size;
+	host->max_message_size = sc18is602_max_transfer_size;
+	host->min_speed_hz = hw->freq / 128;
+	host->max_speed_hz = hw->freq / 4;
 
-	error = spi_register_master(master);
-	if (error)
-		goto error_reg;
-
-	return 0;
-
-error_reg:
-	spi_master_put(master);
-	return error;
-}
-
-static int sc18is602_remove(struct i2c_client *client)
-{
-	struct sc18is602 *hw = i2c_get_clientdata(client);
-	struct spi_master *master = hw->master;
-
-	spi_unregister_master(master);
-
-	return 0;
+	return devm_spi_register_controller(dev, host);
 }
 
 static const struct i2c_device_id sc18is602_id[] = {
-	{ "sc18is602", sc18is602 },
-	{ "sc18is602b", sc18is602b },
-	{ "sc18is603", sc18is603 },
+	{ .name = "sc18is602", .driver_data = sc18is602 },
+	{ .name = "sc18is602b", .driver_data = sc18is602b },
+	{ .name = "sc18is603", .driver_data = sc18is603 },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sc18is602_id);
 
+static const struct of_device_id sc18is602_of_match[] = {
+	{
+		.compatible = "nxp,sc18is602",
+		.data = (void *)sc18is602
+	},
+	{
+		.compatible = "nxp,sc18is602b",
+		.data = (void *)sc18is602b
+	},
+	{
+		.compatible = "nxp,sc18is603",
+		.data = (void *)sc18is603
+	},
+	{ },
+};
+MODULE_DEVICE_TABLE(of, sc18is602_of_match);
+
 static struct i2c_driver sc18is602_driver = {
 	.driver = {
 		.name = "sc18is602",
+		.of_match_table = sc18is602_of_match,
 	},
 	.probe = sc18is602_probe,
-	.remove = sc18is602_remove,
 	.id_table = sc18is602_id,
 };
 
 module_i2c_driver(sc18is602_driver);
 
-MODULE_DESCRIPTION("SC18IC602/603 SPI Master Driver");
+MODULE_DESCRIPTION("SC18IS602/603 SPI Host Driver");
 MODULE_AUTHOR("Guenter Roeck");
 MODULE_LICENSE("GPL");

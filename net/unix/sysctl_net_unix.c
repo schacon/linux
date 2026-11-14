@@ -1,61 +1,75 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * NET4:	Sysctl interface to net af_unix subsystem.
  *
  * Authors:	Mike Shaver.
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  */
 
-#include <linux/mm.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/sysctl.h>
-
 #include <net/af_unix.h>
+#include <net/net_namespace.h>
 
-static ctl_table unix_table[] = {
+#include "af_unix.h"
+
+static const struct ctl_table unix_table[] = {
 	{
 		.procname	= "max_dgram_qlen",
 		.data		= &init_net.unx.sysctl_max_dgram_qlen,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_INT_MAX,
 	},
-	{ }
 };
 
-int __net_init unix_sysctl_register(struct net *net)
+static const struct ctl_table *unix_table_dup(struct net *net)
 {
 	struct ctl_table *table;
 
 	table = kmemdup(unix_table, sizeof(unix_table), GFP_KERNEL);
-	if (table == NULL)
-		goto err_alloc;
-
-	/* Don't export sysctls to unprivileged users */
-	if (net->user_ns != &init_user_ns)
-		table[0].procname = NULL;
+	if (!table)
+		return NULL;
 
 	table[0].data = &net->unx.sysctl_max_dgram_qlen;
-	net->unx.ctl = register_net_sysctl(net, "net/unix", table);
+
+	return table;
+}
+
+int __net_init unix_sysctl_register(struct net *net)
+{
+	const struct ctl_table *table;
+
+	if (net_eq(net, &init_net)) {
+		table = unix_table;
+	} else {
+		table = unix_table_dup(net);
+		if (!table)
+			goto err_alloc;
+	}
+
+	net->unx.ctl = register_net_sysctl_sz(net, "net/unix", table,
+					      ARRAY_SIZE(unix_table));
 	if (net->unx.ctl == NULL)
 		goto err_reg;
 
 	return 0;
 
 err_reg:
-	kfree(table);
+	if (!net_eq(net, &init_net))
+		kfree(table);
 err_alloc:
 	return -ENOMEM;
 }
 
 void unix_sysctl_unregister(struct net *net)
 {
-	struct ctl_table *table;
+	const struct ctl_table *table;
 
 	table = net->unx.ctl->ctl_table_arg;
 	unregister_net_sysctl_table(net->unx.ctl);
-	kfree(table);
+	if (!net_eq(net, &init_net))
+		kfree(table);
 }

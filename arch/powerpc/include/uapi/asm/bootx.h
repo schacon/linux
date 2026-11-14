@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * This file describes the structure passed from the BootX application
  * (for MacOS) when it is used to boot Linux.
@@ -107,7 +108,7 @@ typedef struct boot_infos
     /* ALL BELOW NEW (vers. 4) */
 
     /* This defines the physical memory. Valid with BOOT_ARCH_NUBUS flag
-       (non-PCI) only. On PCI, memory is contiguous and it's size is in the
+       (non-PCI) only. On PCI, memory is contiguous and its size is in the
        device-tree. */
     boot_info_map_entry_t
     	        physMemoryMap[MAX_MEM_MAP_SIZE]; /* Where the phys memory is */

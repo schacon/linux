@@ -1,10 +1,17 @@
-#include <asm-generic/vmlinux.lds.h>
+/* SPDX-License-Identifier: GPL-2.0 */
+#include <asm/vmlinux.lds.h>
 #include <asm/page.h>
 
 OUTPUT_FORMAT(ELF_FORMAT)
 OUTPUT_ARCH(ELF_ARCH)
 ENTRY(_start)
 jiffies = jiffies_64;
+
+VERSION {
+  {
+    local: *;
+  };
+}
 
 SECTIONS
 {
@@ -18,18 +25,24 @@ SECTIONS
   __binary_start = START;
 
   . = START + SIZEOF_HEADERS;
+  . = ALIGN(PAGE_SIZE);
 
   _text = .;
-  _stext = .;
   __init_begin = .;
   INIT_TEXT_SECTION(0)
+
+  init.data : { INIT_DATA }
   . = ALIGN(PAGE_SIZE);
+  __init_end = .;
 
   .text      :
   {
+    _stext = .;
     TEXT_TEXT
     SCHED_TEXT
     LOCK_TEXT
+    IRQENTRY_TEXT
+    SOFTIRQENTRY_TEXT
     *(.fixup)
     /* .gnu.warning sections are handled specially by elf32.em.  */
     *(.gnu.warning)
@@ -62,13 +75,11 @@ SECTIONS
 
   #include <asm/common.lds.S>
 
-  init.data : { INIT_DATA }
   .data    :
   {
     INIT_TASK_DATA(KERNEL_STACK_SIZE)
-    . = ALIGN(KERNEL_STACK_SIZE);
-    *(.data..init_irqstack)
     DATA_DATA
+    *(.ldata .ldata.[0-9a-zA-Z_]* .ldata..L*)
     *(.gnu.linkonce.d*)
     CONSTRUCTORS
   }
@@ -83,6 +94,7 @@ SECTIONS
   }
 
   .got           : { *(.got.plt) *(.got) }
+  .eh_frame       : { KEEP (*(.eh_frame)) }
   .dynamic       : { *(.dynamic) }
   .tdata	  : { *(.tdata .tdata.* .gnu.linkonce.td.*) }
   .tbss		  : { *(.tbss .tbss.* .gnu.linkonce.tb.*) *(.tcommon) }
@@ -97,12 +109,15 @@ SECTIONS
   PROVIDE(_bss_start = .);
   SBSS(0)
   BSS(0)
+  .lbss : { *(.lbss .lbss.[0-9a-zA-Z_]* .lbss..L*) }
+   __bss_stop = .;
   _end = .;
   PROVIDE (end = .);
 
   STABS_DEBUG
-
   DWARF_DEBUG
+  MODINFO
+  ELF_DETAILS
 
   DISCARDS
 }

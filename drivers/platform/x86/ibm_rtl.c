@@ -1,25 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IBM Real-Time Linux driver
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2010
  *
  * Author: Keith Mannthey <kmannth@us.ibm.com>
  *         Vernon Mauery <vernux@us.ibm.com>
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -33,7 +19,7 @@
 #include <linux/mutex.h>
 #include <asm/bios_ebda.h>
 
-#include <asm-generic/io-64-nonatomic-lo-hi.h>
+#include <linux/io-64-nonatomic-lo-hi.h>
 
 static bool force;
 module_param(force, bool, 0);
@@ -43,6 +29,7 @@ static bool debug;
 module_param(debug, bool, 0644);
 MODULE_PARM_DESC(debug, "Show debug output");
 
+MODULE_DESCRIPTION("IBM Premium Real Time Mode (PRTM) driver");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Keith Mannthey <kmmanth@us.ibm.com>");
 MODULE_AUTHOR("Vernon Mauery <vernux@us.ibm.com>");
@@ -103,7 +90,7 @@ static void rtl_port_unmap(void __iomem *addr)
 static int ibm_rtl_write(u8 value)
 {
 	int ret = 0, count = 0;
-	static u32 cmd_port_val;
+	u32 cmd_port_val;
 
 	RTL_DEBUG("%s(%d)\n", __func__, value);
 
@@ -193,7 +180,7 @@ static ssize_t rtl_set_state(struct device *dev,
 	return ret;
 }
 
-static struct bus_type rtl_subsys = {
+static const struct bus_type rtl_subsys = {
 	.name = "ibm_rtl",
 	.dev_name = "ibm_rtl",
 };
@@ -213,21 +200,31 @@ static int rtl_setup_sysfs(void) {
 
 	ret = subsys_system_register(&rtl_subsys, NULL);
 	if (!ret) {
-		for (i = 0; rtl_attributes[i]; i ++)
-			device_create_file(rtl_subsys.dev_root, rtl_attributes[i]);
+		struct device *dev_root = bus_get_dev_root(&rtl_subsys);
+
+		if (dev_root) {
+			for (i = 0; rtl_attributes[i]; i ++)
+				device_create_file(dev_root, rtl_attributes[i]);
+			put_device(dev_root);
+		}
 	}
 	return ret;
 }
 
 static void rtl_teardown_sysfs(void) {
+	struct device *dev_root = bus_get_dev_root(&rtl_subsys);
 	int i;
-	for (i = 0; rtl_attributes[i]; i ++)
-		device_remove_file(rtl_subsys.dev_root, rtl_attributes[i]);
+
+	if (dev_root) {
+		for (i = 0; rtl_attributes[i]; i ++)
+			device_remove_file(dev_root, rtl_attributes[i]);
+		put_device(dev_root);
+	}
 	bus_unregister(&rtl_subsys);
 }
 
 
-static struct dmi_system_id __initdata ibm_rtl_dmi_table[] = {
+static const struct dmi_system_id ibm_rtl_dmi_table[] __initconst = {
 	{                                                  \
 		.matches = {                               \
 			DMI_MATCH(DMI_SYS_VENDOR, "IBM"),  \
@@ -237,9 +234,9 @@ static struct dmi_system_id __initdata ibm_rtl_dmi_table[] = {
 };
 
 static int __init ibm_rtl_init(void) {
-	unsigned long ebda_addr, ebda_size;
+	unsigned long ebda_addr, ebda_size, offset;
 	unsigned int ebda_kb;
-	int ret = -ENODEV, i;
+	int ret = -ENODEV;
 
 	if (force)
 		pr_warn("module loaded by force\n");
@@ -274,9 +271,9 @@ static int __init ibm_rtl_init(void) {
 		return -ENOMEM;
 
 	/* search for the _RTL_ signature at the start of the table */
-	for (i = 0 ; i < ebda_size/sizeof(unsigned int); i++) {
+	for (offset = 0; offset + sizeof(*rtl_table) <= ebda_size; offset += 4) {
 		struct ibm_rtl_table __iomem * tmp;
-		tmp = (struct ibm_rtl_table __iomem *) (ebda_map+i);
+		tmp = (struct ibm_rtl_table __iomem *) (ebda_map + offset);
 		if ((readq(&tmp->signature) & RTL_MASK) == RTL_SIGNATURE) {
 			phys_addr_t addr;
 			unsigned int plen;

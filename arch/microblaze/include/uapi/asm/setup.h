@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Copyright (C) 2007-2009 Michal Simek <monstr@monstr.eu>
  * Copyright (C) 2007-2009 PetaLogix
@@ -13,7 +14,4 @@
 
 #define COMMAND_LINE_SIZE	256
 
-# ifndef __ASSEMBLY__
-
-# endif /* __ASSEMBLY__ */
 #endif /* _UAPI_ASM_MICROBLAZE_SETUP_H */

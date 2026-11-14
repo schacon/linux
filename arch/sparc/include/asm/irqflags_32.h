@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * include/asm/irqflags.h
  *
@@ -10,14 +11,14 @@
 #ifndef _ASM_IRQFLAGS_H
 #define _ASM_IRQFLAGS_H
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #include <linux/types.h>
 #include <asm/psr.h>
 
-extern void arch_local_irq_restore(unsigned long);
-extern unsigned long arch_local_irq_save(void);
-extern void arch_local_irq_enable(void);
+void arch_local_irq_restore(unsigned long);
+unsigned long arch_local_irq_save(void);
+void arch_local_irq_enable(void);
 
 static inline notrace unsigned long arch_local_save_flags(void)
 {
@@ -42,6 +43,6 @@ static inline notrace bool arch_irqs_disabled(void)
 	return arch_irqs_disabled_flags(arch_local_save_flags());
 }
 
-#endif /* (__ASSEMBLY__) */
+#endif /* (__ASSEMBLER__) */
 
 #endif /* !(_ASM_IRQFLAGS_H) */

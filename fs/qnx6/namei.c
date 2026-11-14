@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * QNX6 file system, Linux implementation.
  *
@@ -16,7 +17,6 @@ struct dentry *qnx6_lookup(struct inode *dir, struct dentry *dentry,
 				unsigned int flags)
 {
 	unsigned ino;
-	struct page *page;
 	struct inode *foundinode = NULL;
 	const char *name = dentry->d_name.name;
 	int len = dentry->d_name.len;
@@ -24,19 +24,14 @@ struct dentry *qnx6_lookup(struct inode *dir, struct dentry *dentry,
 	if (len > QNX6_LONG_NAME_MAX)
 		return ERR_PTR(-ENAMETOOLONG);
 
-	ino = qnx6_find_entry(len, dir, name, &page);
+	ino = qnx6_find_ino(len, dir, name);
 	if (ino) {
 		foundinode = qnx6_iget(dir->i_sb, ino);
-		qnx6_put_page(page);
-		if (IS_ERR(foundinode)) {
-			QNX6DEBUG((KERN_ERR "qnx6: lookup->iget -> "
-				" error %ld\n", PTR_ERR(foundinode)));
-			return ERR_CAST(foundinode);
-		}
+		if (IS_ERR(foundinode))
+			pr_debug("lookup->iget ->  error %ld\n",
+				 PTR_ERR(foundinode));
 	} else {
-		QNX6DEBUG((KERN_INFO "qnx6_lookup: not found %s\n", name));
-		return NULL;
+		pr_debug("%s(): not found %s\n", __func__, name);
 	}
-	d_add(dentry, foundinode);
-	return NULL;
+	return d_splice_alias(foundinode, dentry);
 }

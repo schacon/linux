@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+*
+!/**/
+!*.c
+*.mod.c
+!*.h
+local_config.h
+!*.sh
+!.gitignore
+!Makefile
+!config
+!settings

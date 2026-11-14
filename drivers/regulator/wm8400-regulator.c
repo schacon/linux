@@ -1,16 +1,10 @@
-/*
- * Regulator support for WM8400
- *
- * Copyright 2008 Wolfson Microelectronics PLC.
- *
- * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- */
+// SPDX-License-Identifier: GPL-2.0+
+//
+// Regulator support for WM8400
+//
+// Copyright 2008 Wolfson Microelectronics PLC.
+//
+// Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
 
 #include <linux/bug.h>
 #include <linux/err.h>
@@ -19,58 +13,29 @@
 #include <linux/regulator/driver.h>
 #include <linux/mfd/wm8400-private.h>
 
-static int wm8400_ldo_list_voltage(struct regulator_dev *dev,
-				   unsigned selector)
-{
-	if (selector > WM8400_LDO1_VSEL_MASK)
-		return -EINVAL;
+static const struct linear_range wm8400_ldo_ranges[] = {
+	REGULATOR_LINEAR_RANGE(900000, 0, 14, 50000),
+	REGULATOR_LINEAR_RANGE(1700000, 15, 31, 100000),
+};
 
-	if (selector < 15)
-		return 900000 + (selector * 50000);
-	else
-		return 1700000 + ((selector - 15) * 100000);
-}
-
-static int wm8400_ldo_map_voltage(struct regulator_dev *dev,
-				  int min_uV, int max_uV)
-{
-	u16 val;
-	int volt;
-
-	if (min_uV < 900000 || min_uV > 3300000)
-		return -EINVAL;
-
-	if (min_uV < 1700000) /* Steps of 50mV from 900mV;  */
-		val = DIV_ROUND_UP(min_uV - 900000, 50000);
-	else /* Steps of 100mV from 1700mV */
-		val = DIV_ROUND_UP(min_uV - 1700000, 100000) + 15;
-
-	volt = wm8400_ldo_list_voltage(dev, val);
-	if (volt < min_uV || volt > max_uV)
-		return -EINVAL;
-
-	return val;
-}
-
-static struct regulator_ops wm8400_ldo_ops = {
+static const struct regulator_ops wm8400_ldo_ops = {
 	.is_enabled = regulator_is_enabled_regmap,
 	.enable = regulator_enable_regmap,
 	.disable = regulator_disable_regmap,
-	.list_voltage = wm8400_ldo_list_voltage,
+	.list_voltage = regulator_list_voltage_linear_range,
 	.get_voltage_sel = regulator_get_voltage_sel_regmap,
 	.set_voltage_sel = regulator_set_voltage_sel_regmap,
-	.map_voltage = wm8400_ldo_map_voltage,
+	.map_voltage = regulator_map_voltage_linear_range,
 };
 
 static unsigned int wm8400_dcdc_get_mode(struct regulator_dev *dev)
 {
-	struct wm8400 *wm8400 = rdev_get_drvdata(dev);
+	struct regmap *rmap = rdev_get_regmap(dev);
 	int offset = (rdev_get_id(dev) - WM8400_DCDC1) * 2;
 	u16 data[2];
 	int ret;
 
-	ret = wm8400_block_read(wm8400, WM8400_DCDC1_CONTROL_1 + offset, 2,
-				data);
+	ret = regmap_bulk_read(rmap, WM8400_DCDC1_CONTROL_1 + offset, data, 2);
 	if (ret != 0)
 		return 0;
 
@@ -91,36 +56,36 @@ static unsigned int wm8400_dcdc_get_mode(struct regulator_dev *dev)
 
 static int wm8400_dcdc_set_mode(struct regulator_dev *dev, unsigned int mode)
 {
-	struct wm8400 *wm8400 = rdev_get_drvdata(dev);
+	struct regmap *rmap = rdev_get_regmap(dev);
 	int offset = (rdev_get_id(dev) - WM8400_DCDC1) * 2;
 	int ret;
 
 	switch (mode) {
 	case REGULATOR_MODE_FAST:
 		/* Datasheet: active with force PWM */
-		ret = wm8400_set_bits(wm8400, WM8400_DCDC1_CONTROL_2 + offset,
+		ret = regmap_update_bits(rmap, WM8400_DCDC1_CONTROL_2 + offset,
 				      WM8400_DC1_FRC_PWM, WM8400_DC1_FRC_PWM);
 		if (ret != 0)
 			return ret;
 
-		return wm8400_set_bits(wm8400, WM8400_DCDC1_CONTROL_1 + offset,
+		return regmap_update_bits(rmap, WM8400_DCDC1_CONTROL_1 + offset,
 				       WM8400_DC1_ACTIVE | WM8400_DC1_SLEEP,
 				       WM8400_DC1_ACTIVE);
 
 	case REGULATOR_MODE_NORMAL:
 		/* Datasheet: active */
-		ret = wm8400_set_bits(wm8400, WM8400_DCDC1_CONTROL_2 + offset,
+		ret = regmap_update_bits(rmap, WM8400_DCDC1_CONTROL_2 + offset,
 				      WM8400_DC1_FRC_PWM, 0);
 		if (ret != 0)
 			return ret;
 
-		return wm8400_set_bits(wm8400, WM8400_DCDC1_CONTROL_1 + offset,
+		return regmap_update_bits(rmap, WM8400_DCDC1_CONTROL_1 + offset,
 				       WM8400_DC1_ACTIVE | WM8400_DC1_SLEEP,
 				       WM8400_DC1_ACTIVE);
 
 	case REGULATOR_MODE_IDLE:
 		/* Datasheet: standby */
-		return wm8400_set_bits(wm8400, WM8400_DCDC1_CONTROL_1 + offset,
+		return regmap_update_bits(rmap, WM8400_DCDC1_CONTROL_1 + offset,
 				       WM8400_DC1_ACTIVE | WM8400_DC1_SLEEP, 0);
 	default:
 		return -EINVAL;
@@ -134,7 +99,7 @@ static unsigned int wm8400_dcdc_get_optimum_mode(struct regulator_dev *dev,
 	return REGULATOR_MODE_NORMAL;
 }
 
-static struct regulator_ops wm8400_dcdc_ops = {
+static const struct regulator_ops wm8400_dcdc_ops = {
 	.is_enabled = regulator_is_enabled_regmap,
 	.enable = regulator_enable_regmap,
 	.disable = regulator_disable_regmap,
@@ -147,7 +112,7 @@ static struct regulator_ops wm8400_dcdc_ops = {
 	.get_optimum_mode = wm8400_dcdc_get_optimum_mode,
 };
 
-static struct regulator_desc regulators[] = {
+static const struct regulator_desc regulators[] = {
 	{
 		.name = "LDO1",
 		.id = WM8400_LDO1,
@@ -155,6 +120,8 @@ static struct regulator_desc regulators[] = {
 		.enable_reg = WM8400_LDO1_CONTROL,
 		.enable_mask = WM8400_LDO1_ENA,
 		.n_voltages = WM8400_LDO1_VSEL_MASK + 1,
+		.linear_ranges = wm8400_ldo_ranges,
+		.n_linear_ranges = ARRAY_SIZE(wm8400_ldo_ranges),
 		.vsel_reg = WM8400_LDO1_CONTROL,
 		.vsel_mask = WM8400_LDO1_VSEL_MASK,
 		.type = REGULATOR_VOLTAGE,
@@ -167,6 +134,8 @@ static struct regulator_desc regulators[] = {
 		.enable_reg = WM8400_LDO2_CONTROL,
 		.enable_mask = WM8400_LDO2_ENA,
 		.n_voltages = WM8400_LDO2_VSEL_MASK + 1,
+		.linear_ranges = wm8400_ldo_ranges,
+		.n_linear_ranges = ARRAY_SIZE(wm8400_ldo_ranges),
 		.type = REGULATOR_VOLTAGE,
 		.vsel_reg = WM8400_LDO2_CONTROL,
 		.vsel_mask = WM8400_LDO2_VSEL_MASK,
@@ -179,6 +148,8 @@ static struct regulator_desc regulators[] = {
 		.enable_reg = WM8400_LDO3_CONTROL,
 		.enable_mask = WM8400_LDO3_ENA,
 		.n_voltages = WM8400_LDO3_VSEL_MASK + 1,
+		.linear_ranges = wm8400_ldo_ranges,
+		.n_linear_ranges = ARRAY_SIZE(wm8400_ldo_ranges),
 		.vsel_reg = WM8400_LDO3_CONTROL,
 		.vsel_mask = WM8400_LDO3_VSEL_MASK,
 		.type = REGULATOR_VOLTAGE,
@@ -191,6 +162,8 @@ static struct regulator_desc regulators[] = {
 		.enable_reg = WM8400_LDO4_CONTROL,
 		.enable_mask = WM8400_LDO4_ENA,
 		.n_voltages = WM8400_LDO4_VSEL_MASK + 1,
+		.linear_ranges = wm8400_ldo_ranges,
+		.n_linear_ranges = ARRAY_SIZE(wm8400_ldo_ranges),
 		.vsel_reg = WM8400_LDO4_CONTROL,
 		.vsel_mask = WM8400_LDO4_VSEL_MASK,
 		.type = REGULATOR_VOLTAGE,
@@ -215,7 +188,7 @@ static struct regulator_desc regulators[] = {
 		.id = WM8400_DCDC2,
 		.ops = &wm8400_dcdc_ops,
 		.enable_reg = WM8400_DCDC2_CONTROL_1,
-		.enable_mask = WM8400_DC1_ENA_MASK,
+		.enable_mask = WM8400_DC2_ENA_MASK,
 		.n_voltages = WM8400_DC2_VSEL_MASK + 1,
 		.vsel_reg = WM8400_DCDC2_CONTROL_1,
 		.vsel_mask = WM8400_DC2_VSEL_MASK,
@@ -233,11 +206,12 @@ static int wm8400_regulator_probe(struct platform_device *pdev)
 	struct regulator_dev *rdev;
 
 	config.dev = &pdev->dev;
-	config.init_data = pdev->dev.platform_data;
+	config.init_data = dev_get_platdata(&pdev->dev);
 	config.driver_data = wm8400;
 	config.regmap = wm8400->regmap;
 
-	rdev = regulator_register(&regulators[pdev->id], &config);
+	rdev = devm_regulator_register(&pdev->dev, &regulators[pdev->id],
+				       &config);
 	if (IS_ERR(rdev))
 		return PTR_ERR(rdev);
 
@@ -246,22 +220,12 @@ static int wm8400_regulator_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int wm8400_regulator_remove(struct platform_device *pdev)
-{
-	struct regulator_dev *rdev = platform_get_drvdata(pdev);
-
-	platform_set_drvdata(pdev, NULL);
-	regulator_unregister(rdev);
-
-	return 0;
-}
-
 static struct platform_driver wm8400_regulator_driver = {
 	.driver = {
 		.name = "wm8400-regulator",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = wm8400_regulator_probe,
-	.remove = wm8400_regulator_remove,
 };
 
 /**
@@ -271,9 +235,9 @@ static struct platform_driver wm8400_regulator_driver = {
  * the regulator API.  It is intended to be called from the
  * platform_init() callback of the WM8400 MFD driver.
  *
- * @param dev      The WM8400 device to operate on.
- * @param reg      The regulator to control.
- * @param initdata Regulator initdata for the regulator.
+ * @dev:      The WM8400 device to operate on.
+ * @reg:      The regulator to control.
+ * @initdata: Regulator initdata for the regulator.
  */
 int wm8400_register_regulator(struct device *dev, int reg,
 			      struct regulator_init_data *initdata)

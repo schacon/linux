@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 #ifndef _UAPI__ALPHA_PAL_H
 #define _UAPI__ALPHA_PAL_H
 
@@ -46,6 +47,7 @@
 #define PAL_rdusp	58
 #define PAL_whami	60
 #define PAL_retsys	61
+#define PAL_wtint	62
 #define PAL_rti		63
 
 

@@ -1,24 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2011 LAPIS Semiconductor Co., Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307, USA.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/fs.h>
+#include <linux/hex.h>
 #include <linux/uaccess.h>
 #include <linux/string.h>
 #include <linux/pci.h>
@@ -28,6 +17,7 @@
 #include <linux/if_ether.h>
 #include <linux/ctype.h>
 #include <linux/dmi.h>
+#include <linux/of.h>
 
 #define PHUB_STATUS 0x00		/* Status Register offset */
 #define PHUB_CONTROL 0x04		/* Control Register offset */
@@ -57,12 +47,12 @@
 
 /* CM-iTC */
 #define CLKCFG_UART_48MHZ			(1 << 16)
+#define CLKCFG_UART_25MHZ			(2 << 16)
 #define CLKCFG_BAUDDIV				(2 << 20)
 #define CLKCFG_PLL2VCO				(8 << 9)
 #define CLKCFG_UARTCLKSEL			(1 << 18)
 
 /* Macros for ML7213 */
-#define PCI_VENDOR_ID_ROHM			0x10db
 #define PCI_DEVICE_ID_ROHM_ML7213_PHUB		0x801A
 
 /* Macros for ML7223 */
@@ -93,22 +83,16 @@
 
 #define PCH_PHUB_OROM_SIZE 15360
 
+enum pch_phub_type {
+	PCH_EG20T,
+	PCH_ML7213,
+	PCH_ML7223M,
+	PCH_ML7223N,
+	PCH_ML7831,
+};
+
 /**
  * struct pch_phub_reg - PHUB register structure
- * @phub_id_reg:			PHUB_ID register val
- * @q_pri_val_reg:			QUEUE_PRI_VAL register val
- * @rc_q_maxsize_reg:			RC_QUEUE_MAXSIZE register val
- * @bri_q_maxsize_reg:			BRI_QUEUE_MAXSIZE register val
- * @comp_resp_timeout_reg:		COMP_RESP_TIMEOUT register val
- * @bus_slave_control_reg:		BUS_SLAVE_CONTROL_REG register val
- * @deadlock_avoid_type_reg:		DEADLOCK_AVOID_TYPE register val
- * @intpin_reg_wpermit_reg0:		INTPIN_REG_WPERMIT register 0 val
- * @intpin_reg_wpermit_reg1:		INTPIN_REG_WPERMIT register 1 val
- * @intpin_reg_wpermit_reg2:		INTPIN_REG_WPERMIT register 2 val
- * @intpin_reg_wpermit_reg3:		INTPIN_REG_WPERMIT register 3 val
- * @int_reduce_control_reg:		INT_REDUCE_CONTROL registers val
- * @clkcfg_reg:				CLK CFG register val
- * @funcsel_reg:			Function select register value
  * @pch_phub_base_address:		Register base address
  * @pch_phub_extrom_base_address:	external rom base address
  * @pch_mac_start_address:		MAC address area start address
@@ -117,25 +101,11 @@
  * @pdev:				pointer to pci device struct
  */
 struct pch_phub_reg {
-	u32 phub_id_reg;
-	u32 q_pri_val_reg;
-	u32 rc_q_maxsize_reg;
-	u32 bri_q_maxsize_reg;
-	u32 comp_resp_timeout_reg;
-	u32 bus_slave_control_reg;
-	u32 deadlock_avoid_type_reg;
-	u32 intpin_reg_wpermit_reg0;
-	u32 intpin_reg_wpermit_reg1;
-	u32 intpin_reg_wpermit_reg2;
-	u32 intpin_reg_wpermit_reg3;
-	u32 int_reduce_control_reg[MAX_NUM_INT_REDUCE_CONTROL_REG];
-	u32 clkcfg_reg;
-	u32 funcsel_reg;
 	void __iomem *pch_phub_base_address;
 	void __iomem *pch_phub_extrom_base_address;
 	u32 pch_mac_start_address;
 	u32 pch_opt_rom_start_address;
-	int ioh_type;
+	enum pch_phub_type ioh_type;
 	struct pci_dev *pdev;
 };
 
@@ -146,6 +116,7 @@ static DEFINE_MUTEX(pch_phub_mutex);
 
 /**
  * pch_phub_read_modify_write_reg() - Reading modifying and writing register
+ * @chip:		Pointer to the PHUB register structure
  * @reg_addr_offset:	Register offset address value.
  * @data:		Writing value.
  * @mask:		Mask value.
@@ -158,131 +129,9 @@ static void pch_phub_read_modify_write_reg(struct pch_phub_reg *chip,
 	iowrite32(((ioread32(reg_addr) & ~mask)) | data, reg_addr);
 }
 
-/* pch_phub_save_reg_conf - saves register configuration */
-static void pch_phub_save_reg_conf(struct pci_dev *pdev)
-{
-	unsigned int i;
-	struct pch_phub_reg *chip = pci_get_drvdata(pdev);
-
-	void __iomem *p = chip->pch_phub_base_address;
-
-	chip->phub_id_reg = ioread32(p + PCH_PHUB_ID_REG);
-	chip->q_pri_val_reg = ioread32(p + PCH_PHUB_QUEUE_PRI_VAL_REG);
-	chip->rc_q_maxsize_reg = ioread32(p + PCH_PHUB_RC_QUEUE_MAXSIZE_REG);
-	chip->bri_q_maxsize_reg = ioread32(p + PCH_PHUB_BRI_QUEUE_MAXSIZE_REG);
-	chip->comp_resp_timeout_reg =
-				ioread32(p + PCH_PHUB_COMP_RESP_TIMEOUT_REG);
-	chip->bus_slave_control_reg =
-				ioread32(p + PCH_PHUB_BUS_SLAVE_CONTROL_REG);
-	chip->deadlock_avoid_type_reg =
-				ioread32(p + PCH_PHUB_DEADLOCK_AVOID_TYPE_REG);
-	chip->intpin_reg_wpermit_reg0 =
-				ioread32(p + PCH_PHUB_INTPIN_REG_WPERMIT_REG0);
-	chip->intpin_reg_wpermit_reg1 =
-				ioread32(p + PCH_PHUB_INTPIN_REG_WPERMIT_REG1);
-	chip->intpin_reg_wpermit_reg2 =
-				ioread32(p + PCH_PHUB_INTPIN_REG_WPERMIT_REG2);
-	chip->intpin_reg_wpermit_reg3 =
-				ioread32(p + PCH_PHUB_INTPIN_REG_WPERMIT_REG3);
-	dev_dbg(&pdev->dev, "%s : "
-		"chip->phub_id_reg=%x, "
-		"chip->q_pri_val_reg=%x, "
-		"chip->rc_q_maxsize_reg=%x, "
-		"chip->bri_q_maxsize_reg=%x, "
-		"chip->comp_resp_timeout_reg=%x, "
-		"chip->bus_slave_control_reg=%x, "
-		"chip->deadlock_avoid_type_reg=%x, "
-		"chip->intpin_reg_wpermit_reg0=%x, "
-		"chip->intpin_reg_wpermit_reg1=%x, "
-		"chip->intpin_reg_wpermit_reg2=%x, "
-		"chip->intpin_reg_wpermit_reg3=%x\n", __func__,
-		chip->phub_id_reg,
-		chip->q_pri_val_reg,
-		chip->rc_q_maxsize_reg,
-		chip->bri_q_maxsize_reg,
-		chip->comp_resp_timeout_reg,
-		chip->bus_slave_control_reg,
-		chip->deadlock_avoid_type_reg,
-		chip->intpin_reg_wpermit_reg0,
-		chip->intpin_reg_wpermit_reg1,
-		chip->intpin_reg_wpermit_reg2,
-		chip->intpin_reg_wpermit_reg3);
-	for (i = 0; i < MAX_NUM_INT_REDUCE_CONTROL_REG; i++) {
-		chip->int_reduce_control_reg[i] =
-		    ioread32(p + PCH_PHUB_INT_REDUCE_CONTROL_REG_BASE + 4 * i);
-		dev_dbg(&pdev->dev, "%s : "
-			"chip->int_reduce_control_reg[%d]=%x\n",
-			__func__, i, chip->int_reduce_control_reg[i]);
-	}
-	chip->clkcfg_reg = ioread32(p + CLKCFG_REG_OFFSET);
-	if ((chip->ioh_type == 2) || (chip->ioh_type == 4))
-		chip->funcsel_reg = ioread32(p + FUNCSEL_REG_OFFSET);
-}
-
-/* pch_phub_restore_reg_conf - restore register configuration */
-static void pch_phub_restore_reg_conf(struct pci_dev *pdev)
-{
-	unsigned int i;
-	struct pch_phub_reg *chip = pci_get_drvdata(pdev);
-	void __iomem *p;
-	p = chip->pch_phub_base_address;
-
-	iowrite32(chip->phub_id_reg, p + PCH_PHUB_ID_REG);
-	iowrite32(chip->q_pri_val_reg, p + PCH_PHUB_QUEUE_PRI_VAL_REG);
-	iowrite32(chip->rc_q_maxsize_reg, p + PCH_PHUB_RC_QUEUE_MAXSIZE_REG);
-	iowrite32(chip->bri_q_maxsize_reg, p + PCH_PHUB_BRI_QUEUE_MAXSIZE_REG);
-	iowrite32(chip->comp_resp_timeout_reg,
-					p + PCH_PHUB_COMP_RESP_TIMEOUT_REG);
-	iowrite32(chip->bus_slave_control_reg,
-					p + PCH_PHUB_BUS_SLAVE_CONTROL_REG);
-	iowrite32(chip->deadlock_avoid_type_reg,
-					p + PCH_PHUB_DEADLOCK_AVOID_TYPE_REG);
-	iowrite32(chip->intpin_reg_wpermit_reg0,
-					p + PCH_PHUB_INTPIN_REG_WPERMIT_REG0);
-	iowrite32(chip->intpin_reg_wpermit_reg1,
-					p + PCH_PHUB_INTPIN_REG_WPERMIT_REG1);
-	iowrite32(chip->intpin_reg_wpermit_reg2,
-					p + PCH_PHUB_INTPIN_REG_WPERMIT_REG2);
-	iowrite32(chip->intpin_reg_wpermit_reg3,
-					p + PCH_PHUB_INTPIN_REG_WPERMIT_REG3);
-	dev_dbg(&pdev->dev, "%s : "
-		"chip->phub_id_reg=%x, "
-		"chip->q_pri_val_reg=%x, "
-		"chip->rc_q_maxsize_reg=%x, "
-		"chip->bri_q_maxsize_reg=%x, "
-		"chip->comp_resp_timeout_reg=%x, "
-		"chip->bus_slave_control_reg=%x, "
-		"chip->deadlock_avoid_type_reg=%x, "
-		"chip->intpin_reg_wpermit_reg0=%x, "
-		"chip->intpin_reg_wpermit_reg1=%x, "
-		"chip->intpin_reg_wpermit_reg2=%x, "
-		"chip->intpin_reg_wpermit_reg3=%x\n", __func__,
-		chip->phub_id_reg,
-		chip->q_pri_val_reg,
-		chip->rc_q_maxsize_reg,
-		chip->bri_q_maxsize_reg,
-		chip->comp_resp_timeout_reg,
-		chip->bus_slave_control_reg,
-		chip->deadlock_avoid_type_reg,
-		chip->intpin_reg_wpermit_reg0,
-		chip->intpin_reg_wpermit_reg1,
-		chip->intpin_reg_wpermit_reg2,
-		chip->intpin_reg_wpermit_reg3);
-	for (i = 0; i < MAX_NUM_INT_REDUCE_CONTROL_REG; i++) {
-		iowrite32(chip->int_reduce_control_reg[i],
-			p + PCH_PHUB_INT_REDUCE_CONTROL_REG_BASE + 4 * i);
-		dev_dbg(&pdev->dev, "%s : "
-			"chip->int_reduce_control_reg[%d]=%x\n",
-			__func__, i, chip->int_reduce_control_reg[i]);
-	}
-
-	iowrite32(chip->clkcfg_reg, p + CLKCFG_REG_OFFSET);
-	if ((chip->ioh_type == 2) || (chip->ioh_type == 4))
-		iowrite32(chip->funcsel_reg, p + FUNCSEL_REG_OFFSET);
-}
-
 /**
  * pch_phub_read_serial_rom() - Reading Serial ROM
+ * @chip:		Pointer to the PHUB register structure
  * @offset_address:	Serial ROM offset address to read.
  * @data:		Read buffer for specified Serial ROM value.
  */
@@ -297,6 +146,7 @@ static void pch_phub_read_serial_rom(struct pch_phub_reg *chip,
 
 /**
  * pch_phub_write_serial_rom() - Writing Serial ROM
+ * @chip:		Pointer to the PHUB register structure
  * @offset_address:	Serial ROM offset address.
  * @data:		Serial ROM value to write.
  */
@@ -335,6 +185,7 @@ static int pch_phub_write_serial_rom(struct pch_phub_reg *chip,
 
 /**
  * pch_phub_read_serial_rom_val() - Read Serial ROM value
+ * @chip:		Pointer to the PHUB register structure
  * @offset_address:	Serial ROM address offset value.
  * @data:		Serial ROM value to read.
  */
@@ -351,6 +202,7 @@ static void pch_phub_read_serial_rom_val(struct pch_phub_reg *chip,
 
 /**
  * pch_phub_write_serial_rom_val() - writing Serial ROM value
+ * @chip:		Pointer to the PHUB register structure
  * @offset_address:	Serial ROM address offset value.
  * @data:		Serial ROM value.
  */
@@ -452,7 +304,7 @@ static int pch_phub_gbe_serial_rom_conf_mp(struct pch_phub_reg *chip)
 
 /**
  * pch_phub_read_gbe_mac_addr() - Read Gigabit Ethernet MAC address
- * @offset_address:	Gigabit Ethernet MAC address offset value.
+ * @chip:		Pointer to the PHUB register structure
  * @data:		Buffer of the Gigabit Ethernet MAC address value.
  */
 static void pch_phub_read_gbe_mac_addr(struct pch_phub_reg *chip, u8 *data)
@@ -464,7 +316,7 @@ static void pch_phub_read_gbe_mac_addr(struct pch_phub_reg *chip, u8 *data)
 
 /**
  * pch_phub_write_gbe_mac_addr() - Write MAC address
- * @offset_address:	Gigabit Ethernet MAC address offset value.
+ * @chip:		Pointer to the PHUB register structure
  * @data:		Gigabit Ethernet MAC address value.
  */
 static int pch_phub_write_gbe_mac_addr(struct pch_phub_reg *chip, u8 *data)
@@ -472,10 +324,19 @@ static int pch_phub_write_gbe_mac_addr(struct pch_phub_reg *chip, u8 *data)
 	int retval;
 	int i;
 
-	if ((chip->ioh_type == 1) || (chip->ioh_type == 5)) /* EG20T or ML7831*/
+	switch (chip->ioh_type) {
+	case PCH_EG20T:
+	case PCH_ML7831:
 		retval = pch_phub_gbe_serial_rom_conf(chip);
-	else	/* ML7223 */
+		break;
+
+	case PCH_ML7213:
+	case PCH_ML7223M:
+	case PCH_ML7223N:
 		retval = pch_phub_gbe_serial_rom_conf_mp(chip);
+		break;
+	}
+
 	if (retval)
 		return retval;
 
@@ -489,7 +350,7 @@ static int pch_phub_write_gbe_mac_addr(struct pch_phub_reg *chip, u8 *data)
 }
 
 static ssize_t pch_phub_bin_read(struct file *filp, struct kobject *kobj,
-				 struct bin_attribute *attr, char *buf,
+				 const struct bin_attribute *attr, char *buf,
 				 loff_t off, size_t count)
 {
 	unsigned int rom_signature;
@@ -501,8 +362,7 @@ static ssize_t pch_phub_bin_read(struct file *filp, struct kobject *kobj,
 	int err;
 	ssize_t rom_size;
 
-	struct pch_phub_reg *chip =
-		dev_get_drvdata(container_of(kobj, struct device, kobj));
+	struct pch_phub_reg *chip = dev_get_drvdata(kobj_to_dev(kobj));
 
 	ret = mutex_lock_interruptible(&pch_phub_mutex);
 	if (ret) {
@@ -512,8 +372,10 @@ static ssize_t pch_phub_bin_read(struct file *filp, struct kobject *kobj,
 
 	/* Get Rom signature */
 	chip->pch_phub_extrom_base_address = pci_map_rom(chip->pdev, &rom_size);
-	if (!chip->pch_phub_extrom_base_address)
+	if (!chip->pch_phub_extrom_base_address) {
+		err = -ENODATA;
 		goto exrom_map_err;
+	}
 
 	pch_phub_read_serial_rom(chip, chip->pch_opt_rom_start_address,
 				(unsigned char *)&rom_signature);
@@ -558,15 +420,14 @@ return_err_nomutex:
 }
 
 static ssize_t pch_phub_bin_write(struct file *filp, struct kobject *kobj,
-				  struct bin_attribute *attr,
+				  const struct bin_attribute *attr,
 				  char *buf, loff_t off, size_t count)
 {
 	int err;
 	unsigned int addr_offset;
 	int ret;
 	ssize_t rom_size;
-	struct pch_phub_reg *chip =
-		dev_get_drvdata(container_of(kobj, struct device, kobj));
+	struct pch_phub_reg *chip = dev_get_drvdata(kobj_to_dev(kobj));
 
 	ret = mutex_lock_interruptible(&pch_phub_mutex);
 	if (ret)
@@ -633,30 +494,29 @@ static ssize_t show_pch_mac(struct device *dev, struct device_attribute *attr,
 static ssize_t store_pch_mac(struct device *dev, struct device_attribute *attr,
 			     const char *buf, size_t count)
 {
-	u8 mac[6];
+	u8 mac[ETH_ALEN];
 	ssize_t rom_size;
 	struct pch_phub_reg *chip = dev_get_drvdata(dev);
+	int ret;
 
-	if (count != 18)
+	if (!mac_pton(buf, mac))
 		return -EINVAL;
-
-	sscanf(buf, "%02x:%02x:%02x:%02x:%02x:%02x",
-		(u32 *)&mac[0], (u32 *)&mac[1], (u32 *)&mac[2], (u32 *)&mac[3],
-		(u32 *)&mac[4], (u32 *)&mac[5]);
 
 	chip->pch_phub_extrom_base_address = pci_map_rom(chip->pdev, &rom_size);
 	if (!chip->pch_phub_extrom_base_address)
 		return -ENOMEM;
 
-	pch_phub_write_gbe_mac_addr(chip, mac);
+	ret = pch_phub_write_gbe_mac_addr(chip, mac);
 	pci_unmap_rom(chip->pdev, chip->pch_phub_extrom_base_address);
+	if (ret)
+		return ret;
 
 	return count;
 }
 
 static DEVICE_ATTR(pch_mac, S_IRUGO | S_IWUSR, show_pch_mac, store_pch_mac);
 
-static struct bin_attribute pch_bin_attr = {
+static const struct bin_attribute pch_bin_attr = {
 	.attr = {
 		.name = "pch_firmware",
 		.mode = S_IRUGO | S_IWUSR,
@@ -669,12 +529,10 @@ static struct bin_attribute pch_bin_attr = {
 static int pch_phub_probe(struct pci_dev *pdev,
 				    const struct pci_device_id *id)
 {
-	int retval;
-
 	int ret;
 	struct pch_phub_reg *chip;
 
-	chip = kzalloc(sizeof(struct pch_phub_reg), GFP_KERNEL);
+	chip = kzalloc_obj(struct pch_phub_reg);
 	if (chip == NULL)
 		return -ENOMEM;
 
@@ -710,16 +568,22 @@ static int pch_phub_probe(struct pci_dev *pdev,
 
 	chip->pdev = pdev; /* Save pci device struct */
 
-	if (id->driver_data == 1) { /* EG20T PCH */
+	if (id->driver_data == PCH_EG20T) { /* EG20T PCH */
 		const char *board_name;
+		unsigned int prefetch = 0x000affaa;
 
-		retval = sysfs_create_file(&pdev->dev.kobj,
-					   &dev_attr_pch_mac.attr);
-		if (retval)
+		if (pdev->dev.of_node)
+			of_property_read_u32(pdev->dev.of_node,
+						  "intel,eg20t-prefetch",
+						  &prefetch);
+
+		ret = sysfs_create_file(&pdev->dev.kobj,
+					&dev_attr_pch_mac.attr);
+		if (ret)
 			goto err_sysfs_create;
 
-		retval = sysfs_create_bin_file(&pdev->dev.kobj, &pch_bin_attr);
-		if (retval)
+		ret = sysfs_create_bin_file(&pdev->dev.kobj, &pch_bin_attr);
+		if (ret)
 			goto exit_bin_attr;
 
 		pch_phub_read_modify_write_reg(chip,
@@ -737,14 +601,24 @@ static int pch_phub_probe(struct pci_dev *pdev,
 						CLKCFG_UART_MASK);
 
 		/* set the prefech value */
-		iowrite32(0x000affaa, chip->pch_phub_base_address + 0x14);
+		iowrite32(prefetch, chip->pch_phub_base_address + 0x14);
 		/* set the interrupt delay value */
 		iowrite32(0x25, chip->pch_phub_base_address + 0x44);
 		chip->pch_opt_rom_start_address = PCH_PHUB_ROM_START_ADDR_EG20T;
 		chip->pch_mac_start_address = PCH_PHUB_MAC_START_ADDR_EG20T;
-	} else if (id->driver_data == 2) { /* ML7213 IOH */
-		retval = sysfs_create_bin_file(&pdev->dev.kobj, &pch_bin_attr);
-		if (retval)
+
+		/* quirk for MIPS Boston platform */
+		if (pdev->dev.of_node) {
+			if (of_machine_is_compatible("img,boston")) {
+				pch_phub_read_modify_write_reg(chip,
+					(unsigned int)CLKCFG_REG_OFFSET,
+					CLKCFG_UART_25MHZ,
+					CLKCFG_UART_MASK);
+			}
+		}
+	} else if (id->driver_data == PCH_ML7213) { /* ML7213 IOH */
+		ret = sysfs_create_bin_file(&pdev->dev.kobj, &pch_bin_attr);
+		if (ret)
 			goto err_sysfs_create;
 		/* set the prefech value
 		 * Device2(USB OHCI #1/ USB EHCI #1/ USB Device):a
@@ -755,7 +629,7 @@ static int pch_phub_probe(struct pci_dev *pdev,
 		iowrite32(0x000affa0, chip->pch_phub_base_address + 0x14);
 		chip->pch_opt_rom_start_address =\
 						 PCH_PHUB_ROM_START_ADDR_ML7213;
-	} else if (id->driver_data == 3) { /* ML7223 IOH Bus-m*/
+	} else if (id->driver_data == PCH_ML7223M) { /* ML7223 IOH Bus-m*/
 		/* set the prefech value
 		 * Device8(GbE)
 		 */
@@ -765,13 +639,13 @@ static int pch_phub_probe(struct pci_dev *pdev,
 		chip->pch_opt_rom_start_address =\
 						 PCH_PHUB_ROM_START_ADDR_ML7223;
 		chip->pch_mac_start_address = PCH_PHUB_MAC_START_ADDR_ML7223;
-	} else if (id->driver_data == 4) { /* ML7223 IOH Bus-n*/
-		retval = sysfs_create_file(&pdev->dev.kobj,
-					   &dev_attr_pch_mac.attr);
-		if (retval)
+	} else if (id->driver_data == PCH_ML7223N) { /* ML7223 IOH Bus-n*/
+		ret = sysfs_create_file(&pdev->dev.kobj,
+					&dev_attr_pch_mac.attr);
+		if (ret)
 			goto err_sysfs_create;
-		retval = sysfs_create_bin_file(&pdev->dev.kobj, &pch_bin_attr);
-		if (retval)
+		ret = sysfs_create_bin_file(&pdev->dev.kobj, &pch_bin_attr);
+		if (ret)
 			goto exit_bin_attr;
 		/* set the prefech value
 		 * Device2(USB OHCI #0,1,2,3/ USB EHCI #0):a
@@ -782,14 +656,14 @@ static int pch_phub_probe(struct pci_dev *pdev,
 		chip->pch_opt_rom_start_address =\
 						 PCH_PHUB_ROM_START_ADDR_ML7223;
 		chip->pch_mac_start_address = PCH_PHUB_MAC_START_ADDR_ML7223;
-	} else if (id->driver_data == 5) { /* ML7831 */
-		retval = sysfs_create_file(&pdev->dev.kobj,
-					   &dev_attr_pch_mac.attr);
-		if (retval)
+	} else if (id->driver_data == PCH_ML7831) { /* ML7831 */
+		ret = sysfs_create_file(&pdev->dev.kobj,
+					&dev_attr_pch_mac.attr);
+		if (ret)
 			goto err_sysfs_create;
 
-		retval = sysfs_create_bin_file(&pdev->dev.kobj, &pch_bin_attr);
-		if (retval)
+		ret = sysfs_create_bin_file(&pdev->dev.kobj, &pch_bin_attr);
+		if (ret)
 			goto exit_bin_attr;
 
 		/* set the prefech value */
@@ -831,66 +705,38 @@ static void pch_phub_remove(struct pci_dev *pdev)
 	kfree(chip);
 }
 
-#ifdef CONFIG_PM
-
-static int pch_phub_suspend(struct pci_dev *pdev, pm_message_t state)
+static int pch_phub_suspend(struct device *dev_d)
 {
-	int ret;
-
-	pch_phub_save_reg_conf(pdev);
-	ret = pci_save_state(pdev);
-	if (ret) {
-		dev_err(&pdev->dev,
-			" %s -pci_save_state returns %d\n", __func__, ret);
-		return ret;
-	}
-	pci_enable_wake(pdev, PCI_D3hot, 0);
-	pci_disable_device(pdev);
-	pci_set_power_state(pdev, pci_choose_state(pdev, state));
+	device_wakeup_disable(dev_d);
 
 	return 0;
 }
 
-static int pch_phub_resume(struct pci_dev *pdev)
+static int pch_phub_resume(struct device *dev_d)
 {
-	int ret;
-
-	pci_set_power_state(pdev, PCI_D0);
-	pci_restore_state(pdev);
-	ret = pci_enable_device(pdev);
-	if (ret) {
-		dev_err(&pdev->dev,
-		"%s-pci_enable_device failed(ret=%d) ", __func__, ret);
-		return ret;
-	}
-
-	pci_enable_wake(pdev, PCI_D3hot, 0);
-	pch_phub_restore_reg_conf(pdev);
+	device_wakeup_disable(dev_d);
 
 	return 0;
 }
-#else
-#define pch_phub_suspend NULL
-#define pch_phub_resume NULL
-#endif /* CONFIG_PM */
 
-static struct pci_device_id pch_phub_pcidev_id[] = {
-	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_PCH1_PHUB),       1,  },
-	{ PCI_VDEVICE(ROHM, PCI_DEVICE_ID_ROHM_ML7213_PHUB), 2,  },
-	{ PCI_VDEVICE(ROHM, PCI_DEVICE_ID_ROHM_ML7223_mPHUB), 3,  },
-	{ PCI_VDEVICE(ROHM, PCI_DEVICE_ID_ROHM_ML7223_nPHUB), 4,  },
-	{ PCI_VDEVICE(ROHM, PCI_DEVICE_ID_ROHM_ML7831_PHUB), 5,  },
+static const struct pci_device_id pch_phub_pcidev_id[] = {
+	{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_PCH1_PHUB),        .driver_data = PCH_EG20T },
+	{ PCI_VDEVICE(ROHM, PCI_DEVICE_ID_ROHM_ML7213_PHUB),  .driver_data = PCH_ML7213 },
+	{ PCI_VDEVICE(ROHM, PCI_DEVICE_ID_ROHM_ML7223_mPHUB), .driver_data = PCH_ML7223M },
+	{ PCI_VDEVICE(ROHM, PCI_DEVICE_ID_ROHM_ML7223_nPHUB), .driver_data = PCH_ML7223N },
+	{ PCI_VDEVICE(ROHM, PCI_DEVICE_ID_ROHM_ML7831_PHUB),  .driver_data = PCH_ML7831 },
 	{ }
 };
 MODULE_DEVICE_TABLE(pci, pch_phub_pcidev_id);
+
+static DEFINE_SIMPLE_DEV_PM_OPS(pch_phub_pm_ops, pch_phub_suspend, pch_phub_resume);
 
 static struct pci_driver pch_phub_driver = {
 	.name = "pch_phub",
 	.id_table = pch_phub_pcidev_id,
 	.probe = pch_phub_probe,
 	.remove = pch_phub_remove,
-	.suspend = pch_phub_suspend,
-	.resume = pch_phub_resume
+	.driver.pm = pm_sleep_ptr(&pch_phub_pm_ops),
 };
 
 module_pci_driver(pch_phub_driver);

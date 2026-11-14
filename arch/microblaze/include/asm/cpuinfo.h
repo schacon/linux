@@ -1,19 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Generic support for queying CPU info
  *
  * Copyright (C) 2007-2009 Michal Simek <monstr@monstr.eu>
  * Copyright (C) 2007-2009 PetaLogix
  * Copyright (C) 2007 John Williams <jwilliams@itee.uq.edu.au>
- *
- * This file is subject to the terms and conditions of the GNU General
- * Public License. See the file COPYING in the main directory of this
- * archive for more details.
  */
 
 #ifndef _ASM_MICROBLAZE_CPUINFO_H
 #define _ASM_MICROBLAZE_CPUINFO_H
 
-#include <asm/prom.h>
+#include <linux/of.h>
 
 /* CPU Version and FPGA Family code conversion table type */
 struct cpu_ver_key {
@@ -91,15 +88,18 @@ extern struct cpuinfo cpuinfo;
 
 /* fwd declarations of the various CPUinfo populators */
 void setup_cpuinfo(void);
+void setup_cpuinfo_clk(void);
 
 void set_cpuinfo_static(struct cpuinfo *ci, struct device_node *cpu);
 void set_cpuinfo_pvr_full(struct cpuinfo *ci, struct device_node *cpu);
 
 static inline unsigned int fcpu(struct device_node *cpu, char *n)
 {
-	const __be32 *val;
-	return (val = of_get_property(cpu, n, NULL)) ?
-							be32_to_cpup(val) : 0;
+	u32 val = 0;
+
+	of_property_read_u32(cpu, n, &val);
+
+	return val;
 }
 
 #endif /* _ASM_MICROBLAZE_CPUINFO_H */

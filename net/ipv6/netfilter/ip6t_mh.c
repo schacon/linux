@@ -1,15 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C)2006 USAGI/WIDE Project
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Author:
  *	Masahide NAKAMURA @USAGI <masahide.nakamura.cz@hitachi.com>
  *
  * Based on net/netfilter/xt_tcpudp.c
- *
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/types.h>
@@ -46,14 +42,11 @@ static bool mh_mt6(const struct sk_buff *skb, struct xt_action_param *par)
 	if (mh == NULL) {
 		/* We've been asked to examine this packet, and we
 		   can't.  Hence, no choice but to drop. */
-		pr_debug("Dropping evil MH tinygram.\n");
 		par->hotdrop = true;
 		return false;
 	}
 
 	if (mh->ip6mh_proto != IPPROTO_NONE) {
-		pr_debug("Dropping invalid MH Payload Proto: %u\n",
-			 mh->ip6mh_proto);
 		par->hotdrop = true;
 		return false;
 	}

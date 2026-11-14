@@ -1,21 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Common lookup tables for CAST-128 (cast5) and CAST-256 (cast6)
  *
  * Copyright © 1998, 1999, 2000, 2001 Free Software Foundation, Inc.
  * Copyright © 2003 Kartikey Mahendra Bhatt <kartik_me@hotmail.com>
  * Copyright © 2012 Jussi Kivilinna <jussi.kivilinna@mbnet.fi>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
  */
 
 #include <linux/module.h>
 #include <crypto/cast_common.h>
 
-const u32 cast_s1[256] = {
+__visible const u32 cast_s1[256] = {
 	0x30fb40d4, 0x9fa0ff0b, 0x6beccd2f, 0x3f258c7a, 0x1e213f2f,
 	0x9c004dd3, 0x6003e540, 0xcf9fc949,
 	0xbfd4af27, 0x88bbbdb5, 0xe2034090, 0x98d09675, 0x6e63a0e0,
@@ -83,7 +78,7 @@ const u32 cast_s1[256] = {
 };
 EXPORT_SYMBOL_GPL(cast_s1);
 
-const u32 cast_s2[256] = {
+__visible const u32 cast_s2[256] = {
 	0x1f201094, 0xef0ba75b, 0x69e3cf7e, 0x393f4380, 0xfe61cf7a,
 	0xeec5207a, 0x55889c94, 0x72fc0651,
 	0xada7ef79, 0x4e1d7235, 0xd55a63ce, 0xde0436ba, 0x99c430ef,
@@ -151,7 +146,7 @@ const u32 cast_s2[256] = {
 };
 EXPORT_SYMBOL_GPL(cast_s2);
 
-const u32 cast_s3[256] = {
+__visible const u32 cast_s3[256] = {
 	0x8defc240, 0x25fa5d9f, 0xeb903dbf, 0xe810c907, 0x47607fff,
 	0x369fe44b, 0x8c1fc644, 0xaececa90,
 	0xbeb1f9bf, 0xeefbcaea, 0xe8cf1950, 0x51df07ae, 0x920e8806,
@@ -219,7 +214,7 @@ const u32 cast_s3[256] = {
 };
 EXPORT_SYMBOL_GPL(cast_s3);
 
-const u32 cast_s4[256] = {
+__visible const u32 cast_s4[256] = {
 	0x9db30420, 0x1fb6e9de, 0xa7be7bef, 0xd273a298, 0x4a4f7bdb,
 	0x64ad8c57, 0x85510443, 0xfa020ed1,
 	0x7e287aff, 0xe60fb663, 0x095f35a1, 0x79ebf120, 0xfd059d43,
@@ -287,4 +282,5 @@ const u32 cast_s4[256] = {
 };
 EXPORT_SYMBOL_GPL(cast_s4);
 
+MODULE_DESCRIPTION("Common lookup tables for CAST-128 (cast5) and CAST-256 (cast6)");
 MODULE_LICENSE("GPL");

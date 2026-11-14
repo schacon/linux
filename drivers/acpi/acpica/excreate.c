@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: excreate - Named object creation
  *
+ * Copyright (C) 2000 - 2026, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2013, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -49,7 +15,6 @@
 
 #define _COMPONENT          ACPI_EXECUTER
 ACPI_MODULE_NAME("excreate")
-#ifndef ACPI_NO_METHOD_EXECUTION
 /*******************************************************************************
  *
  * FUNCTION:    acpi_ex_create_alias
@@ -87,34 +52,27 @@ acpi_status acpi_ex_create_alias(struct acpi_walk_state *walk_state)
 				  target_node->object);
 	}
 
-	/*
-	 * For objects that can never change (i.e., the NS node will
-	 * permanently point to the same object), we can simply attach
-	 * the object to the new NS node. For other objects (such as
-	 * Integers, buffers, etc.), we have to point the Alias node
-	 * to the original Node.
-	 */
+	/* Ensure that the target node is valid */
+
+	if (!target_node) {
+		return_ACPI_STATUS(AE_NULL_OBJECT);
+	}
+
+	/* Construct the alias object (a namespace node) */
+
 	switch (target_node->type) {
-
-		/* For these types, the sub-object can change dynamically via a Store */
-
-	case ACPI_TYPE_INTEGER:
-	case ACPI_TYPE_STRING:
-	case ACPI_TYPE_BUFFER:
-	case ACPI_TYPE_PACKAGE:
-	case ACPI_TYPE_BUFFER_FIELD:
-
+	case ACPI_TYPE_METHOD:
 		/*
-		 * These types open a new scope, so we need the NS node in order to access
-		 * any children.
+		 * Control method aliases need to be differentiated with
+		 * a special type
 		 */
-	case ACPI_TYPE_DEVICE:
-	case ACPI_TYPE_POWER:
-	case ACPI_TYPE_PROCESSOR:
-	case ACPI_TYPE_THERMAL:
-	case ACPI_TYPE_LOCAL_SCOPE:
+		alias_node->type = ACPI_TYPE_LOCAL_METHOD_ALIAS;
+		break;
 
+	default:
 		/*
+		 * All other object types.
+		 *
 		 * The new alias has the type ALIAS and points to the original
 		 * NS node, not the object itself.
 		 */
@@ -122,36 +80,12 @@ acpi_status acpi_ex_create_alias(struct acpi_walk_state *walk_state)
 		alias_node->object =
 		    ACPI_CAST_PTR(union acpi_operand_object, target_node);
 		break;
-
-	case ACPI_TYPE_METHOD:
-
-		/*
-		 * Control method aliases need to be differentiated
-		 */
-		alias_node->type = ACPI_TYPE_LOCAL_METHOD_ALIAS;
-		alias_node->object =
-		    ACPI_CAST_PTR(union acpi_operand_object, target_node);
-		break;
-
-	default:
-
-		/* Attach the original source object to the new Alias Node */
-
-		/*
-		 * The new alias assumes the type of the target, and it points
-		 * to the same object. The reference count of the object has an
-		 * additional reference to prevent deletion out from under either the
-		 * target node or the alias Node
-		 */
-		status = acpi_ns_attach_object(alias_node,
-					       acpi_ns_get_attached_object
-					       (target_node),
-					       target_node->type);
-		break;
 	}
 
 	/* Since both operands are Nodes, we don't need to delete them */
 
+	alias_node->object =
+	    ACPI_CAST_PTR(union acpi_operand_object, target_node);
 	return_ACPI_STATUS(status);
 }
 
@@ -192,11 +126,11 @@ acpi_status acpi_ex_create_event(struct acpi_walk_state *walk_state)
 
 	/* Attach object to the Node */
 
-	status =
-	    acpi_ns_attach_object((struct acpi_namespace_node *)walk_state->
-				  operands[0], obj_desc, ACPI_TYPE_EVENT);
+	status = acpi_ns_attach_object((struct acpi_namespace_node *)
+				       walk_state->operands[0], obj_desc,
+				       ACPI_TYPE_EVENT);
 
-      cleanup:
+cleanup:
 	/*
 	 * Remove local reference to the object (on error, will cause deletion
 	 * of both object and semaphore if present.)
@@ -251,7 +185,7 @@ acpi_status acpi_ex_create_mutex(struct acpi_walk_state *walk_state)
 	    acpi_ns_attach_object(obj_desc->mutex.node, obj_desc,
 				  ACPI_TYPE_MUTEX);
 
-      cleanup:
+cleanup:
 	/*
 	 * Remove local reference to the object (on error, will cause deletion
 	 * of both object and semaphore if present.)
@@ -329,9 +263,10 @@ acpi_ex_create_region(u8 * aml_start,
 	 * Remember location in AML stream of address & length
 	 * operands since they need to be evaluated at run time.
 	 */
-	region_obj2 = obj_desc->common.next_object;
+	region_obj2 = acpi_ns_get_secondary_object(obj_desc);
 	region_obj2->extra.aml_start = aml_start;
 	region_obj2->extra.aml_length = aml_length;
+	region_obj2->extra.method_REG = NULL;
 	if (walk_state->scope_info) {
 		region_obj2->extra.scope_node =
 		    walk_state->scope_info->scope.node;
@@ -344,13 +279,18 @@ acpi_ex_create_region(u8 * aml_start,
 	obj_desc->region.space_id = space_id;
 	obj_desc->region.address = 0;
 	obj_desc->region.length = 0;
+	obj_desc->region.pointer = NULL;
 	obj_desc->region.node = node;
+	obj_desc->region.handler = NULL;
+	obj_desc->common.flags &=
+	    ~(AOPOBJ_SETUP_COMPLETE | AOPOBJ_REG_CONNECTED |
+	      AOPOBJ_OBJECT_INITIALIZED);
 
 	/* Install the new region object in the parent Node */
 
 	status = acpi_ns_attach_object(node, obj_desc, ACPI_TYPE_REGION);
 
-      cleanup:
+cleanup:
 
 	/* Remove local reference to the object */
 
@@ -392,7 +332,7 @@ acpi_status acpi_ex_create_processor(struct acpi_walk_state *walk_state)
 	obj_desc->processor.proc_id = (u8) operand[1]->integer.value;
 	obj_desc->processor.length = (u8) operand[3]->integer.value;
 	obj_desc->processor.address =
-	    (acpi_io_address) operand[2]->integer.value;
+	    (acpi_io_address)operand[2]->integer.value;
 
 	/* Install the processor object in the parent Node */
 
@@ -450,7 +390,6 @@ acpi_status acpi_ex_create_power_resource(struct acpi_walk_state *walk_state)
 	acpi_ut_remove_reference(obj_desc);
 	return_ACPI_STATUS(status);
 }
-#endif
 
 /*******************************************************************************
  *
@@ -489,15 +428,15 @@ acpi_ex_create_method(u8 * aml_start,
 
 	obj_desc->method.aml_start = aml_start;
 	obj_desc->method.aml_length = aml_length;
+	obj_desc->method.node = operand[0];
 
 	/*
 	 * Disassemble the method flags. Split off the arg_count, Serialized
 	 * flag, and sync_level for efficiency.
 	 */
-	method_flags = (u8) operand[1]->integer.value;
-
-	obj_desc->method.param_count =
-	    (u8) (method_flags & AML_METHOD_ARG_COUNT);
+	method_flags = (u8)operand[1]->integer.value;
+	obj_desc->method.param_count = (u8)
+	    (method_flags & AML_METHOD_ARG_COUNT);
 
 	/*
 	 * Get the sync_level. If method is serialized, a mutex will be
@@ -523,7 +462,7 @@ acpi_ex_create_method(u8 * aml_start,
 
 	acpi_ut_remove_reference(obj_desc);
 
-      exit:
+exit:
 	/* Remove a reference to the operand */
 
 	acpi_ut_remove_reference(operand[1]);

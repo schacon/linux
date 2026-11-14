@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * machine_kexec.c - handle transition of Linux booting another kernel
  */
@@ -9,21 +10,18 @@
 #include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/memblock.h>
-#include <asm/pgtable.h>
 #include <linux/of_fdt.h>
-#include <asm/pgalloc.h>
 #include <asm/mmu_context.h>
 #include <asm/cacheflush.h>
+#include <asm/kexec-internal.h>
+#include <asm/fncpy.h>
 #include <asm/mach-types.h>
+#include <asm/smp_plat.h>
 #include <asm/system_misc.h>
+#include <asm/set_memory.h>
 
-extern const unsigned char relocate_new_kernel[];
+extern void relocate_new_kernel(void);
 extern const unsigned int relocate_new_kernel_size;
-
-extern unsigned long kexec_start_address;
-extern unsigned long kexec_indirection_page;
-extern unsigned long kexec_mach_type;
-extern unsigned long kexec_boot_atags;
 
 static atomic_t waiting_for_crash_ipi;
 
@@ -38,6 +36,18 @@ int machine_kexec_prepare(struct kimage *image)
 	__be32 header;
 	int i, err;
 
+	image->arch.kernel_r2 = image->start - KEXEC_ARM_ZIMAGE_OFFSET
+				     + KEXEC_ARM_ATAGS_OFFSET;
+
+	/*
+	 * Validate that if the current HW supports SMP, then the SW supports
+	 * and implements CPU hotplug for the current HW. If not, we won't be
+	 * able to kexec reliably, so fail the prepare operation.
+	 */
+	if (num_possible_cpus() > 1 && platform_can_secondary_boot() &&
+	    !platform_can_cpu_hotplug())
+		return -EINVAL;
+
 	/*
 	 * No segment at default ATAGs address. try to locate
 	 * a dtb using magic.
@@ -45,7 +55,7 @@ int machine_kexec_prepare(struct kimage *image)
 	for (i = 0; i < image->nr_segments; i++) {
 		current_segment = &image->segment[i];
 
-		if (!memblock_is_region_memory(current_segment->mem,
+		if (!memblock_is_region_memory(idmap_to_phys(current_segment->mem),
 					       current_segment->memsz))
 			return -EINVAL;
 
@@ -53,8 +63,8 @@ int machine_kexec_prepare(struct kimage *image)
 		if (err)
 			return err;
 
-		if (be32_to_cpu(header) == OF_DT_HEADER)
-			kexec_boot_atags = current_segment->mem;
+		if (header == cpu_to_be32(OF_DT_HEADER))
+			image->arch.kernel_r2 = current_segment->mem;
 	}
 	return 0;
 }
@@ -63,104 +73,105 @@ void machine_kexec_cleanup(struct kimage *image)
 {
 }
 
-void machine_crash_nonpanic_core(void *unused)
+static void machine_crash_nonpanic_core(void *unused)
 {
 	struct pt_regs regs;
 
-	crash_setup_regs(&regs, NULL);
+	local_fiq_disable();
+
+	crash_setup_regs(&regs, get_irq_regs());
 	printk(KERN_DEBUG "CPU %u will stop doing anything useful since another CPU has crashed\n",
 	       smp_processor_id());
 	crash_save_cpu(&regs, smp_processor_id());
 	flush_cache_all();
 
+	set_cpu_online(smp_processor_id(), false);
 	atomic_dec(&waiting_for_crash_ipi);
-	while (1)
+
+	while (1) {
 		cpu_relax();
-}
-
-static void machine_kexec_mask_interrupts(void)
-{
-	unsigned int i;
-	struct irq_desc *desc;
-
-	for_each_irq_desc(i, desc) {
-		struct irq_chip *chip;
-
-		chip = irq_desc_get_chip(desc);
-		if (!chip)
-			continue;
-
-		if (chip->irq_eoi && irqd_irq_inprogress(&desc->irq_data))
-			chip->irq_eoi(&desc->irq_data);
-
-		if (chip->irq_mask)
-			chip->irq_mask(&desc->irq_data);
-
-		if (chip->irq_disable && !irqd_irq_disabled(&desc->irq_data))
-			chip->irq_disable(&desc->irq_data);
+		wfe();
 	}
 }
 
-void machine_crash_shutdown(struct pt_regs *regs)
-{
-	unsigned long msecs;
+static DEFINE_PER_CPU(call_single_data_t, cpu_stop_csd) =
+	CSD_INIT(machine_crash_nonpanic_core, NULL);
 
-	local_irq_disable();
+void crash_smp_send_stop(void)
+{
+	static int cpus_stopped;
+	unsigned long msecs;
+	call_single_data_t *csd;
+	int cpu, this_cpu = raw_smp_processor_id();
+
+	if (cpus_stopped)
+		return;
 
 	atomic_set(&waiting_for_crash_ipi, num_online_cpus() - 1);
-	smp_call_function(machine_crash_nonpanic_core, NULL, false);
+	for_each_online_cpu(cpu) {
+		if (cpu == this_cpu)
+			continue;
+
+		csd = &per_cpu(cpu_stop_csd, cpu);
+		smp_call_function_single_async(cpu, csd);
+	}
+
 	msecs = 1000; /* Wait at most a second for the other cpus to stop */
 	while ((atomic_read(&waiting_for_crash_ipi) > 0) && msecs) {
 		mdelay(1);
 		msecs--;
 	}
 	if (atomic_read(&waiting_for_crash_ipi) > 0)
-		printk(KERN_WARNING "Non-crashing CPUs did not react to IPI\n");
+		pr_warn("Non-crashing CPUs did not react to IPI\n");
+
+	cpus_stopped = 1;
+}
+
+void machine_crash_shutdown(struct pt_regs *regs)
+{
+	local_irq_disable();
+	crash_smp_send_stop();
 
 	crash_save_cpu(regs, smp_processor_id());
 	machine_kexec_mask_interrupts();
 
-	printk(KERN_INFO "Loading crashdump kernel...\n");
+	pr_info("Loading crashdump kernel...\n");
 }
-
-/*
- * Function pointer to optional machine-specific reinitialization
- */
-void (*kexec_reinit)(void);
 
 void machine_kexec(struct kimage *image)
 {
-	unsigned long page_list;
-	unsigned long reboot_code_buffer_phys;
+	unsigned long page_list, reboot_entry_phys;
+	struct kexec_relocate_data *data;
+	void (*reboot_entry)(void);
 	void *reboot_code_buffer;
 
+	/*
+	 * This can only happen if machine_shutdown() failed to disable some
+	 * CPU, and that can only happen if the checks in
+	 * machine_kexec_prepare() were not correct. If this fails, we can't
+	 * reliably kexec anyway, so BUG_ON is appropriate.
+	 */
+	BUG_ON(num_online_cpus() > 1);
 
 	page_list = image->head & PAGE_MASK;
 
-	/* we need both effective and real address here */
-	reboot_code_buffer_phys =
-	    page_to_pfn(image->control_code_page) << PAGE_SHIFT;
 	reboot_code_buffer = page_address(image->control_code_page);
 
-	/* Prepare parameters for reboot_code_buffer*/
-	kexec_start_address = image->start;
-	kexec_indirection_page = page_list;
-	kexec_mach_type = machine_arch_type;
-	if (!kexec_boot_atags)
-		kexec_boot_atags = image->start - KEXEC_ARM_ZIMAGE_OFFSET + KEXEC_ARM_ATAGS_OFFSET;
-
-
 	/* copy our kernel relocation code to the control code page */
-	memcpy(reboot_code_buffer,
-	       relocate_new_kernel, relocate_new_kernel_size);
+	reboot_entry = fncpy(reboot_code_buffer,
+			     &relocate_new_kernel,
+			     relocate_new_kernel_size);
 
+	data = reboot_code_buffer + relocate_new_kernel_size;
+	data->kexec_start_address = image->start;
+	data->kexec_indirection_page = page_list;
+	data->kexec_mach_type = machine_arch_type;
+	data->kexec_r2 = image->arch.kernel_r2;
 
-	flush_icache_range((unsigned long) reboot_code_buffer,
-			   (unsigned long) reboot_code_buffer + KEXEC_CONTROL_PAGE_SIZE);
-	printk(KERN_INFO "Bye!\n");
+	/* get the identity mapping physical address for the reboot code */
+	reboot_entry_phys = virt_to_idmap(reboot_entry);
 
-	if (kexec_reinit)
-		kexec_reinit();
+	pr_info("Bye!\n");
 
-	soft_restart(reboot_code_buffer_phys);
+	soft_restart(reboot_entry_phys);
 }

@@ -1,19 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Linux network driver for Brocade Converged Network Adapter.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License (GPL) Version 2 as
- * published by the Free Software Foundation
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * Linux network driver for QLogic BR-series Converged Network Adapter.
  */
 /*
- * Copyright (c) 2005-2010 Brocade Communications Systems, Inc.
+ * Copyright (c) 2005-2014 Brocade Communications Systems, Inc.
+ * Copyright (c) 2014-2015 QLogic Corporation
  * All rights reserved
- * www.brocade.com
+ * www.qlogic.com
  */
 #ifndef __BNA_TYPES_H__
 #define __BNA_TYPES_H__
@@ -109,20 +102,21 @@ enum bna_tx_res_req_type {
 enum bna_rx_mem_type {
 	BNA_RX_RES_MEM_T_CCB		= 0,	/* CQ context */
 	BNA_RX_RES_MEM_T_RCB		= 1,	/* CQ context */
-	BNA_RX_RES_MEM_T_UNMAPQ		= 2,	/* UnmapQ for RxQs */
-	BNA_RX_RES_MEM_T_CQPT		= 3,	/* CQ QPT */
-	BNA_RX_RES_MEM_T_CSWQPT		= 4,	/* S/W QPT */
-	BNA_RX_RES_MEM_T_CQPT_PAGE	= 5,	/* CQPT page */
-	BNA_RX_RES_MEM_T_HQPT		= 6,	/* RX QPT */
-	BNA_RX_RES_MEM_T_DQPT		= 7,	/* RX QPT */
-	BNA_RX_RES_MEM_T_HSWQPT		= 8,	/* RX s/w QPT */
-	BNA_RX_RES_MEM_T_DSWQPT		= 9,	/* RX s/w QPT */
-	BNA_RX_RES_MEM_T_DPAGE		= 10,	/* RX s/w QPT */
-	BNA_RX_RES_MEM_T_HPAGE		= 11,	/* RX s/w QPT */
-	BNA_RX_RES_MEM_T_IBIDX		= 12,
-	BNA_RX_RES_MEM_T_RIT		= 13,
-	BNA_RX_RES_T_INTR		= 14,	/* Rx interrupts */
-	BNA_RX_RES_T_MAX		= 15
+	BNA_RX_RES_MEM_T_UNMAPHQ	= 2,
+	BNA_RX_RES_MEM_T_UNMAPDQ	= 3,
+	BNA_RX_RES_MEM_T_CQPT		= 4,
+	BNA_RX_RES_MEM_T_CSWQPT		= 5,
+	BNA_RX_RES_MEM_T_CQPT_PAGE	= 6,
+	BNA_RX_RES_MEM_T_HQPT		= 7,
+	BNA_RX_RES_MEM_T_DQPT		= 8,
+	BNA_RX_RES_MEM_T_HSWQPT		= 9,
+	BNA_RX_RES_MEM_T_DSWQPT		= 10,
+	BNA_RX_RES_MEM_T_DPAGE		= 11,
+	BNA_RX_RES_MEM_T_HPAGE		= 12,
+	BNA_RX_RES_MEM_T_IBIDX		= 13,
+	BNA_RX_RES_MEM_T_RIT		= 14,
+	BNA_RX_RES_T_INTR		= 15,
+	BNA_RX_RES_T_MAX		= 16
 };
 
 enum bna_tx_type {
@@ -133,7 +127,6 @@ enum bna_tx_type {
 enum bna_tx_flags {
 	BNA_TX_F_ENET_STARTED	= 1,
 	BNA_TX_F_ENABLED	= 2,
-	BNA_TX_F_PRIO_CHANGED	= 4,
 	BNA_TX_F_BW_UPDATED	= 8,
 };
 
@@ -180,17 +173,11 @@ enum bna_rx_mod_flags {
 	BNA_RX_MOD_F_ENET_LOOPBACK	= 2,
 };
 
-enum bna_rxf_flags {
-	BNA_RXF_F_PAUSED		= 1,
-};
-
 enum bna_rxf_event {
 	RXF_E_START			= 1,
 	RXF_E_STOP			= 2,
 	RXF_E_FAIL			= 3,
 	RXF_E_CONFIG			= 4,
-	RXF_E_PAUSE			= 5,
-	RXF_E_RESUME			= 6,
 	RXF_E_FW_RESP			= 7,
 };
 
@@ -325,8 +312,10 @@ struct bna_attr {
 
 /* IOCEth */
 
+enum bna_ioceth_event;
+
 struct bna_ioceth {
-	bfa_fsm_t		fsm;
+	void (*fsm)(struct bna_ioceth *s, enum bna_ioceth_event e);
 	struct bfa_ioc ioc;
 
 	struct bna_attr attr;
@@ -347,8 +336,10 @@ struct bna_pause_config {
 	enum bna_status rx_pause;
 };
 
+enum bna_enet_event;
+
 struct bna_enet {
-	bfa_fsm_t		fsm;
+	void (*fsm)(struct bna_enet *s, enum bna_enet_event e);
 	enum bna_enet_flags flags;
 
 	enum bna_enet_type type;
@@ -359,9 +350,6 @@ struct bna_enet {
 	/* Callback for bna_enet_disable(), enet_stop() */
 	void (*stop_cbfn)(void *);
 	void			*stop_cbarg;
-
-	/* Callback for bna_enet_pause_config() */
-	void (*pause_cbfn)(struct bnad *);
 
 	/* Callback for bna_enet_mtu_set() */
 	void (*mtu_cbfn)(struct bnad *);
@@ -376,8 +364,10 @@ struct bna_enet {
 
 /* Ethport */
 
+enum bna_ethport_event;
+
 struct bna_ethport {
-	bfa_fsm_t		fsm;
+	void (*fsm)(struct bna_ethport *s, enum bna_ethport_event e);
 	enum bna_ethport_flags flags;
 
 	enum bna_link_status link_status;
@@ -426,7 +416,7 @@ struct bna_ib {
 /* Tx object */
 
 /* Tx datapath control structure */
-#define BNA_Q_NAME_SIZE		16
+#define BNA_Q_NAME_SIZE		(IFNAMSIZ + 6)
 struct bna_tcb {
 	/* Fast path */
 	void			**sw_qpt;
@@ -470,13 +460,16 @@ struct bna_txq {
 };
 
 /* Tx object */
+
+enum bna_tx_event;
+
 struct bna_tx {
 	/* This should be the first one */
 	struct list_head			qe;
 	int			rid;
 	int			hw_id;
 
-	bfa_fsm_t		fsm;
+	void (*fsm)(struct bna_tx *s, enum bna_tx_event e);
 	enum bna_tx_flags flags;
 
 	enum bna_tx_type type;
@@ -495,9 +488,6 @@ struct bna_tx {
 	/* callback for bna_tx_disable(), bna_tx_stop() */
 	void (*stop_cbfn)(void *arg, struct bna_tx *tx);
 	void			*stop_cbarg;
-
-	/* callback for bna_tx_prio_set() */
-	void (*prio_change_cbfn)(struct bnad *bnad, struct bna_tx *tx);
 
 	struct bfa_msgq_cmd_entry msgq_cmd;
 	union {
@@ -583,6 +573,8 @@ struct bna_rxq {
 
 	int			buffer_size;
 	int			q_depth;
+	u32			num_vecs;
+	enum bna_status		multi_buffer;
 
 	struct bna_qpt qpt;
 	struct bna_rcb *rcb;
@@ -596,6 +588,7 @@ struct bna_rxq {
 	u64		rx_bytes;
 	u64		rx_packets_with_error;
 	u64		rxbuf_alloc_failed;
+	u64		rxbuf_map_failed;
 };
 
 /* RxQ pair */
@@ -632,6 +625,8 @@ struct bna_ccb {
 	struct bna_rcb *rcb[2];
 	void			*ctrl; /* For bnad */
 	struct bna_pkt_rate pkt_rate;
+	u32			pkts_una;
+	u32			bytes_per_intr;
 
 	/* Control path */
 	struct bna_cq *cq;
@@ -670,15 +665,22 @@ struct bna_rx_config {
 	enum bna_rx_type rx_type;
 	int			num_paths;
 	enum bna_rxp_type rxp_type;
-	int			paused;
-	int			q_depth;
 	int			coalescing_timeo;
 	/*
 	 * Small/Large (or Header/Data) buffer size to be configured
-	 * for SLR and HDS queue type. Large buffer size comes from
-	 * enet->mtu.
+	 * for SLR and HDS queue type.
 	 */
-	int			small_buff_size;
+	u32			frame_size;
+
+	/* header or small queue */
+	u32			q1_depth;
+	u32			q1_buf_size;
+
+	/* data or large queue */
+	u32			q0_depth;
+	u32			q0_buf_size;
+	u32			q0_num_vecs;
+	enum bna_status		q0_multi_buf;
 
 	enum bna_status rss_status;
 	struct bna_rss_config rss_config;
@@ -705,9 +707,11 @@ struct bna_rxp {
 };
 
 /* RxF structure (hardware Rx Function) */
+
+enum bna_rxf_event;
+
 struct bna_rxf {
-	bfa_fsm_t		fsm;
-	enum bna_rxf_flags flags;
+	void (*fsm)(struct bna_rxf *s, enum bna_rxf_event e);
 
 	struct bfa_msgq_cmd_entry msgq_cmd;
 	union {
@@ -727,10 +731,6 @@ struct bna_rxf {
 	/* callback for bna_rxf_stop() */
 	void (*stop_cbfn) (struct bna_rx *rx);
 	struct bna_rx *stop_cbarg;
-
-	/* callback for bna_rx_receive_pause() / bna_rx_receive_resume() */
-	void (*oper_state_cbfn) (struct bnad *bnad, struct bna_rx *rx);
-	struct bnad *oper_state_cbarg;
 
 	/**
 	 * callback for:
@@ -781,13 +781,16 @@ struct bna_rxf {
 };
 
 /* Rx object */
+
+enum bna_rx_event;
+
 struct bna_rx {
 	/* This should be the first one */
 	struct list_head			qe;
 	int			rid;
 	int			hw_id;
 
-	bfa_fsm_t		fsm;
+	void (*fsm)(struct bna_rx *s, enum bna_rx_event e);
 
 	enum bna_rx_type type;
 
@@ -866,8 +869,9 @@ struct bna_rx_mod {
 /* CAM */
 
 struct bna_ucam_mod {
-	struct bna_mac *ucmac;		/* BFI_MAX_UCMAC entries */
+	struct bna_mac *ucmac;		/* num_ucmac * 2 entries */
 	struct list_head			free_q;
+	struct list_head			del_q;
 
 	struct bna *bna;
 };
@@ -880,9 +884,10 @@ struct bna_mcam_handle {
 };
 
 struct bna_mcam_mod {
-	struct bna_mac *mcmac;		/* BFI_MAX_MCMAC entries */
-	struct bna_mcam_handle *mchandle;	/* BFI_MAX_MCMAC entries */
+	struct bna_mac *mcmac;		/* num_mcmac * 2 entries */
+	struct bna_mcam_handle *mchandle;	/* num_mcmac entries */
 	struct list_head			free_q;
+	struct list_head			del_q;
 	struct list_head			free_handle_q;
 
 	struct bna *bna;

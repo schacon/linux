@@ -1,15 +1,25 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/mm_types.h>
+#include <linux/pgtable.h>
 
 #include <asm/cputype.h>
 #include <asm/idmap.h>
+#include <asm/hwcap.h>
 #include <asm/pgalloc.h>
-#include <asm/pgtable.h>
 #include <asm/sections.h>
 #include <asm/system_info.h>
+#include <asm/uaccess.h>
 
-pgd_t *idmap_pgd;
+/*
+ * Note: accesses outside of the kernel image and the identity map area
+ * are not supported on any CPU using the idmap tables as its current
+ * page tables.
+ */
+pgd_t *idmap_pgd __ro_after_init;
+long long arch_phys_to_idmap_offset __ro_after_init;
 
 #ifdef CONFIG_ARM_LPAE
 static void idmap_add_pmd(pud_t *pud, unsigned long addr, unsigned long end,
@@ -21,9 +31,16 @@ static void idmap_add_pmd(pud_t *pud, unsigned long addr, unsigned long end,
 	if (pud_none_or_clear_bad(pud) || (pud_val(*pud) & L_PGD_SWAPPER)) {
 		pmd = pmd_alloc_one(&init_mm, addr);
 		if (!pmd) {
-			pr_warning("Failed to allocate identity pmd.\n");
+			pr_warn("Failed to allocate identity pmd.\n");
 			return;
 		}
+		/*
+		 * Copy the original PMD to ensure that the PMD entries for
+		 * the kernel image are preserved.
+		 */
+		if (!pud_none(*pud))
+			memcpy(pmd, pmd_offset(pud, 0),
+			       PTRS_PER_PMD * sizeof(pmd_t));
 		pud_populate(&init_mm, pud, pmd);
 		pmd += pmd_index(addr);
 	} else
@@ -52,7 +69,8 @@ static void idmap_add_pmd(pud_t *pud, unsigned long addr, unsigned long end,
 static void idmap_add_pud(pgd_t *pgd, unsigned long addr, unsigned long end,
 	unsigned long prot)
 {
-	pud_t *pud = pud_offset(pgd, addr);
+	p4d_t *p4d = p4d_offset(pgd, addr);
+	pud_t *pud = pud_offset(p4d, addr);
 	unsigned long next;
 
 	do {
@@ -67,12 +85,20 @@ static void identity_mapping_add(pgd_t *pgd, const char *text_start,
 	unsigned long addr, end;
 	unsigned long next;
 
-	addr = virt_to_phys(text_start);
-	end = virt_to_phys(text_end);
+#ifdef CONFIG_XIP_KERNEL
+	addr = (phys_addr_t)(text_start) - XIP_VIRT_ADDR(CONFIG_XIP_PHYS_ADDR)
+		+ CONFIG_XIP_PHYS_ADDR;
+	end = (phys_addr_t)(text_end) - XIP_VIRT_ADDR(CONFIG_XIP_PHYS_ADDR)
+		+ CONFIG_XIP_PHYS_ADDR;
+#else
+	addr = virt_to_idmap(text_start);
+	end = virt_to_idmap(text_end);
+#endif
+	pr_info("Setting up static identity map for 0x%lx - 0x%lx\n", addr, end);
 
 	prot |= PMD_TYPE_SECT | PMD_SECT_AP_WRITE | PMD_SECT_AF;
 
-	if (cpu_architecture() <= CPU_ARCH_ARMv5TEJ && !cpu_is_xscale())
+	if (cpu_architecture() <= CPU_ARCH_ARMv5TEJ && !cpu_is_xscale_family())
 		prot |= PMD_BIT4;
 
 	pgd += pgd_index(addr);
@@ -90,13 +116,12 @@ static int __init init_static_idmap(void)
 	if (!idmap_pgd)
 		return -ENOMEM;
 
-	pr_info("Setting up static identity map for 0x%p - 0x%p\n",
-		__idmap_text_start, __idmap_text_end);
 	identity_mapping_add(idmap_pgd, __idmap_text_start,
 			     __idmap_text_end, 0);
 
 	/* Flush L1 for the hardware to see this page table content */
-	flush_cache_louis();
+	if (!(elf_hwcap & HWCAP_LPAE))
+		flush_cache_louis();
 
 	return 0;
 }
@@ -109,6 +134,17 @@ early_initcall(init_static_idmap);
  */
 void setup_mm_for_reboot(void)
 {
+	/*
+	 * With CONFIG_CPU_TTBR0_PAN enabled, TTBCR.EPD0 is set whenever
+	 * user-space access is disabled in order to block TTBR0 page-table
+	 * walks.  The identity mapping lives at low (user-space) virtual
+	 * addresses and can only be reached via TTBR0, so we must re-enable
+	 * those walks before switching page tables.  On non-PAN kernels this
+	 * is a no-op.
+	 */
+	if (IS_ENABLED(CONFIG_CPU_TTBR0_PAN))
+		uaccess_save_and_enable();
+
 	/* Switch to the identity mapping. */
 	cpu_switch_mm(idmap_pgd, &init_mm);
 	local_flush_bp_all();

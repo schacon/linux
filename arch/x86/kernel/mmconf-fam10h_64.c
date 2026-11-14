@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * AMD Family 10h mmconfig enablement
  */
@@ -8,6 +9,7 @@
 #include <linux/pci.h>
 #include <linux/dmi.h>
 #include <linux/range.h>
+#include <linux/acpi.h>
 
 #include <asm/pci-direct.h>
 #include <linux/sort.h>
@@ -24,14 +26,14 @@ struct pci_hostbridge_probe {
 	u32 device;
 };
 
-static u64 __cpuinitdata fam10h_pci_mmconf_base;
+static u64 fam10h_pci_mmconf_base;
 
-static struct pci_hostbridge_probe pci_probes[] __cpuinitdata = {
+static struct pci_hostbridge_probe pci_probes[] = {
 	{ 0, 0x18, PCI_VENDOR_ID_AMD, 0x1200 },
 	{ 0xff, 0, PCI_VENDOR_ID_AMD, 0x1200 },
 };
 
-static int __cpuinit cmp_range(const void *x1, const void *x2)
+static int cmp_range(const void *x1, const void *x2)
 {
 	const struct range *r1 = x1;
 	const struct range *r2 = x2;
@@ -49,7 +51,7 @@ static int __cpuinit cmp_range(const void *x1, const void *x2)
 /* need to avoid (0xfd<<32), (0xfe<<32), and (0xff<<32), ht used space */
 #define FAM10H_PCI_MMCONF_BASE (0xfcULL<<32)
 #define BASE_VALID(b) ((b) + MMCONF_SIZE <= (0xfdULL<<32) || (b) >= (1ULL<<40))
-static void __cpuinit get_fam10h_pci_mmconf_base(void)
+static void get_fam10h_pci_mmconf_base(void)
 {
 	int i;
 	unsigned bus;
@@ -94,8 +96,8 @@ static void __cpuinit get_fam10h_pci_mmconf_base(void)
 		return;
 
 	/* SYS_CFG */
-	address = MSR_K8_SYSCFG;
-	rdmsrl(address, val);
+	address = MSR_AMD64_SYSCFG;
+	rdmsrq(address, val);
 
 	/* TOP_MEM2 is not enabled? */
 	if (!(val & (1<<21))) {
@@ -103,7 +105,7 @@ static void __cpuinit get_fam10h_pci_mmconf_base(void)
 	} else {
 		/* TOP_MEM2 */
 		address = MSR_K8_TOP_MEM2;
-		rdmsrl(address, val);
+		rdmsrq(address, val);
 		tom2 = max(val & 0xffffff800000ULL, 1ULL << 32);
 	}
 
@@ -166,7 +168,7 @@ out:
 	fam10h_pci_mmconf_base = base;
 }
 
-void __cpuinit fam10h_check_enable_mmcfg(void)
+void fam10h_check_enable_mmcfg(void)
 {
 	u64 val;
 	u32 address;
@@ -175,7 +177,7 @@ void __cpuinit fam10h_check_enable_mmcfg(void)
 		return;
 
 	address = MSR_FAM10H_MMIO_CONF_BASE;
-	rdmsrl(address, val);
+	rdmsrq(address, val);
 
 	/* try to make sure that AP's setting is identical to BSP setting */
 	if (val & FAM10H_MMIO_CONF_ENABLE) {
@@ -210,7 +212,7 @@ void __cpuinit fam10h_check_enable_mmcfg(void)
 	     (FAM10H_MMIO_CONF_BUSRANGE_MASK<<FAM10H_MMIO_CONF_BUSRANGE_SHIFT));
 	val |= fam10h_pci_mmconf_base | (8 << FAM10H_MMIO_CONF_BUSRANGE_SHIFT) |
 	       FAM10H_MMIO_CONF_ENABLE;
-	wrmsrl(address, val);
+	wrmsrq(address, val);
 }
 
 static int __init set_check_enable_amd_mmconf(const struct dmi_system_id *d)
@@ -230,7 +232,7 @@ static const struct dmi_system_id __initconst mmconf_dmi_table[] = {
 	{}
 };
 
-/* Called from a __cpuinit function, but only on the BSP. */
+/* Called from a non __init function, but only on the BSP. */
 void __ref check_enable_amd_mmconf_dmi(void)
 {
 	dmi_check_system(mmconf_dmi_table);

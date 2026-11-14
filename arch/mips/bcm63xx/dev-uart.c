@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
 #include <bcm63xx_cpu.h>
+#include <bcm63xx_dev_uart.h>
 
 static struct resource uart0_resources[] = {
 	{
@@ -54,7 +55,8 @@ int __init bcm63xx_uart_register(unsigned int id)
 	if (id >= ARRAY_SIZE(bcm63xx_uart_devices))
 		return -ENODEV;
 
-	if (id == 1 && (!BCMCPU_IS_6358() && !BCMCPU_IS_6368()))
+	if (id == 1 && (!BCMCPU_IS_3368() && !BCMCPU_IS_6358() &&
+		!BCMCPU_IS_6368()))
 		return -ENODEV;
 
 	if (id == 0) {

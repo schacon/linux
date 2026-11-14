@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef BCM63XX_NVRAM_H
 #define BCM63XX_NVRAM_H
 
@@ -29,5 +30,7 @@ u8 *bcm63xx_nvram_get_name(void);
  * Returns 0 on success.
  */
 int bcm63xx_nvram_get_mac_address(u8 *mac);
+
+int bcm63xx_nvram_get_psi_size(void);
 
 #endif /* BCM63XX_NVRAM_H */

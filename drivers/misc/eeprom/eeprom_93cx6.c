@@ -1,22 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2004 - 2006 rt2x00 SourceForge Project
  * <http://rt2x00.serialmonkey.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  *
  * Module: eeprom_93cx6
  * Abstract: EEPROM reader routines for 93cx6 chipsets.
  * Supported chipsets: 93c46 & 93c66.
  */
 
+#include <linux/bits.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/delay.h>
@@ -111,7 +103,7 @@ static void eeprom_93cx6_write_bits(struct eeprom_93cx6 *eeprom,
 		/*
 		 * Check if this bit needs to be set.
 		 */
-		eeprom->reg_data_in = !!(data & (1 << (i - 1)));
+		eeprom->reg_data_in = !!(data & BIT(i - 1));
 
 		/*
 		 * Write the bit to the eeprom register.
@@ -161,7 +153,7 @@ static void eeprom_93cx6_read_bits(struct eeprom_93cx6 *eeprom,
 		 * Read if the bit has been set.
 		 */
 		if (eeprom->reg_data_out)
-			buf |= (1 << (i - 1));
+			buf |= BIT(i - 1);
 
 		eeprom_93cx6_pulse_low(eeprom);
 	}
@@ -170,7 +162,7 @@ static void eeprom_93cx6_read_bits(struct eeprom_93cx6 *eeprom,
 }
 
 /**
- * eeprom_93cx6_read - Read multiple words from eeprom
+ * eeprom_93cx6_read - Read a word from eeprom
  * @eeprom: Pointer to eeprom structure
  * @word: Word index from where we should start reading
  * @data: target pointer where the information will have to be stored
@@ -194,6 +186,11 @@ void eeprom_93cx6_read(struct eeprom_93cx6 *eeprom, const u8 word,
 	command = (PCI_EEPROM_READ_OPCODE << eeprom->width) | word;
 	eeprom_93cx6_write_bits(eeprom, command,
 		PCI_EEPROM_WIDTH_OPCODE + eeprom->width);
+
+	if (has_quirk_extra_read_cycle(eeprom)) {
+		eeprom_93cx6_pulse_high(eeprom);
+		eeprom_93cx6_pulse_low(eeprom);
+	}
 
 	/*
 	 * Read the requested 16 bits.
@@ -233,6 +230,71 @@ void eeprom_93cx6_multiread(struct eeprom_93cx6 *eeprom, const u8 word,
 	}
 }
 EXPORT_SYMBOL_GPL(eeprom_93cx6_multiread);
+
+/**
+ * eeprom_93cx6_readb - Read a byte from eeprom
+ * @eeprom: Pointer to eeprom structure
+ * @byte: Byte index from where we should start reading
+ * @data: target pointer where the information will have to be stored
+ *
+ * This function will read a byte of the eeprom data
+ * into the given data pointer.
+ */
+void eeprom_93cx6_readb(struct eeprom_93cx6 *eeprom, const u8 byte,
+	u8 *data)
+{
+	u16 command;
+	u16 tmp;
+
+	/*
+	 * Initialize the eeprom register
+	 */
+	eeprom_93cx6_startup(eeprom);
+
+	/*
+	 * Select the read opcode and the byte to be read.
+	 */
+	command = (PCI_EEPROM_READ_OPCODE << (eeprom->width + 1)) | byte;
+	eeprom_93cx6_write_bits(eeprom, command,
+		PCI_EEPROM_WIDTH_OPCODE + eeprom->width + 1);
+
+	if (has_quirk_extra_read_cycle(eeprom)) {
+		eeprom_93cx6_pulse_high(eeprom);
+		eeprom_93cx6_pulse_low(eeprom);
+	}
+
+	/*
+	 * Read the requested 8 bits.
+	 */
+	eeprom_93cx6_read_bits(eeprom, &tmp, 8);
+	*data = tmp & 0xff;
+
+	/*
+	 * Cleanup eeprom register.
+	 */
+	eeprom_93cx6_cleanup(eeprom);
+}
+EXPORT_SYMBOL_GPL(eeprom_93cx6_readb);
+
+/**
+ * eeprom_93cx6_multireadb - Read multiple bytes from eeprom
+ * @eeprom: Pointer to eeprom structure
+ * @byte: Index from where we should start reading
+ * @data: target pointer where the information will have to be stored
+ * @bytes: Number of bytes that should be read.
+ *
+ * This function will read all requested bytes from the eeprom,
+ * this is done by calling eeprom_93cx6_readb() multiple times.
+ */
+void eeprom_93cx6_multireadb(struct eeprom_93cx6 *eeprom, const u8 byte,
+	u8 *data, const u16 bytes)
+{
+	unsigned int i;
+
+	for (i = 0; i < bytes; i++)
+		eeprom_93cx6_readb(eeprom, byte + i, &data[i]);
+}
+EXPORT_SYMBOL_GPL(eeprom_93cx6_multireadb);
 
 /**
  * eeprom_93cx6_wren - set the write enable state

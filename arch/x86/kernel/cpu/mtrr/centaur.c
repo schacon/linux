@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/init.h>
 #include <linux/mm.h>
 
@@ -44,15 +45,6 @@ centaur_get_free_region(unsigned long base, unsigned long size, int replace_reg)
 	return -ENOSPC;
 }
 
-/*
- * Report boot time MCR setups
- */
-void mtrr_centaur_report_mcr(int mcr, u32 lo, u32 hi)
-{
-	centaur_mcr[mcr].low = lo;
-	centaur_mcr[mcr].high = hi;
-}
-
 static void
 centaur_get_mcr(unsigned int reg, unsigned long *base,
 		unsigned long *size, mtrr_type * type)
@@ -73,26 +65,26 @@ static void
 centaur_set_mcr(unsigned int reg, unsigned long base,
 		unsigned long size, mtrr_type type)
 {
-	unsigned long low, high;
+	struct msr val;
 
 	if (size == 0) {
 		/* Disable */
-		high = low = 0;
+		val.q = 0;
 	} else {
-		high = base << PAGE_SHIFT;
+		val.h = base << PAGE_SHIFT;
 		if (centaur_mcr_type == 0) {
 			/* Only support write-combining... */
-			low = -size << PAGE_SHIFT | 0x1f;
+			val.l = -size << PAGE_SHIFT | 0x1f;
 		} else {
 			if (type == MTRR_TYPE_UNCACHABLE)
-				low = -size << PAGE_SHIFT | 0x02; /* NC */
+				val.l = -size << PAGE_SHIFT | 0x02; /* NC */
 			else
-				low = -size << PAGE_SHIFT | 0x09; /* WWO, WC */
+				val.l = -size << PAGE_SHIFT | 0x09; /* WWO, WC */
 		}
 	}
-	centaur_mcr[reg].high = high;
-	centaur_mcr[reg].low = low;
-	wrmsr(MSR_IDT_MCR0 + reg, low, high);
+	centaur_mcr[reg].high = val.h;
+	centaur_mcr[reg].low = val.l;
+	wrmsrq(MSR_IDT_MCR0 + reg, val.q);
 }
 
 static int
@@ -103,24 +95,18 @@ centaur_validate_add_page(unsigned long base, unsigned long size, unsigned int t
 	 */
 	if (type != MTRR_TYPE_WRCOMB &&
 	    (centaur_mcr_type == 0 || type != MTRR_TYPE_UNCACHABLE)) {
-		pr_warning("mtrr: only write-combining%s supported\n",
+		pr_warn("mtrr: only write-combining%s supported\n",
 			   centaur_mcr_type ? " and uncacheable are" : " is");
 		return -EINVAL;
 	}
 	return 0;
 }
 
-static const struct mtrr_ops centaur_mtrr_ops = {
-	.vendor            = X86_VENDOR_CENTAUR,
+const struct mtrr_ops centaur_mtrr_ops = {
+	.var_regs          = 8,
 	.set               = centaur_set_mcr,
 	.get               = centaur_get_mcr,
 	.get_free_region   = centaur_get_free_region,
 	.validate_add_page = centaur_validate_add_page,
 	.have_wrcomb       = positive_have_wrcomb,
 };
-
-int __init centaur_init_mtrr(void)
-{
-	set_mtrr_ops(&centaur_mtrr_ops);
-	return 0;
-}

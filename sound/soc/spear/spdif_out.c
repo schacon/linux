@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ALSA SoC SPDIF Out Audio Layer for spear processors
  *
  * Copyright (C) 2012 ST Microelectronics
  * Vipin Kumar <vipin.kumar@st.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/clk.h>
@@ -18,10 +15,12 @@
 #include <linux/ioport.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <sound/dmaengine_pcm.h>
 #include <sound/soc.h>
 #include <sound/spear_dma.h>
 #include <sound/spear_spdif.h>
 #include "spdif_out_regs.h"
+#include "spear_pcm.h"
 
 struct spdif_out_params {
 	u32 rate;
@@ -35,6 +34,8 @@ struct spdif_out_dev {
 	struct spdif_out_params saved_params;
 	u32 running;
 	void __iomem *io_base;
+	struct snd_dmaengine_dai_dma_data dma_params_tx;
+	struct snd_dmaengine_pcm_config config;
 };
 
 static void spdif_out_configure(struct spdif_out_dev *host)
@@ -62,8 +63,6 @@ static int spdif_out_startup(struct snd_pcm_substream *substream,
 	if (substream->stream != SNDRV_PCM_STREAM_PLAYBACK)
 		return -EINVAL;
 
-	snd_soc_dai_set_dma_data(cpu_dai, substream, (void *)&host->dma_params);
-
 	ret = clk_enable(host->clk);
 	if (ret)
 		return ret;
@@ -84,7 +83,6 @@ static void spdif_out_shutdown(struct snd_pcm_substream *substream,
 
 	clk_disable(host->clk);
 	host->running = false;
-	snd_soc_dai_set_dma_data(dai, substream, NULL);
 }
 
 static void spdif_out_clock(struct spdif_out_dev *host, u32 core_freq,
@@ -187,7 +185,7 @@ static int spdif_out_trigger(struct snd_pcm_substream *substream, int cmd,
 	return ret;
 }
 
-static int spdif_digital_mute(struct snd_soc_dai *dai, int mute)
+static int spdif_mute(struct snd_soc_dai *dai, int mute, int direction)
 {
 	struct spdif_out_dev *host = snd_soc_dai_get_drvdata(dai);
 	u32 val;
@@ -212,10 +210,7 @@ static int spdif_digital_mute(struct snd_soc_dai *dai, int mute)
 static int spdif_mute_get(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
-	struct snd_soc_card *card = codec->card;
-	struct snd_soc_pcm_runtime *rtd = card->rtd;
-	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct snd_soc_dai *cpu_dai = snd_kcontrol_chip(kcontrol);
 	struct spdif_out_dev *host = snd_soc_dai_get_drvdata(cpu_dai);
 
 	ucontrol->value.integer.value[0] = host->saved_params.mute;
@@ -225,16 +220,14 @@ static int spdif_mute_get(struct snd_kcontrol *kcontrol,
 static int spdif_mute_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
-	struct snd_soc_card *card = codec->card;
-	struct snd_soc_pcm_runtime *rtd = card->rtd;
-	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct snd_soc_dai *cpu_dai = snd_kcontrol_chip(kcontrol);
 	struct spdif_out_dev *host = snd_soc_dai_get_drvdata(cpu_dai);
 
 	if (host->saved_params.mute == ucontrol->value.integer.value[0])
 		return 0;
 
-	spdif_digital_mute(cpu_dai, ucontrol->value.integer.value[0]);
+	spdif_mute(cpu_dai, ucontrol->value.integer.value[0],
+		   SNDRV_PCM_STREAM_PLAYBACK);
 
 	return 1;
 }
@@ -243,18 +236,26 @@ static const struct snd_kcontrol_new spdif_out_controls[] = {
 			spdif_mute_get, spdif_mute_put),
 };
 
-int spdif_soc_dai_probe(struct snd_soc_dai *dai)
+static int spdif_soc_dai_probe(struct snd_soc_dai *dai)
 {
+	struct spdif_out_dev *host = snd_soc_dai_get_drvdata(dai);
+
+	host->dma_params_tx.filter_data = &host->dma_params;
+
+	snd_soc_dai_dma_data_set_playback(dai, &host->dma_params_tx);
+
 	return snd_soc_add_dai_controls(dai, spdif_out_controls,
 				ARRAY_SIZE(spdif_out_controls));
 }
 
 static const struct snd_soc_dai_ops spdif_out_dai_ops = {
-	.digital_mute	= spdif_digital_mute,
+	.probe = spdif_soc_dai_probe,
+	.mute_stream	= spdif_mute,
 	.startup	= spdif_out_startup,
 	.shutdown	= spdif_out_shutdown,
 	.trigger	= spdif_out_trigger,
 	.hw_params	= spdif_out_hw_params,
+	.no_capture_mute = 1,
 };
 
 static struct snd_soc_dai_driver spdif_out_dai = {
@@ -266,12 +267,12 @@ static struct snd_soc_dai_driver spdif_out_dai = {
 				 SNDRV_PCM_RATE_192000),
 		.formats = SNDRV_PCM_FMTBIT_S16_LE,
 	},
-	.probe = spdif_soc_dai_probe,
 	.ops = &spdif_out_dai_ops,
 };
 
 static const struct snd_soc_component_driver spdif_out_component = {
-	.name		= "spdif-out",
+	.name			= "spdif-out",
+	.legacy_dai_naming	= 1,
 };
 
 static int spdif_out_probe(struct platform_device *pdev)
@@ -281,30 +282,15 @@ static int spdif_out_probe(struct platform_device *pdev)
 	struct resource *res;
 	int ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res)
-		return -EINVAL;
-
-	if (!devm_request_mem_region(&pdev->dev, res->start,
-				resource_size(res), pdev->name)) {
-		dev_warn(&pdev->dev, "Failed to get memory resourse\n");
-		return -ENOENT;
-	}
-
-	host = devm_kzalloc(&pdev->dev, sizeof(*host), GFP_KERNEL);
-	if (!host) {
-		dev_warn(&pdev->dev, "kzalloc fail\n");
+	host = devm_kzalloc_obj(&pdev->dev, *host);
+	if (!host)
 		return -ENOMEM;
-	}
 
-	host->io_base = devm_ioremap(&pdev->dev, res->start,
-				resource_size(res));
-	if (!host->io_base) {
-		dev_warn(&pdev->dev, "ioremap failed\n");
-		return -ENOMEM;
-	}
+	host->io_base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
+	if (IS_ERR(host->io_base))
+		return PTR_ERR(host->io_base);
 
-	host->clk = clk_get(&pdev->dev, NULL);
+	host->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(host->clk))
 		return PTR_ERR(host->clk);
 
@@ -314,30 +300,16 @@ static int spdif_out_probe(struct platform_device *pdev)
 	host->dma_params.addr = res->start + SPDIF_OUT_FIFO_DATA;
 	host->dma_params.max_burst = 16;
 	host->dma_params.addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
-	host->dma_params.filter = pdata->filter;
 
 	dev_set_drvdata(&pdev->dev, host);
 
-	ret = snd_soc_register_component(&pdev->dev, &spdif_out_component,
-					 &spdif_out_dai, 1);
-	if (ret != 0) {
-		clk_put(host->clk);
+	ret = devm_snd_soc_register_component(&pdev->dev, &spdif_out_component,
+					      &spdif_out_dai, 1);
+	if (ret)
 		return ret;
-	}
 
-	return 0;
-}
-
-static int spdif_out_remove(struct platform_device *pdev)
-{
-	struct spdif_out_dev *host = dev_get_drvdata(&pdev->dev);
-
-	snd_soc_unregister_component(&pdev->dev);
-	dev_set_drvdata(&pdev->dev, NULL);
-
-	clk_put(host->clk);
-
-	return 0;
+	return devm_spear_pcm_platform_register(&pdev->dev, &host->config,
+						pdata->filter);
 }
 
 #ifdef CONFIG_PM
@@ -378,10 +350,8 @@ static SIMPLE_DEV_PM_OPS(spdif_out_dev_pm_ops, spdif_out_suspend, \
 
 static struct platform_driver spdif_out_driver = {
 	.probe		= spdif_out_probe,
-	.remove		= spdif_out_remove,
 	.driver		= {
 		.name	= "spdif-out",
-		.owner	= THIS_MODULE,
 		.pm	= SPDIF_OUT_DEV_PM_OPS,
 	},
 };

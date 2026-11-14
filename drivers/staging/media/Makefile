@@ -1,7 +1,9 @@
-obj-$(CONFIG_DVB_AS102)		+= as102/
-obj-$(CONFIG_DVB_CXD2099)	+= cxd2099/
-obj-$(CONFIG_LIRC_STAGING)	+= lirc/
-obj-$(CONFIG_SOLO6X10)		+= solo6x10/
-obj-$(CONFIG_VIDEO_DT3155)	+= dt3155v4l/
-obj-$(CONFIG_VIDEO_GO7007)	+= go7007/
-obj-$(CONFIG_VIDEO_DM365_VPFE)	+= davinci_vpfe/
+# SPDX-License-Identifier: GPL-2.0
+obj-$(CONFIG_INTEL_ATOMISP)     += atomisp/
+obj-$(CONFIG_VIDEO_IMX_MEDIA)	+= imx/
+obj-$(CONFIG_VIDEO_MESON_VDEC)	+= meson/vdec/
+obj-$(CONFIG_VIDEO_SUNXI)	+= sunxi/
+obj-$(CONFIG_VIDEO_TEGRA)	+= tegra-video/
+obj-$(CONFIG_VIDEO_IPU3_IMGU)	+= ipu3/
+obj-$(CONFIG_VIDEO_INTEL_IPU7)	+= ipu7/
+obj-$(CONFIG_DVB_AV7110)	+= av7110/

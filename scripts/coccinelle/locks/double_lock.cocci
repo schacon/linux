@@ -1,14 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /// Find double locks.  False positives may occur when some paths cannot
 /// occur at execution, due to the values of variables, and when there is
 /// an intervening function call that releases the lock.
 ///
 // Confidence: Moderate
-// Copyright: (C) 2010 Nicolas Palix, DIKU.  GPLv2.
-// Copyright: (C) 2010 Julia Lawall, DIKU.  GPLv2.
-// Copyright: (C) 2010 Gilles Muller, INRIA/LiP6.  GPLv2.
-// URL: http://coccinelle.lip6.fr/
+// Copyright: (C) 2010 Nicolas Palix, DIKU.
+// Copyright: (C) 2010 Julia Lawall, DIKU.
+// Copyright: (C) 2010 Gilles Muller, INRIA/LiP6.
+// URL: https://coccinelle.gitlabpages.inria.fr/website
 // Comments:
-// Options: -no_includes -include_headers
+// Options: --no-includes --include-headers
 
 virtual org
 virtual report
@@ -37,7 +38,20 @@ write_lock@p1
 write_trylock@p1
 ) (E1@p,...);
 
-@balanced@
+@r_candidate exists@
+expression x <= locked.E1;
+expression locked.E1;
+expression E2;
+identifier lock;
+position locked.p,p1,p2;
+@@
+
+lock@p1 (E1@p,...);
+... when != E1
+    when != \(x = E2\|&x\)
+lock@p2 (E1,...);
+
+@balanced depends on r_candidate@
 position p1 != locked.p1;
 position locked.p;
 identifier lock,unlock;

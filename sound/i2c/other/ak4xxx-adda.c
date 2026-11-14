@@ -1,27 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *   ALSA driver for AK4524 / AK4528 / AK4529 / AK4355 / AK4358 / AK4381
  *   AD and DA converters
  *
  *	Copyright (c) 2000-2004 Jaroslav Kysela <perex@perex.cz>,
  *				Takashi Iwai <tiwai@suse.de>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
- *
  */
 
-#include <asm/io.h>
+#include <linux/io.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
@@ -65,6 +51,31 @@ static void ak4524_reset(struct snd_akm4xxx *ak, int state)
 			snd_akm4xxx_write(ak, chip, reg,
 					  snd_akm4xxx_get(ak, chip, reg));
 	}
+}
+
+/* reset procedure for AK4529 */
+static void ak4529_reset(struct snd_akm4xxx *ak, int state)
+{
+	static const unsigned char regs[] = {
+		0x0a, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+		0x06, 0x07, 0x0b, 0x0c, 0x08,
+	};
+	unsigned int i;
+	unsigned char reg;
+
+	if (state) {
+		snd_akm4xxx_write(ak, 0, 0x09,
+				  snd_akm4xxx_get(ak, 0, 0x09) & ~0x01);
+		return;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(regs); i++) {
+		reg = regs[i];
+		snd_akm4xxx_write(ak, 0, reg,
+				  snd_akm4xxx_get(ak, 0, reg));
+	}
+	snd_akm4xxx_write(ak, 0, 0x09,
+			  snd_akm4xxx_get(ak, 0, 0x09) | 0x01);
 }
 
 /* reset procedure for AK4355 and AK4358 */
@@ -113,7 +124,7 @@ void snd_akm4xxx_reset(struct snd_akm4xxx *ak, int state)
 		ak4524_reset(ak, state);
 		break;
 	case SND_AK4529:
-		/* FIXME: needed for ak4529? */
+		ak4529_reset(ak, state);
 		break;
 	case SND_AK4355:
 		ak435X_reset(ak, state);
@@ -136,7 +147,7 @@ EXPORT_SYMBOL(snd_akm4xxx_reset);
  * Volume conversion table for non-linear volumes
  * from -63.5dB (mute) to 0dB step 0.5dB
  *
- * Used for AK4524/AK4620 input/ouput attenuation, AK4528, and
+ * Used for AK4524/AK4620 input/output attenuation, AK4528, and
  * AK5365 input attenuation
  */
 static const unsigned char vol_cvt_datt[128] = {
@@ -270,6 +281,9 @@ void snd_akm4xxx_init(struct snd_akm4xxx *ak)
 		0x07, 0x00, /* 7: ROUT muted */
 		0xff, 0xff
 	};
+	static const unsigned char ak5365_defaults[] = {
+		0x01, 0x00, 0x00, 0x2b, 0x7f, 0x7f, 0x28, 0x89,
+	};
 
 	int chip;
 	const unsigned char *ptr, *inits;
@@ -316,10 +330,12 @@ void snd_akm4xxx_init(struct snd_akm4xxx *ak)
 		ak->total_regs = 0x05;
 		break;
 	case SND_AK5365:
-		/* FIXME: any init sequence? */
 		ak->num_chips = 1;
 		ak->name = "ak5365";
 		ak->total_regs = 0x08;
+		memcpy(ak->images, ak5365_defaults, sizeof(ak5365_defaults));
+		snd_akm4xxx_set_vol(ak, 0, 0x04, 127);
+		snd_akm4xxx_set_vol(ak, 0, 0x05, 127);
 		return;
 	case SND_AK4620:
 		inits = inits_ak4620;
@@ -405,8 +421,6 @@ static int put_ak_reg(struct snd_kcontrol *kcontrol, int addr,
 		nval = mask - nval;
 	if (AK_GET_NEEDSMSB(kcontrol->private_value))
 		nval |= 0x80;
-	/* printk(KERN_DEBUG "DEBUG - AK writing reg: chip %x addr %x,
-	   nval %x\n", chip, addr, nval); */
 	snd_akm4xxx_write(ak, chip, addr, nval);
 	return 1;
 }
@@ -465,17 +479,10 @@ static int snd_akm4xxx_stereo_volume_put(struct snd_kcontrol *kcontrol,
 static int snd_akm4xxx_deemphasis_info(struct snd_kcontrol *kcontrol,
 				       struct snd_ctl_elem_info *uinfo)
 {
-	static char *texts[4] = {
+	static const char * const texts[4] = {
 		"44.1kHz", "Off", "48kHz", "32kHz",
 	};
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
-	uinfo->count = 1;
-	uinfo->value.enumerated.items = 4;
-	if (uinfo->value.enumerated.item >= 4)
-		uinfo->value.enumerated.item = 3;
-	strcpy(uinfo->value.enumerated.name,
-	       texts[uinfo->value.enumerated.item]);
-	return 0;
+	return snd_ctl_enum_info(uinfo, 1, 4, texts);
 }
 
 static int snd_akm4xxx_deemphasis_get(struct snd_kcontrol *kcontrol,
@@ -570,22 +577,13 @@ static int ak4xxx_capture_source_info(struct snd_kcontrol *kcontrol,
 {
 	struct snd_akm4xxx *ak = snd_kcontrol_chip(kcontrol);
 	int mixer_ch = AK_GET_SHIFT(kcontrol->private_value);
-	const char **input_names;
-	int  num_names, idx;
+	unsigned int num_names;
 
 	num_names = ak4xxx_capture_num_inputs(ak, mixer_ch);
 	if (!num_names)
 		return -EINVAL;
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
-	uinfo->count = 1;
-	uinfo->value.enumerated.items = num_names;
-	idx = uinfo->value.enumerated.item;
-	if (idx >= num_names)
-		return -EINVAL;
-	input_names = ak->adc_info[mixer_ch].input_names;
-	strncpy(uinfo->value.enumerated.name, input_names[idx],
-		sizeof(uinfo->value.enumerated.name));
-	return 0;
+	return snd_ctl_enum_info(uinfo, 1, num_names,
+				 ak->adc_info[mixer_ch].input_names);
 }
 
 static int ak4xxx_capture_source_get(struct snd_kcontrol *kcontrol,
@@ -805,11 +803,12 @@ static int build_adc_controls(struct snd_akm4xxx *ak)
 				return err;
 
 			memset(&knew, 0, sizeof(knew));
-			knew.name = ak->adc_info[mixer_ch].selector_name;
-			if (!knew.name) {
+			if (!ak->adc_info ||
+				!ak->adc_info[mixer_ch].selector_name) {
 				knew.name = "Capture Channel";
 				knew.index = mixer_ch + ak->idx_offset * 2;
-			}
+			} else
+				knew.name = ak->adc_info[mixer_ch].selector_name;
 
 			knew.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 			knew.info = ak4xxx_capture_source_info;
@@ -875,7 +874,6 @@ static int build_deemphasis(struct snd_akm4xxx *ak, int num_emphs)
 	return 0;
 }
 
-#ifdef CONFIG_PROC_FS
 static void proc_regs_read(struct snd_info_entry *entry,
 		struct snd_info_buffer *buffer)
 {
@@ -892,17 +890,8 @@ static void proc_regs_read(struct snd_info_entry *entry,
 
 static int proc_init(struct snd_akm4xxx *ak)
 {
-	struct snd_info_entry *entry;
-	int err;
-	err = snd_card_proc_new(ak->card, ak->name, &entry);
-	if (err < 0)
-		return err;
-	snd_info_set_text_ops(entry, ak, proc_regs_read);
-	return 0;
+	return snd_card_ro_proc_new(ak->card, ak->name, ak, proc_regs_read);
 }
-#else /* !CONFIG_PROC_FS */
-static int proc_init(struct snd_akm4xxx *ak) { return 0; }
-#endif
 
 int snd_akm4xxx_build_controls(struct snd_akm4xxx *ak)
 {
@@ -931,15 +920,3 @@ int snd_akm4xxx_build_controls(struct snd_akm4xxx *ak)
 	return 0;
 }
 EXPORT_SYMBOL(snd_akm4xxx_build_controls);
-
-static int __init alsa_akm4xxx_module_init(void)
-{
-	return 0;
-}
-        
-static void __exit alsa_akm4xxx_module_exit(void)
-{
-}
-        
-module_init(alsa_akm4xxx_module_init)
-module_exit(alsa_akm4xxx_module_exit)

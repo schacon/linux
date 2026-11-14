@@ -1,14 +1,20 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0
 # Manipulate options in a .config file from the command line
+
+myname=${0##*/}
 
 # If no prefix forced, use the default CONFIG_
 CONFIG_="${CONFIG_-CONFIG_}"
+
+# We use an uncommon delimiter for sed substitutions
+SED_DELIM=$(echo -en "\001")
 
 usage() {
 	cat >&2 <<EOL
 Manipulate options in a .config file from the command line.
 Usage:
-config options command ...
+$myname options command ...
 commands:
 	--enable|-e option   Enable option
 	--disable|-d option  Disable option
@@ -26,21 +32,22 @@ commands:
                              Disable option directly after other option
 	--module-after|-M beforeopt option
                              Turn option into module directly after other option
+	--refresh            Refresh the config using old settings
 
 	commands can be repeated multiple times
 
 options:
 	--file config-file   .config file to change (default .config)
-	--keep-case|-k       Keep next symbols' case (dont' upper-case it)
+	--keep-case|-k       Keep next symbols' case (don't upper-case it)
 
-config doesn't check the validity of the .config file. This is done at next
+$myname doesn't check the validity of the .config file. This is done at next
 make time.
 
-By default, config will upper-case the given symbol. Use --keep-case to keep
+By default, $myname will upper-case the given symbol. Use --keep-case to keep
 the case of all following symbols unchanged.
 
-config uses 'CONFIG_' as the default symbol prefix. Set the environment
-variable CONFIG_ to the prefix to use. Eg.: CONFIG_="FOO_" config ...
+$myname uses 'CONFIG_' as the default symbol prefix. Set the environment
+variable CONFIG_ to the prefix to use. Eg.: CONFIG_="FOO_" $myname ...
 EOL
 	exit 1
 }
@@ -60,15 +67,49 @@ checkarg() {
 	fi
 }
 
+txt_append() {
+	local anchor="$1"
+	local insert="$2"
+	local infile="$3"
+
+	# sed append cmd: 'a\' + newline + text + newline
+	cmd="$(printf "a\\%b$insert" "\n")"
+
+	# We don't really need a backup file, but in-place editing with backup
+	# skipped is not portable due to different implementations parsing
+	# arguments in incompatible manners.
+	# Create a backup file anyway to ensure portability. The file will be
+	# deleted on exit.
+	sed -E -i.swp -e "/$anchor/$cmd" "$infile"
+	SED_EDITED=1
+}
+
+txt_subst() {
+	local before="$1"
+	local after="$2"
+	local infile="$3"
+
+	sed -E -i.swp -e "s$SED_DELIM$before$SED_DELIM$after$SED_DELIM" "$infile"
+	SED_EDITED=1
+}
+
+txt_delete() {
+	local text="$1"
+	local infile="$2"
+
+	sed -E -i.swp -e "/$text/d" "$infile"
+	SED_EDITED=1
+}
+
 set_var() {
 	local name=$1 new=$2 before=$3
 
-	name_re="^($name=|# $name is not set)"
+	name_re="^($name=.*|# $name is not set)"
 	before_re="^($before=|# $before is not set)"
 	if test -n "$before" && grep -Eq "$before_re" "$FN"; then
-		sed -ri "/$before_re/a $new" "$FN"
+		txt_append "$before_re" "$new" "$FN"
 	elif grep -Eq "$name_re" "$FN"; then
-		sed -ri "s:$name_re.*:$new:" "$FN"
+		txt_subst "$name_re" "$new" "$FN"
 	else
 		echo "$new" >>"$FN"
 	fi
@@ -77,19 +118,33 @@ set_var() {
 undef_var() {
 	local name=$1
 
-	sed -ri "/^($name=|# $name is not set)/d" "$FN"
+	txt_delete "^($name=|# $name is not set)" "$FN"
 }
 
-if [ "$1" = "--file" ]; then
-	FN="$2"
-	if [ "$FN" = "" ] ; then
-		usage
+SED_EDITED=0
+on_exit() {
+	if [ "$SED_EDITED" -ge 1 ]; then
+		rm -f "$FN.swp"
 	fi
-	shift 2
-else
-	FN=.config
-fi
+}
+trap on_exit EXIT
 
+FN=.config
+CMDS=()
+while [[ $# -gt 0 ]]; do
+	if [ "$1" = "--file" ]; then
+		if [ "$2" = "" ]; then
+			usage
+		fi
+		FN="$2"
+		shift 2
+	else
+		CMDS+=("$1")
+		shift
+	fi
+done
+
+set -- "${CMDS[@]}"
 if [ "$1" = "" ] ; then
 	usage
 fi
@@ -105,7 +160,7 @@ while [ "$1" != "" ] ; do
 		;;
 	--refresh)
 		;;
-	--*-after)
+	--*-after|-E|-D|-M)
 		checkarg "$1"
 		A=$ARG
 		checkarg "$2"
@@ -173,14 +228,13 @@ while [ "$1" != "" ] ; do
 		set_var "${CONFIG_}$B" "${CONFIG_}$B=m" "${CONFIG_}$A"
 		;;
 
-	# undocumented because it ignores --file (fixme)
 	--refresh)
-		yes "" | make oldconfig
+		yes "" | make oldconfig KCONFIG_CONFIG=$FN
 		;;
 
 	*)
+		echo "bad command: $CMD" >&2
 		usage
 		;;
 	esac
 done
-

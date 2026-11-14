@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* drivers/rtc/rtc-rx4581.c
  *
  * written by Torben Hohn <torbenh@linutronix.de>
@@ -7,10 +8,6 @@
  *
  * Copyright (C) 2006 8D Technologies inc.
  * Copyright (C) 2004 Compulab Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Driver for MAX6902 spi RTC
  *
@@ -22,13 +19,8 @@
  * Author: Martyn Welch <martyn.welch@ge.com>
  * Copyright 2008 GE Intelligent Platforms Embedded Systems, Inc.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  * Based on: rtc-pcf8563.c (An I2C driver for the Philips PCF8563 RTC)
  * Copyright 2005-06 Tower Technologies
- *
  */
 
 #include <linux/module.h>
@@ -172,11 +164,7 @@ static int rx4581_get_datetime(struct device *dev, struct rtc_time *tm)
 		tm->tm_sec, tm->tm_min, tm->tm_hour,
 		tm->tm_mday, tm->tm_mon, tm->tm_year, tm->tm_wday);
 
-	err = rtc_valid_tm(tm);
-	if (err < 0)
-		dev_err(dev, "retrieved date/time is not valid.\n");
-
-	return err;
+	return 0;
 }
 
 static int rx4581_set_datetime(struct device *dev, struct rtc_time *tm)
@@ -282,11 +270,6 @@ static int rx4581_probe(struct spi_device *spi)
 	return 0;
 }
 
-static int rx4581_remove(struct spi_device *spi)
-{
-	return 0;
-}
-
 static const struct spi_device_id rx4581_id[] = {
 	{ "rx4581", 0 },
 	{ }
@@ -296,10 +279,8 @@ MODULE_DEVICE_TABLE(spi, rx4581_id);
 static struct spi_driver rx4581_driver = {
 	.driver = {
 		.name	= "rtc-rx4581",
-		.owner	= THIS_MODULE,
 	},
 	.probe	= rx4581_probe,
-	.remove = rx4581_remove,
 	.id_table = rx4581_id,
 };
 

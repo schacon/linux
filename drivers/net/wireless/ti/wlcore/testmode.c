@@ -1,34 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * This file is part of wl1271
  *
  * Copyright (C) 2010 Nokia Corporation
  *
  * Contact: Luciano Coelho <luciano.coelho@nokia.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
- *
  */
 #include "testmode.h"
 
+#include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <net/genetlink.h>
 
 #include "wlcore.h"
 #include "debug.h"
 #include "acx.h"
-#include "ps.h"
 #include "io.h"
 
 #define WL1271_TM_MAX_DATA_LENGTH 1024
@@ -59,7 +45,7 @@ enum wl1271_tm_attrs {
 };
 #define WL1271_TM_ATTR_MAX (__WL1271_TM_ATTR_AFTER_LAST - 1)
 
-static struct nla_policy wl1271_tm_policy[WL1271_TM_ATTR_MAX + 1] = {
+static const struct nla_policy wl1271_tm_policy[WL1271_TM_ATTR_MAX + 1] = {
 	[WL1271_TM_ATTR_CMD_ID] =	{ .type = NLA_U32 },
 	[WL1271_TM_ATTR_ANSWER] =	{ .type = NLA_U8 },
 	[WL1271_TM_ATTR_DATA] =		{ .type = NLA_BINARY,
@@ -97,7 +83,7 @@ static int wl1271_tm_cmd_test(struct wl1271 *wl, struct nlattr *tb[])
 		goto out;
 	}
 
-	ret = wl1271_ps_elp_wakeup(wl);
+	ret = pm_runtime_resume_and_get(wl->dev);
 	if (ret < 0)
 		goto out;
 
@@ -141,7 +127,7 @@ static int wl1271_tm_cmd_test(struct wl1271 *wl, struct nlattr *tb[])
 	}
 
 out_sleep:
-	wl1271_ps_elp_sleep(wl);
+	pm_runtime_put_autosuspend(wl->dev);
 out:
 	mutex_unlock(&wl->mutex);
 
@@ -169,17 +155,18 @@ static int wl1271_tm_cmd_interrogate(struct wl1271 *wl, struct nlattr *tb[])
 		goto out;
 	}
 
-	ret = wl1271_ps_elp_wakeup(wl);
+	ret = pm_runtime_resume_and_get(wl->dev);
 	if (ret < 0)
 		goto out;
 
-	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	cmd = kzalloc_obj(*cmd);
 	if (!cmd) {
 		ret = -ENOMEM;
 		goto out_sleep;
 	}
 
-	ret = wl1271_cmd_interrogate(wl, ie_id, cmd, sizeof(*cmd));
+	ret = wl1271_cmd_interrogate(wl, ie_id, cmd,
+				     sizeof(struct acx_header), sizeof(*cmd));
 	if (ret < 0) {
 		wl1271_warning("testmode cmd interrogate failed: %d", ret);
 		goto out_free;
@@ -204,7 +191,7 @@ static int wl1271_tm_cmd_interrogate(struct wl1271 *wl, struct nlattr *tb[])
 out_free:
 	kfree(cmd);
 out_sleep:
-	wl1271_ps_elp_sleep(wl);
+	pm_runtime_put_autosuspend(wl->dev);
 out:
 	mutex_unlock(&wl->mutex);
 
@@ -297,7 +284,8 @@ static int wl1271_tm_cmd_set_plt_mode(struct wl1271 *wl, struct nlattr *tb[])
 		ret = wl1271_plt_stop(wl);
 		break;
 	case PLT_ON:
-		ret = wl1271_plt_start(wl, PLT_ON);
+	case PLT_CHIP_AWAKE:
+		ret = wl1271_plt_start(wl, val);
 		break;
 	case PLT_FEM_DETECT:
 		ret = wl1271_tm_detect_fem(wl, tb);
@@ -356,20 +344,30 @@ out:
 	return ret;
 }
 
-int wl1271_tm_cmd(struct ieee80211_hw *hw, void *data, int len)
+int wl1271_tm_cmd(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+		  void *data, int len)
 {
 	struct wl1271 *wl = hw->priv;
 	struct nlattr *tb[WL1271_TM_ATTR_MAX + 1];
+	u32 nla_cmd;
 	int err;
 
-	err = nla_parse(tb, WL1271_TM_ATTR_MAX, data, len, wl1271_tm_policy);
+	err = nla_parse_deprecated(tb, WL1271_TM_ATTR_MAX, data, len,
+				   wl1271_tm_policy, NULL);
 	if (err)
 		return err;
 
 	if (!tb[WL1271_TM_ATTR_CMD_ID])
 		return -EINVAL;
 
-	switch (nla_get_u32(tb[WL1271_TM_ATTR_CMD_ID])) {
+	nla_cmd = nla_get_u32(tb[WL1271_TM_ATTR_CMD_ID]);
+
+	/* Only SET_PLT_MODE is allowed in case of mode PLT_CHIP_AWAKE */
+	if (wl->plt_mode == PLT_CHIP_AWAKE &&
+	    nla_cmd != WL1271_TM_CMD_SET_PLT_MODE)
+		return -EOPNOTSUPP;
+
+	switch (nla_cmd) {
 	case WL1271_TM_CMD_TEST:
 		return wl1271_tm_cmd_test(wl, tb);
 	case WL1271_TM_CMD_INTERROGATE:

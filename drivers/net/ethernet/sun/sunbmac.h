@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* $Id: sunbmac.h,v 1.7 2000/07/11 22:35:22 davem Exp $
  * sunbmac.h: Defines for the Sun "Big MAC" 100baseT ethernet cards.
  *
@@ -204,7 +205,7 @@
 #define FRAME_WRITE           0x50020000
 #define FRAME_READ            0x60020000
 
-/* Tranceiver registers. */
+/* Transceiver registers. */
 #define TCVR_PAL_SERIAL       0x00000001 /* Enable serial mode              */
 #define TCVR_PAL_EXTLBACK     0x00000002 /* Enable external loopback        */
 #define TCVR_PAL_MSENSE       0x00000004 /* Media sense                     */
@@ -291,7 +292,7 @@ struct bigmac {
 	void __iomem	*bregs;	/* BigMAC Registers                   */
 	void __iomem	*tregs;	/* BigMAC Transceiver                 */
 	struct bmac_init_block	*bmac_block;	/* RX and TX descriptors */
-	__u32			 bblock_dvma;	/* RX and TX descriptors */
+	dma_addr_t		bblock_dvma;	/* RX and TX descriptors */
 
 	spinlock_t		lock;
 
@@ -311,7 +312,6 @@ struct bigmac {
 	enum bigmac_timer_state	timer_state;
 	unsigned int		timer_ticks;
 
-	struct net_device_stats	enet_stats;
 	struct platform_device	*qec_op;
 	struct platform_device	*bigmac_op;
 	struct net_device	*dev;

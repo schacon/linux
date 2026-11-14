@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IPVS:        Destination Hashing scheduling module
  *
@@ -6,13 +7,7 @@
  *              Inspired by the consistent hashing scheduler patch from
  *              Thomas Proell <proellt@gmx.de>
  *
- *              This program is free software; you can redistribute it and/or
- *              modify it under the terms of the GNU General Public License
- *              as published by the Free Software Foundation; either version
- *              2 of the License, or (at your option) any later version.
- *
  * Changes:
- *
  */
 
 /*
@@ -35,14 +30,14 @@
  *
  */
 
-#define KMSG_COMPONENT "IPVS"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "IPVS: " fmt
 
 #include <linux/ip.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
+#include <linux/hash.h>
 
 #include <net/ip_vs.h>
 
@@ -81,7 +76,7 @@ static inline unsigned int ip_vs_dh_hashkey(int af, const union nf_inet_addr *ad
 		addr_fold = addr->ip6[0]^addr->ip6[1]^
 			    addr->ip6[2]^addr->ip6[3];
 #endif
-	return (ntohl(addr_fold)*2654435761UL) & IP_VS_DH_TAB_MASK;
+	return hash_32(ntohl(addr_fold), IP_VS_DH_TAB_BITS);
 }
 
 
@@ -158,12 +153,12 @@ static int ip_vs_dh_init_svc(struct ip_vs_service *svc)
 	struct ip_vs_dh_state *s;
 
 	/* allocate the DH table for this service */
-	s = kzalloc(sizeof(struct ip_vs_dh_state), GFP_KERNEL);
+	s = kzalloc_obj(struct ip_vs_dh_state);
 	if (s == NULL)
 		return -ENOMEM;
 
 	svc->sched_data = s;
-	IP_VS_DBG(6, "DH hash table (memory=%Zdbytes) allocated for "
+	IP_VS_DBG(6, "DH hash table (memory=%zdbytes) allocated for "
 		  "current service\n",
 		  sizeof(struct ip_vs_dh_bucket)*IP_VS_DH_TAB_SIZE);
 
@@ -183,7 +178,7 @@ static void ip_vs_dh_done_svc(struct ip_vs_service *svc)
 
 	/* release the table itself */
 	kfree_rcu(s, rcu_head);
-	IP_VS_DBG(6, "DH hash table (memory=%Zdbytes) released\n",
+	IP_VS_DBG(6, "DH hash table (memory=%zdbytes) released\n",
 		  sizeof(struct ip_vs_dh_bucket)*IP_VS_DH_TAB_SIZE);
 }
 
@@ -201,42 +196,28 @@ static int ip_vs_dh_dest_changed(struct ip_vs_service *svc,
 
 
 /*
- *      If the dest flags is set with IP_VS_DEST_F_OVERLOAD,
- *      consider that the server is overloaded here.
- */
-static inline int is_overloaded(struct ip_vs_dest *dest)
-{
-	return dest->flags & IP_VS_DEST_F_OVERLOAD;
-}
-
-
-/*
  *      Destination hashing scheduling
  */
 static struct ip_vs_dest *
-ip_vs_dh_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
+ip_vs_dh_schedule(struct ip_vs_service *svc, const struct sk_buff *skb,
+		  struct ip_vs_iphdr *iph)
 {
 	struct ip_vs_dest *dest;
 	struct ip_vs_dh_state *s;
-	struct ip_vs_iphdr iph;
-
-	ip_vs_fill_iph_addr_only(svc->af, skb, &iph);
 
 	IP_VS_DBG(6, "%s(): Scheduling...\n", __func__);
 
 	s = (struct ip_vs_dh_state *) svc->sched_data;
-	dest = ip_vs_dh_get(svc->af, s, &iph.daddr);
-	if (!dest
-	    || !(dest->flags & IP_VS_DEST_F_AVAILABLE)
-	    || atomic_read(&dest->weight) <= 0
-	    || is_overloaded(dest)) {
+	dest = ip_vs_dh_get(svc->af, s, &iph->daddr);
+	if (!dest || atomic_read(&dest->weight) <= 0 ||
+	    ip_vs_dest_is_overloaded(dest)) {
 		ip_vs_scheduler_err(svc, "no destination available");
 		return NULL;
 	}
 
 	IP_VS_DBG_BUF(6, "DH: destination IP address %s --> server %s:%d\n",
-		      IP_VS_DBG_ADDR(svc->af, &iph.daddr),
-		      IP_VS_DBG_ADDR(svc->af, &dest->addr),
+		      IP_VS_DBG_ADDR(svc->af, &iph->daddr),
+		      IP_VS_DBG_ADDR(dest->af, &dest->addr),
 		      ntohs(dest->port));
 
 	return dest;
@@ -276,3 +257,4 @@ static void __exit ip_vs_dh_cleanup(void)
 module_init(ip_vs_dh_init);
 module_exit(ip_vs_dh_cleanup);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("ipvs destination hashing scheduler");

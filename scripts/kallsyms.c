@@ -5,7 +5,15 @@
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
- * Usage: nm -n vmlinux | scripts/kallsyms [--all-symbols] > symbols.S
+ * Usage: kallsyms [--all-symbols] [--pc-relative] [--sysmap=out.map] in out.bin > out.S
+ *        kallsyms --sysmap=out.map in
+ *
+ *      in is vmlinux; an empty file stands for the first link, which has no
+ *  symbols yet, and gives an empty table. --sysmap also writes the symbols
+ *  in System.map format.
+ *
+ *      The byte tables go to out.bin and are pulled into out.S with .incbin;
+ *  wider tables stay assembler source for endianness and relocations.
  *
  *      Table compression uses all the unused char codes on the symbols and
  *  maps these to the most used substrings (tokens). For instance, it might
@@ -18,190 +26,207 @@
  *
  */
 
+#include <getopt.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <xalloc.h>
 
-#ifndef ARRAY_SIZE
-#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
-#endif
+#include "kallsyms.h"
 
-#define KSYM_NAME_LEN		128
+#define KSYM_NAME_LEN		512
 
 struct sym_entry {
 	unsigned long long addr;
 	unsigned int len;
-	unsigned int start_pos;
-	unsigned char *sym;
+	unsigned int seq;
+	unsigned char sym[];
 };
 
-struct text_range {
-	const char *stext, *etext;
+struct addr_range {
+	const char *start_sym, *end_sym;
 	unsigned long long start, end;
 };
 
 static unsigned long long _text;
-static struct text_range text_ranges[] = {
+static struct addr_range text_ranges[] = {
 	{ "_stext",     "_etext"     },
 	{ "_sinittext", "_einittext" },
-	{ "_stext_l1",  "_etext_l1"  },	/* Blackfin on-chip L1 inst SRAM */
-	{ "_stext_l2",  "_etext_l2"  },	/* Blackfin on-chip L2 SRAM */
 };
 #define text_range_text     (&text_ranges[0])
 #define text_range_inittext (&text_ranges[1])
 
-static struct sym_entry *table;
+static struct sym_entry **table;
 static unsigned int table_size, table_cnt;
-static int all_symbols = 0;
-static char symbol_prefix_char = '\0';
+static int all_symbols;
+static int pc_relative;
 
-int token_profit[0x10000];
+/* A dynamic array of symbols, encoded by symbol index. */
+struct sym_arr {
+	unsigned int *sym_indexes;
+	unsigned int cnt, cap;
+};
+
+/* Every pair of bytes is a token. */
+#define NR_TOKENS	0x10000
+
+static int token_profit[NR_TOKENS];
+static struct sym_arr token_syms[NR_TOKENS];
 
 /* the table that holds the result of the compression */
-unsigned char best_table[256][2];
-unsigned char best_table_len[256];
+static unsigned char best_table[256][2];
+static unsigned char best_table_len[256];
 
+static unsigned int sym_arr_last(const struct sym_arr *arr)
+{
+	return arr->cnt ? arr->sym_indexes[arr->cnt - 1] : UINT_MAX;
+}
+
+static void sym_arr_maybe_expand(struct sym_arr *arr)
+{
+	if (arr->cap > arr->cnt)
+		return;
+
+	arr->cap = arr->cap ? arr->cap * 2 : 16;
+	arr->sym_indexes = xrealloc(arr->sym_indexes,
+				    arr->cap * sizeof(*arr->sym_indexes));
+}
+
+static void sym_arr_add(struct sym_arr *arr, unsigned int sym_idx)
+{
+	sym_arr_maybe_expand(arr);
+	arr->sym_indexes[arr->cnt++] = sym_idx;
+}
+
+static void sym_arr_free(struct sym_arr *arr)
+{
+	free(arr->sym_indexes);
+	arr->sym_indexes = NULL;
+	arr->cnt = 0;
+	arr->cap = 0;
+}
 
 static void usage(void)
 {
-	fprintf(stderr, "Usage: kallsyms [--all-symbols] [--symbol-prefix=<prefix char>] < in.map > out.S\n");
+	fprintf(stderr, "Usage: kallsyms [--all-symbols] [--pc-relative] [--sysmap=out.map]\n"
+			"                in out.bin > out.S\n"
+			"       kallsyms --sysmap=out.map vmlinux\n");
 	exit(1);
 }
 
-/*
- * This ignores the intensely annoying "mapping symbols" found
- * in ARM ELF files: $a, $t and $d.
- */
-static inline int is_arm_mapping_symbol(const char *str)
+static char *sym_entry_name(const struct sym_entry *s)
 {
-	return str[0] == '$' && strchr("atd", str[1])
-	       && (str[2] == '\0' || str[2] == '.');
+	return (char *)s->sym + 1;
 }
 
-static int read_symbol_tr(const char *sym, unsigned long long addr)
+static bool is_ignored_symbol(const char *name, char type)
+{
+	if (type == 'u' || type == 'n')
+		return true;
+
+	if (toupper(type) == 'A') {
+		/* Keep these useful absolute symbols */
+		if (strcmp(name, "__kernel_syscall_via_break") &&
+		    strcmp(name, "__kernel_syscall_via_epc") &&
+		    strcmp(name, "__kernel_sigtramp") &&
+		    strcmp(name, "__gp"))
+			return true;
+	}
+
+	return false;
+}
+
+static void check_symbol_range(const char *sym, unsigned long long addr,
+			       struct addr_range *ranges, int entries)
 {
 	size_t i;
-	struct text_range *tr;
+	struct addr_range *ar;
 
-	for (i = 0; i < ARRAY_SIZE(text_ranges); ++i) {
-		tr = &text_ranges[i];
+	for (i = 0; i < entries; ++i) {
+		ar = &ranges[i];
 
-		if (strcmp(sym, tr->stext) == 0) {
-			tr->start = addr;
-			return 0;
-		} else if (strcmp(sym, tr->etext) == 0) {
-			tr->end = addr;
-			return 0;
+		if (strcmp(sym, ar->start_sym) == 0) {
+			ar->start = addr;
+			return;
+		} else if (strcmp(sym, ar->end_sym) == 0) {
+			ar->end = addr;
+			return;
 		}
 	}
-
-	return 1;
 }
 
-static int read_symbol(FILE *in, struct sym_entry *s)
+static struct sym_entry *add_symbol(unsigned long long addr, char type,
+				    const char *name)
 {
-	char str[500];
-	char *sym, stype;
-	int rc;
+	size_t len = strlen(name);
+	struct sym_entry *sym;
 
-	rc = fscanf(in, "%llx %c %499s\n", &s->addr, &stype, str);
-	if (rc != 3) {
-		if (rc != EOF && fgets(str, 500, in) == NULL)
-			fprintf(stderr, "Read error or end of file.\n");
-		return -1;
+	if (len >= KSYM_NAME_LEN) {
+		fprintf(stderr, "Symbol %s too long for kallsyms (%zu >= %d).\n"
+				"Please increase KSYM_NAME_LEN both in kernel and kallsyms.c\n",
+			name, len, KSYM_NAME_LEN);
+		return NULL;
 	}
 
-	sym = str;
-	/* skip prefix char */
-	if (symbol_prefix_char && str[0] == symbol_prefix_char)
-		sym++;
+	if (strcmp(name, "_text") == 0)
+		_text = addr;
 
 	/* Ignore most absolute/undefined (?) symbols. */
-	if (strcmp(sym, "_text") == 0)
-		_text = s->addr;
-	else if (read_symbol_tr(sym, s->addr) == 0)
-		/* nothing to do */;
-	else if (toupper(stype) == 'A')
-	{
-		/* Keep these useful absolute symbols */
-		if (strcmp(sym, "__kernel_syscall_via_break") &&
-		    strcmp(sym, "__kernel_syscall_via_epc") &&
-		    strcmp(sym, "__kernel_sigtramp") &&
-		    strcmp(sym, "__gp"))
-			return -1;
+	if (is_ignored_symbol(name, type))
+		return NULL;
 
-	}
-	else if (toupper(stype) == 'U' ||
-		 is_arm_mapping_symbol(sym))
-		return -1;
-	/* exclude also MIPS ELF local symbols ($L123 instead of .L123) */
-	else if (str[0] == '$')
-		return -1;
-	/* exclude debugging symbols */
-	else if (stype == 'N')
-		return -1;
+	check_symbol_range(name, addr, text_ranges, ARRAY_SIZE(text_ranges));
 
 	/* include the type field in the symbol name, so that it gets
 	 * compressed together */
-	s->len = strlen(str) + 1;
-	s->sym = malloc(s->len + 1);
-	if (!s->sym) {
-		fprintf(stderr, "kallsyms failure: "
-			"unable to allocate required amount of memory\n");
-		exit(EXIT_FAILURE);
-	}
-	strcpy((char *)s->sym + 1, str);
-	s->sym[0] = stype;
+	len++;
 
-	return 0;
+	sym = xmalloc(sizeof(*sym) + len + 1);
+	sym->addr = addr;
+	sym->len = len;
+	sym->sym[0] = type;
+	strcpy(sym_entry_name(sym), name);
+
+	return sym;
 }
 
-static int symbol_valid_tr(struct sym_entry *s)
+static int symbol_in_range(const struct sym_entry *s,
+			   const struct addr_range *ranges, int entries)
 {
 	size_t i;
-	struct text_range *tr;
+	const struct addr_range *ar;
 
-	for (i = 0; i < ARRAY_SIZE(text_ranges); ++i) {
-		tr = &text_ranges[i];
+	for (i = 0; i < entries; ++i) {
+		ar = &ranges[i];
 
-		if (s->addr >= tr->start && s->addr <= tr->end)
+		if (s->addr >= ar->start && s->addr <= ar->end)
 			return 1;
 	}
 
 	return 0;
 }
 
-static int symbol_valid(struct sym_entry *s)
+static int symbol_valid(const struct sym_entry *s)
 {
-	/* Symbols which vary between passes.  Passes 1 and 2 must have
-	 * identical symbol lists.  The kallsyms_* symbols below are only added
-	 * after pass 1, they would be included in pass 2 when --all-symbols is
-	 * specified so exclude them to get a stable symbol list.
-	 */
-	static char *special_symbols[] = {
-		"kallsyms_addresses",
-		"kallsyms_num_syms",
-		"kallsyms_names",
-		"kallsyms_markers",
-		"kallsyms_token_table",
-		"kallsyms_token_index",
-
-	/* Exclude linker generated symbols which vary between passes */
-		"_SDA_BASE_",		/* ppc */
-		"_SDA2_BASE_",		/* ppc */
-		NULL };
-	int i;
-	int offset = 1;
-
-	/* skip prefix char */
-	if (symbol_prefix_char && *(s->sym + 1) == symbol_prefix_char)
-		offset++;
+	const char *name = sym_entry_name(s);
 
 	/* if --all-symbols is not specified, then symbols outside the text
 	 * and inittext sections are discarded */
 	if (!all_symbols) {
-		if (symbol_valid_tr(s) == 0)
+		/*
+		 * Symbols starting with __start and __stop are used to denote
+		 * section boundaries, and should always be included:
+		 */
+		if (string_starts_with(name, "__start_") ||
+		    string_starts_with(name, "__stop_"))
+			return 1;
+
+		if (symbol_in_range(s, text_ranges,
+				    ARRAY_SIZE(text_ranges)) == 0)
 			return 0;
 		/* Corner case.  Discard any symbols with the same value as
 		 * _etext _einittext; they can move between pass 1 and 2 when
@@ -210,57 +235,114 @@ static int symbol_valid(struct sym_entry *s)
 		 * rules.
 		 */
 		if ((s->addr == text_range_text->end &&
-				strcmp((char *)s->sym + offset, text_range_text->etext)) ||
+		     strcmp(name, text_range_text->end_sym)) ||
 		    (s->addr == text_range_inittext->end &&
-				strcmp((char *)s->sym + offset, text_range_inittext->etext)))
+		     strcmp(name, text_range_inittext->end_sym)))
 			return 0;
 	}
-
-	/* Exclude symbols which vary between passes. */
-	if (strstr((char *)s->sym + offset, "_compiled."))
-		return 0;
-
-	for (i = 0; special_symbols[i]; i++)
-		if( strcmp((char *)s->sym + offset, special_symbols[i]) == 0 )
-			return 0;
 
 	return 1;
 }
 
-static void read_map(FILE *in)
+/* remove all the invalid symbols from the table */
+static void shrink_table(void)
 {
-	while (!feof(in)) {
-		if (table_cnt >= table_size) {
-			table_size += 10000;
-			table = realloc(table, sizeof(*table) * table_size);
-			if (!table) {
-				fprintf(stderr, "out of memory\n");
-				exit (1);
-			}
-		}
-		if (read_symbol(in, &table[table_cnt]) == 0) {
-			table[table_cnt].start_pos = table_cnt;
-			table_cnt++;
+	unsigned int i, pos;
+
+	pos = 0;
+	for (i = 0; i < table_cnt; i++) {
+		if (symbol_valid(table[i])) {
+			if (pos != i)
+				table[pos] = table[i];
+			pos++;
+		} else {
+			free(table[i]);
 		}
 	}
+	table_cnt = pos;
 }
 
-static void output_label(char *label)
+static void add_table_entry(struct sym_entry *sym)
 {
-	if (symbol_prefix_char)
-		printf(".globl %c%s\n", symbol_prefix_char, label);
-	else
-		printf(".globl %s\n", label);
-	printf("\tALGN\n");
-	if (symbol_prefix_char)
-		printf("%c%s:\n", symbol_prefix_char, label);
-	else
-		printf("%s:\n", label);
+	sym->seq = table_cnt;
+
+	if (table_cnt >= table_size) {
+		table_size = table_size ? table_size * 2 : 10000;
+		table = xrealloc(table, sizeof(*table) * table_size);
+	}
+
+	table[table_cnt++] = sym;
+}
+
+static bool file_is_empty(const char *path)
+{
+	struct stat st;
+
+	if (stat(path, &st)) {
+		perror(path);
+		exit(EXIT_FAILURE);
+	}
+
+	return st.st_size == 0;
+}
+
+/*
+ * Read the symbols from vmlinux, writing System.map if asked to. The first
+ * link has no symbols yet: an empty file gives an empty table.
+ */
+static void read_elf(const char *path, FILE *sysmap_out)
+{
+	struct sysmap *map;
+	size_t i;
+
+	if (file_is_empty(path))
+		return;
+
+	map = sysmap_read(path);
+	if (sysmap_out)
+		sysmap_write(map, sysmap_out);
+
+	for (i = 0; i < map->nr_syms; i++) {
+		const struct sysmap_symbol *s = &map->syms[i];
+		struct sym_entry *sym = add_symbol(s->addr, s->type, s->name);
+
+		if (sym)
+			add_table_entry(sym);
+	}
+
+	sysmap_free(map);
+}
+
+static void output_label(const char *label)
+{
+	printf(".globl %s\n", label);
+	printf("\t.balign 4\n");
+	printf("%s:\n", label);
+}
+
+static long bin_pos(FILE *file)
+{
+	const long pos = ftell(file);
+
+	if (pos < 0) {
+		perror("kallsyms: ftell");
+		exit(EXIT_FAILURE);
+	}
+
+	return pos;
+}
+
+static void write_incbin(const char *filename, long start, long end)
+{
+	if (start >= end)
+		return;
+
+	printf("\t.incbin \"%s\", %ld, %ld\n", filename, start, end - start);
 }
 
 /* uncompress a compressed symbol. When this function is called, the best table
  * might still be compressed itself, so the function needs to be recursive */
-static int expand_symbol(unsigned char *data, int len, char *result)
+static int expand_symbol(const unsigned char *data, int len, char *result)
 {
 	int c, rlen, total=0;
 
@@ -285,136 +367,257 @@ static int expand_symbol(unsigned char *data, int len, char *result)
 	return total;
 }
 
-static void write_src(void)
+static int compare_names(const void *a, const void *b)
 {
-	unsigned int i, k, off;
-	unsigned int best_idx[256];
-	unsigned int *markers;
-	char buf[KSYM_NAME_LEN];
+	int ret;
+	const struct sym_entry *sa = *(const struct sym_entry **)a;
+	const struct sym_entry *sb = *(const struct sym_entry **)b;
 
-	printf("#include <asm/types.h>\n");
-	printf("#if BITS_PER_LONG == 64\n");
-	printf("#define PTR .quad\n");
-	printf("#define ALGN .align 8\n");
-	printf("#else\n");
-	printf("#define PTR .long\n");
-	printf("#define ALGN .align 4\n");
-	printf("#endif\n");
+	ret = strcmp(sym_entry_name(sa), sym_entry_name(sb));
+	if (!ret) {
+		if (sa->addr > sb->addr)
+			return 1;
+		else if (sa->addr < sb->addr)
+			return -1;
+
+		/* keep old order */
+		return (int)(sa->seq - sb->seq);
+	}
+
+	return ret;
+}
+
+static void sort_symbols_by_name(void)
+{
+	qsort(table, table_cnt, sizeof(table[0]), compare_names);
+}
+
+static void write_src(FILE *out_bin_file, const char *out_bin_name)
+{
+	unsigned int i, off;
+	unsigned int best_idx[256];
+	unsigned int *markers, markers_cnt;
+	long bin_start;
+	char buf[KSYM_NAME_LEN];
 
 	printf("\t.section .rodata, \"a\"\n");
 
-	/* Provide proper symbols relocatability by their '_text'
-	 * relativeness.  The symbol names cannot be used to construct
-	 * normal symbol references as the list of symbols contains
-	 * symbols that are declared static and are private to their
-	 * .o files.  This prevents .tmp_kallsyms.o or any other
-	 * object from referencing them.
-	 */
-	output_label("kallsyms_addresses");
-	for (i = 0; i < table_cnt; i++) {
-		if (toupper(table[i].sym[0]) != 'A') {
-			if (_text <= table[i].addr)
-				printf("\tPTR\t_text + %#llx\n",
-					table[i].addr - _text);
-			else
-				printf("\tPTR\t_text - %#llx\n",
-					_text - table[i].addr);
-		} else {
-			printf("\tPTR\t%#llx\n", table[i].addr);
-		}
-	}
-	printf("\n");
-
 	output_label("kallsyms_num_syms");
-	printf("\tPTR\t%d\n", table_cnt);
+	printf("\t.long\t%u\n", table_cnt);
 	printf("\n");
 
 	/* table of offset markers, that give the offset in the compressed stream
 	 * every 256 symbols */
-	markers = malloc(sizeof(unsigned int) * ((table_cnt + 255) / 256));
-	if (!markers) {
-		fprintf(stderr, "kallsyms failure: "
-			"unable to allocate required memory\n");
-		exit(EXIT_FAILURE);
-	}
+	markers_cnt = (table_cnt + 255) / 256;
+	markers = xmalloc(sizeof(*markers) * markers_cnt);
 
 	output_label("kallsyms_names");
+	bin_start = bin_pos(out_bin_file);
 	off = 0;
 	for (i = 0; i < table_cnt; i++) {
 		if ((i & 0xFF) == 0)
 			markers[i >> 8] = off;
+		table[i]->seq = i;
 
-		printf("\t.byte 0x%02x", table[i].len);
-		for (k = 0; k < table[i].len; k++)
-			printf(", 0x%02x", table[i].sym[k]);
-		printf("\n");
+		/* There cannot be any symbol of length zero. */
+		if (table[i]->len == 0) {
+			fprintf(stderr, "kallsyms failure: "
+				"unexpected zero symbol length\n");
+			exit(EXIT_FAILURE);
+		}
 
-		off += table[i].len + 1;
+		/* Only lengths that fit in up-to-two-byte ULEB128 are supported. */
+		if (table[i]->len > 0x3FFF) {
+			fprintf(stderr, "kallsyms failure: "
+				"unexpected huge symbol length\n");
+			exit(EXIT_FAILURE);
+		}
+
+		/* Encode length with ULEB128. */
+		if (table[i]->len <= 0x7F) {
+			/* Most symbols use a single byte for the length. */
+			fputc(table[i]->len, out_bin_file);
+			off += table[i]->len + 1;
+		} else {
+			/* "Big" symbols use two bytes. */
+			fputc((table[i]->len & 0x7F) | 0x80, out_bin_file);
+			fputc((table[i]->len >> 7) & 0x7F, out_bin_file);
+			off += table[i]->len + 2;
+		}
+		fwrite(table[i]->sym, 1, table[i]->len, out_bin_file);
+
+		/*
+		 * Now that we wrote out the compressed symbol name, restore the
+		 * original name for the comments below.
+		 */
+		expand_symbol(table[i]->sym, table[i]->len, buf);
+		strcpy((char *)table[i]->sym, buf);
 	}
+	write_incbin(out_bin_name, bin_start, bin_pos(out_bin_file));
+	printf(".size kallsyms_names, . - kallsyms_names\n");
 	printf("\n");
 
 	output_label("kallsyms_markers");
-	for (i = 0; i < ((table_cnt + 255) >> 8); i++)
-		printf("\tPTR\t%d\n", markers[i]);
+	for (i = 0; i < markers_cnt; i++)
+		printf("\t.long\t%u\n", markers[i]);
+	printf(".size kallsyms_markers, . - kallsyms_markers\n");
 	printf("\n");
 
 	free(markers);
 
 	output_label("kallsyms_token_table");
+	bin_start = bin_pos(out_bin_file);
 	off = 0;
 	for (i = 0; i < 256; i++) {
 		best_idx[i] = off;
 		expand_symbol(best_table[i], best_table_len[i], buf);
-		printf("\t.asciz\t\"%s\"\n", buf);
+		fwrite(buf, 1, strlen(buf) + 1, out_bin_file);
 		off += strlen(buf) + 1;
 	}
+	write_incbin(out_bin_name, bin_start, bin_pos(out_bin_file));
+	printf(".size kallsyms_token_table, . - kallsyms_token_table\n");
 	printf("\n");
 
 	output_label("kallsyms_token_index");
 	for (i = 0; i < 256; i++)
 		printf("\t.short\t%d\n", best_idx[i]);
 	printf("\n");
+
+	output_label("kallsyms_offsets");
+
+	for (i = 0; i < table_cnt; i++) {
+		if (pc_relative) {
+			long long offset = table[i]->addr - _text;
+
+			if (offset < INT_MIN || offset > INT_MAX) {
+				fprintf(stderr, "kallsyms failure: "
+					"relative symbol value %#llx out of range\n",
+					table[i]->addr);
+				exit(EXIT_FAILURE);
+			}
+			printf("\t.long\t_text - . + (%d)\t/* %s */\n",
+			       (int)offset, table[i]->sym);
+		} else {
+			printf("\t.long\t%#x\t/* %s */\n",
+			       (unsigned int)table[i]->addr, table[i]->sym);
+		}
+	}
+	printf(".size kallsyms_offsets, . - kallsyms_offsets\n");
+	printf("\n");
+
+	sort_symbols_by_name();
+	output_label("kallsyms_seqs_of_names");
+	bin_start = bin_pos(out_bin_file);
+	for (i = 0; i < table_cnt; i++) {
+		fputc(table[i]->seq >> 16, out_bin_file);
+		fputc(table[i]->seq >> 8, out_bin_file);
+		fputc(table[i]->seq >> 0, out_bin_file);
+	}
+	write_incbin(out_bin_name, bin_start, bin_pos(out_bin_file));
+	printf("\n");
 }
 
+static unsigned int token_index(unsigned char first, unsigned char second)
+{
+	return first + (second << 8);
+}
+
+static unsigned int sym_token_index(const unsigned char *symbol, int first_idx)
+{
+	return token_index(symbol[first_idx], symbol[first_idx + 1]);
+}
 
 /* table lookup compression functions */
 
 /* count all the possible tokens in a symbol */
-static void learn_symbol(unsigned char *symbol, int len)
+static void learn_symbol(const unsigned char *symbol, int len)
 {
 	int i;
 
 	for (i = 0; i < len - 1; i++)
-		token_profit[ symbol[i] + (symbol[i + 1] << 8) ]++;
+		token_profit[sym_token_index(symbol, i)]++;
 }
 
 /* decrease the count for all the possible tokens in a symbol */
-static void forget_symbol(unsigned char *symbol, int len)
+static void forget_symbol(const unsigned char *symbol, int len)
 {
 	int i;
 
 	for (i = 0; i < len - 1; i++)
-		token_profit[ symbol[i] + (symbol[i + 1] << 8) ]--;
+		token_profit[sym_token_index(symbol, i)]--;
 }
 
-/* remove all the invalid symbols from the table and do the initial token count */
-static void build_initial_tok_table(void)
+static void token_add_symbol(unsigned int token_idx, unsigned int sym_idx)
 {
-	unsigned int i, pos;
+	struct sym_arr *arr = &token_syms[token_idx];
 
-	pos = 0;
-	for (i = 0; i < table_cnt; i++) {
-		if ( symbol_valid(&table[i]) ) {
-			if (pos != i)
-				table[pos] = table[i];
-			learn_symbol(table[pos].sym, table[pos].len);
-			pos++;
-		}
-	}
-	table_cnt = pos;
+	/* Symbol indexes kept in sorted order, check for duplicate. */
+	if (sym_arr_last(arr) == sym_idx)
+		return;
+
+	sym_arr_add(arr, sym_idx);
 }
 
-static void *find_token(unsigned char *str, int len, unsigned char *token)
+static void symbol_index_all_tokens(const unsigned char *symbol, int len,
+				    unsigned int sym_idx)
+{
+	int i;
+
+	for (i = 0; i < len - 1; i++) {
+		const unsigned int token_idx = sym_token_index(symbol, i);
+
+		token_add_symbol(token_idx, sym_idx);
+	}
+}
+
+/*
+ * The symbol just got compressed. The only parts of the symbol that changed
+ * meaningfully are those containing the newly assigned compressed char, so
+ * index those.
+ */
+static void symbol_index_new_tokens(const unsigned char *symbol, int len,
+				    unsigned int sym_idx, int compressed_chr)
+{
+	int i;
+
+	for (i = 0; i < len - 1; i++) {
+		const unsigned int token_idx = sym_token_index(symbol, i);
+
+		if (symbol[i] == compressed_chr ||
+		    symbol[i + 1] == compressed_chr)
+			token_add_symbol(token_idx, sym_idx);
+	}
+}
+
+static void build_initial_token_table(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < table_cnt; i++)
+		learn_symbol(table[i]->sym, table[i]->len);
+
+	/*
+	 * The initial occurrence counts tell us exactly how much memory should
+	 * be reserved for each token's symbol array.
+	 */
+	for (i = 0; i < ARRAY_SIZE(token_syms); i++) {
+		const int nr_syms = token_profit[i];
+
+		if (!nr_syms)
+			continue;
+
+		token_syms[i].cap = nr_syms;
+		token_syms[i].sym_indexes =
+			xmalloc(nr_syms * sizeof(unsigned int));
+	}
+
+	/* For every symbol, index every token -> symbol it is present in. */
+	for (i = 0; i < table_cnt; i++)
+		symbol_index_all_tokens(table[i]->sym, table[i]->len, i);
+}
+
+static unsigned char *find_token(unsigned char *str, int len,
+				 const unsigned char *token)
 {
 	int i;
 
@@ -427,27 +630,31 @@ static void *find_token(unsigned char *str, int len, unsigned char *token)
 
 /* replace a given token in all the valid symbols. Use the sampled symbols
  * to update the counts */
-static void compress_symbols(unsigned char *str, int idx)
+static void compress_symbols(const unsigned char *str, int compressed_chr)
 {
-	unsigned int i, len, size;
+	const unsigned int token_idx = sym_token_index(str, 0);
+	struct sym_arr *arr = &token_syms[token_idx];
+	unsigned int sym_idx, j, len, size;
 	unsigned char *p1, *p2;
 
-	for (i = 0; i < table_cnt; i++) {
+	/* Iterate through all symbols this token is found in and compress. */
+	for (j = 0; j < arr->cnt; j++) {
+		sym_idx = arr->sym_indexes[j];
 
-		len = table[i].len;
-		p1 = table[i].sym;
+		len = table[sym_idx]->len;
+		p1 = table[sym_idx]->sym;
 
 		/* find the token on the symbol */
 		p2 = find_token(p1, len, str);
 		if (!p2) continue;
 
 		/* decrease the counts for this symbol's tokens */
-		forget_symbol(table[i].sym, len);
+		forget_symbol(table[sym_idx]->sym, len);
 
 		size = len;
 
 		do {
-			*p2 = idx;
+			*p2 = compressed_chr;
 			p2++;
 			size -= (p2 - p1);
 			memmove(p2, p2 + 1, size);
@@ -461,11 +668,15 @@ static void compress_symbols(unsigned char *str, int idx)
 
 		} while (p2);
 
-		table[i].len = len;
+		table[sym_idx]->len = len;
 
 		/* increase the counts for this symbol's new tokens */
-		learn_symbol(table[i].sym, len);
+		learn_symbol(table[sym_idx]->sym, len);
+		symbol_index_new_tokens(table[sym_idx]->sym, len, sym_idx,
+					compressed_chr);
 	}
+
+	sym_arr_free(arr); /* No symbol contains this token any more. */
 }
 
 /* search the token with the maximum profit */
@@ -476,7 +687,7 @@ static int find_best_token(void)
 	bestprofit=-10000;
 	best = 0;
 
-	for (i = 0; i < 0x10000; i++) {
+	for (i = 0; i < ARRAY_SIZE(token_profit); i++) {
 		if (token_profit[i] > bestprofit) {
 			best = i;
 			bestprofit = token_profit[i];
@@ -498,7 +709,7 @@ static void optimize_result(void)
 		 * original char code */
 		if (!best_table_len[i]) {
 
-			/* find the token with the breates profit value */
+			/* find the token with the best profit value */
 			best = find_best_token();
 			if (token_profit[best] == 0)
 				break;
@@ -519,12 +730,9 @@ static void insert_real_symbols_in_table(void)
 {
 	unsigned int i, j, c;
 
-	memset(best_table, 0, sizeof(best_table));
-	memset(best_table_len, 0, sizeof(best_table_len));
-
 	for (i = 0; i < table_cnt; i++) {
-		for (j = 0; j < table[i].len; j++) {
-			c = table[i].sym[j];
+		for (j = 0; j < table[i]->len; j++) {
+			c = table[i]->sym[j];
 			best_table[c][0]=c;
 			best_table_len[c]=1;
 		}
@@ -533,15 +741,9 @@ static void insert_real_symbols_in_table(void)
 
 static void optimize_token_table(void)
 {
-	build_initial_tok_table();
+	build_initial_token_table();
 
 	insert_real_symbols_in_table();
-
-	/* When valid symbol is not registered, exit to error */
-	if (!table_cnt) {
-		fprintf(stderr, "No valid symbol.\n");
-		exit(1);
-	}
 
 	optimize_result();
 }
@@ -549,7 +751,7 @@ static void optimize_token_table(void)
 /* guess for "linker script provide" symbol */
 static int may_be_linker_script_provide_symbol(const struct sym_entry *se)
 {
-	const char *symbol = (char *)se->sym + 1;
+	const char *symbol = sym_entry_name(se);
 	int len = se->len - 1;
 
 	if (len < 8)
@@ -581,24 +783,11 @@ static int may_be_linker_script_provide_symbol(const struct sym_entry *se)
 	return 0;
 }
 
-static int prefix_underscores_count(const char *str)
-{
-	const char *tail = str;
-
-	while (*tail == '_')
-		tail++;
-
-	return tail - str;
-}
-
 static int compare_symbols(const void *a, const void *b)
 {
-	const struct sym_entry *sa;
-	const struct sym_entry *sb;
+	const struct sym_entry *sa = *(const struct sym_entry **)a;
+	const struct sym_entry *sb = *(const struct sym_entry **)b;
 	int wa, wb;
-
-	sa = a;
-	sb = b;
 
 	/* sort by address first */
 	if (sa->addr > sb->addr)
@@ -619,43 +808,86 @@ static int compare_symbols(const void *a, const void *b)
 		return wa - wb;
 
 	/* sort by the number of prefix underscores */
-	wa = prefix_underscores_count((const char *)sa->sym + 1);
-	wb = prefix_underscores_count((const char *)sb->sym + 1);
+	wa = strspn(sym_entry_name(sa), "_");
+	wb = strspn(sym_entry_name(sb), "_");
 	if (wa != wb)
 		return wa - wb;
 
 	/* sort by initial order, so that other symbols are left undisturbed */
-	return sa->start_pos - sb->start_pos;
+	return sa->seq - sb->seq;
 }
 
 static void sort_symbols(void)
 {
-	qsort(table, table_cnt, sizeof(struct sym_entry), compare_symbols);
+	qsort(table, table_cnt, sizeof(table[0]), compare_symbols);
 }
 
 int main(int argc, char **argv)
 {
-	if (argc >= 2) {
-		int i;
-		for (i = 1; i < argc; i++) {
-			if(strcmp(argv[i], "--all-symbols") == 0)
-				all_symbols = 1;
-			else if (strncmp(argv[i], "--symbol-prefix=", 16) == 0) {
-				char *p = &argv[i][16];
-				/* skip quote */
-				if ((*p == '"' && *(p+2) == '"') || (*p == '\'' && *(p+2) == '\''))
-					p++;
-				symbol_prefix_char = *p;
-			} else
-				usage();
-		}
-	} else if (argc != 1)
+	const char *in, *sysmap = NULL, *out_bin_name;
+	FILE *sysmap_out = NULL, *out_bin_file;
+
+	while (1) {
+		static const struct option long_options[] = {
+			{"all-symbols",     no_argument, &all_symbols,     1},
+			{"pc-relative",     no_argument, &pc_relative,     1},
+			{"sysmap",    required_argument, NULL,           's'},
+			{},
+		};
+
+		int c = getopt_long(argc, argv, "", long_options, NULL);
+
+		if (c == -1)
+			break;
+		if (c == 's')
+			sysmap = optarg;
+		else if (c != 0)
+			usage();
+	}
+
+	if (optind + 2 != argc && !(sysmap && optind + 1 == argc))
 		usage();
 
-	read_map(stdin);
+	in = argv[optind];
+	if (sysmap) {
+		sysmap_out = fopen(sysmap, "w");
+		if (!sysmap_out) {
+			perror(sysmap);
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	if (optind + 1 == argc) {
+		read_elf(in, sysmap_out);
+		if (ferror(sysmap_out) || fclose(sysmap_out)) {
+			perror(sysmap);
+			exit(EXIT_FAILURE);
+		}
+		return 0;
+	}
+
+	out_bin_name = argv[optind + 1];
+	out_bin_file = fopen(out_bin_name, "w");
+	if (!out_bin_file) {
+		perror(out_bin_name);
+		exit(EXIT_FAILURE);
+	}
+
+	read_elf(in, sysmap_out);
+	if (sysmap_out && (ferror(sysmap_out) || fclose(sysmap_out))) {
+		perror(sysmap);
+		exit(EXIT_FAILURE);
+	}
+	shrink_table();
 	sort_symbols();
 	optimize_token_table();
-	write_src();
+	write_src(out_bin_file, out_bin_name);
+
+	/* Write errors are latched in the stream, so one check at the end covers them all. */
+	if (ferror(out_bin_file) || fclose(out_bin_file)) {
+		perror(out_bin_name);
+		exit(EXIT_FAILURE);
+	}
 
 	return 0;
 }
